@@ -1,7 +1,7 @@
 {
   "name": "@240xu/dsh-message-ops",
   "version": "0.2.2",
-  "description": "DSH web plugin: message rollback + delete + branch + Markdown export + restore-replay + a message_ops agent tool, in one plugin. Revert/delete use DSH-native surface replace (append-only, recoverable); branch forks a session from any message into a new session with parentSession linkage. Zero npm dependencies (node:zlib zstd) — Windows / Termux / Linux alike.",
+  "description": "Roll back, branch, and export any DSH conversation — from the UI or straight from the agent via a message_ops tool. Non-destructive: logs stay append-only and recoverable. 消息回滚/删除/分支/导出四合一，内置 message_ops agent 工具；非破坏语义，日志只追加可恢复。",
   "type": "module",
   "license": "MIT",
   "author": "240xu",
