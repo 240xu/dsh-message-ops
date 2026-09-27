@@ -1,0 +1,216 @@
+/**
+ * dsh-message-ops — 新功能零依赖测试（node --test）。
+ * 覆盖：export Markdown、restore 重放规划/落定、message_ops 工具构造与
+ * 容错注册（缺 tools 服务 / 缺 dsh-tools 包均不 fatal）。
+ */
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+const { OpsError, planRestore, applyRestore, exportMarkdown, messageText } =
+  await import('../src/ops-core.js')
+const { createMessageOpsTool, apply } = await import('../src/index.js')
+
+function msg(type, seq, text, role) {
+  return {
+    type, seq, time: Date.now(), surfaceOp: 'append',
+    data: { turn: 1, message: { role: role || (type === 'user/message' ? 'user' : 'assistant'), content: [{ type: 'text', text }] } },
+  }
+}
+
+function sampleEvents() {
+  return [
+    msg('user/message', 0, '第一问'),
+    msg('assistant/message', 1, '第一答'),
+    { type: 'tool/call', seq: 2, data: { name: 'bash', call: { name: 'bash', arguments: { command: 'ls' } } } },
+    msg('user/message', 3, '第二问'),
+    msg('assistant/message', 4, '第二答'),
+    // 一次 revert 落定：遮蔽 3..4，sourceEventSeqs 覆盖被遮蔽节点
+    {
+      type: 'system/message', seq: 5, time: Date.now(),
+      surfaceOp: { op: 'replace', startSeq: 3, endSeq: 4 },
+      sourceEventSeqs: [3, 4],
+      data: { message: { role: 'system', content: [{ type: 'text', text: '[消息回滚] 已回滚到 seq 3（含）之后的 2 个节点' }] } },
+    },
+  ]
+}
+
+const header = { type: 'session', version: 3, id: 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', createdAt: 1, cwd: '/tmp/x' }
+
+// --- exportMarkdown ----------------------------------------------------------
+
+test('exportMarkdown：消息按角色小节展开，工具调用折叠为单行', () => {
+  const md = exportMarkdown(header, sampleEvents())
+  assert.match(md, /^# DSH 会话导出：session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/m)
+  assert.match(md, /## \[seq 0\] user\n\n第一问/)
+  assert.match(md, /## \[seq 1\] assistant\n\n第一答/)
+  // 工具调用是单行引用，且含参数提示
+  const toolLines = md.split('\n').filter((l) => l.startsWith('> [seq 2]'))
+  assert.equal(toolLines.length, 1)
+  assert.match(toolLines[0], /🔧 工具调用：bash/)
+  assert.match(toolLines[0], /command/)
+  // revert 标记本身是 system 消息，也展开
+  assert.match(md, /## \[seq 5\] system/)
+})
+
+test('exportMarkdown：seq 上界只导出 ≤ 上界的事件', () => {
+  const md = exportMarkdown(header, sampleEvents(), 1)
+  assert.match(md, /seq ≤ 1/)
+  assert.match(md, /第一问/)
+  assert.doesNotMatch(md, /第二问/)
+  assert.doesNotMatch(md, /工具调用：bash/)
+})
+
+test('exportMarkdown：非法 seq 抛 OpsError(400)', () => {
+  assert.throws(() => exportMarkdown(header, sampleEvents(), -1), (e) => e instanceof OpsError && e.status === 400)
+  assert.throws(() => exportMarkdown(header, sampleEvents(), 1.5), OpsError)
+})
+
+// --- planRestore / applyRestore ----------------------------------------------
+
+test('planRestore：从 revert 标记事件规划重放（含 user/assistant，跳过 tool）', () => {
+  const plan = planRestore(sampleEvents(), 5)
+  assert.equal(plan.startSeq, 3)
+  assert.equal(plan.endSeq, 4)
+  assert.equal(plan.replayable.length, 2)
+  assert.equal(plan.skipped, 0)
+  assert.deepEqual(plan.replayable.map((r) => [r.role, r.seq, r.text]), [
+    ['user', 3, '第二问'],
+    ['assistant', 4, '第二答'],
+  ])
+})
+
+test('planRestore：兼容 start/end 拼写（dsh-src 较新引擎形状）', () => {
+  const events = [
+    msg('user/message', 0, 'a'),
+    { type: 'system/message', seq: 1, surfaceOp: { op: 'replace', start: 0, end: 0 }, sourceEventSeqs: [0] },
+  ]
+  const plan = planRestore(events, 1)
+  assert.equal(plan.startSeq, 0)
+  assert.equal(plan.replayable[0].text, 'a')
+})
+
+test('planRestore：非标记事件 / 越界 seq / 无可重放消息 均拒绝', () => {
+  const events = sampleEvents()
+  assert.throws(() => planRestore(events, 99), (e) => e instanceof OpsError && e.status === 404)
+  assert.throws(() => planRestore(events, 0), (e) => e instanceof OpsError && e.status === 409) // 普通消息非标记
+  assert.throws(() => planRestore(events, -1), (e) => e instanceof OpsError && e.status === 400)
+  // 区间内只有 tool 事件 → 无可重放
+  const onlyTool = [
+    { type: 'tool/call', seq: 0, data: { name: 'bash' } },
+    { type: 'system/message', seq: 1, surfaceOp: { op: 'replace', startSeq: 0, endSeq: 0 }, sourceEventSeqs: [0] },
+  ]
+  assert.throws(() => planRestore(onlyTool, 1), (e) => e instanceof OpsError && e.status === 409)
+})
+
+test('applyRestore：重放 append 带 [恢复] 前缀 + system 说明，flush 被调用', () => {
+  const appended = []
+  let seq = 10
+  const session = {
+    append(type, data, opts) {
+      const event = { seq: seq++, type, data, opts }
+      appended.push(event)
+      return event
+    },
+  }
+  const plan = planRestore(sampleEvents(), 5)
+  let flushed = 0
+  const result = applyRestore(session, plan, { flush: () => flushed++ })
+  assert.equal(flushed, 1)
+  assert.equal(result.restoredCount, 2)
+  assert.equal(result.skipped, 0)
+  assert.equal(appended.length, 3)
+  assert.equal(appended[0].type, 'system/message')
+  assert.match(appended[0].data.message.content[0].text, /\[消息恢复\] 重放 seq 3\.\.4 的 2 条消息/)
+  assert.equal(appended[1].type, 'user/message')
+  assert.equal(appended[1].data.message.content[0].text, '[恢复] 第二问')
+  assert.equal(appended[2].data.message.content[0].text, '[恢复] 第二答')
+  for (const a of appended) assert.equal(a.opts.surfaceOp, 'append')
+})
+
+test('messageText：数组 content 提取首个非空 text；data.content 兼容', () => {
+  assert.equal(messageText(msg('user/message', 0, 'hi')), 'hi')
+  assert.equal(messageText({ type: 'user/message', data: { content: [{ type: 'text', text: 'legacy' }] } }), 'legacy')
+  assert.equal(messageText({ type: 'user/message', data: {} }), '')
+})
+
+// --- message_ops 工具（桩 defineTool + 桩 ops） --------------------------------
+
+function stubDefineTool(def) {
+  def.__compiled = true
+  return def
+}
+
+test('createMessageOpsTool：defineTool 桩拿到 name/parameters/execute，execute 分发到 ops', async () => {
+  const calls = []
+  const ops = {
+    list: (ctx, id) => { calls.push(['list', id]); return { ok: true, session: { id }, running: false, total: 0, visibleCount: 0, messages: [] } },
+    revert: (ctx, id, seq) => { calls.push(['revert', id, seq]); return { mode: 'revert', seq, shadowedCount: 2, eventSeq: 9 } },
+  }
+  const tool = createMessageOpsTool({ defineTool: stubDefineTool, ops, ctx: {} })
+  assert.equal(tool.name, 'message_ops')
+  assert.ok(tool.__compiled)
+  assert.equal(tool.parameters.action.enum.length, 6)
+  assert.ok(tool.parameters.sessionId.required)
+  const out = await tool.execute({ action: 'list', sessionId: 'session-x' })
+  assert.match(out, /session session-x/)
+  const out2 = await tool.execute({ action: 'revert', sessionId: 'session-x', seq: 3 })
+  assert.match(out2, /revert ok: shadowed 2 node\(s\) from seq 3; marker event seq 9/)
+  assert.deepEqual(calls[1], ['revert', 'session-x', 3])
+})
+
+test('createMessageOpsTool：execute 捕获 OpsError 为失败文本而非抛出', async () => {
+  const ops = { delete: () => { throw new OpsError('seq 3 not visible on current surface', 409) } }
+  const tool = createMessageOpsTool({ defineTool: stubDefineTool, ops, ctx: {} })
+  const out = await tool.execute({ action: 'delete', sessionId: 'session-x', seq: 3 })
+  assert.match(out, /^delete failed: seq 3 not visible/)
+})
+
+// --- index.js apply：工具注册容错（不 fatal） ----------------------------------
+
+function mockCtx({ tools, webServer } = {}) {
+  const registrations = []
+  const injects = []
+  const host = { register: (route) => registrations.push(route) }
+  return {
+    registrations, injects, host,
+    get(key) {
+      if (key === 'webServer') return webServer === undefined ? undefined : webServer
+      if (key === 'tools') return tools
+      return undefined
+    },
+    inject(deps, fn) { injects.push([deps, fn]) },
+    effect(fn) { return fn() },
+  }
+}
+
+test('apply：无 webServer、无 tools 时走 inject 等待，不抛错', () => {
+  const ctx = mockCtx()
+  assert.doesNotThrow(() => apply(ctx))
+  assert.deepEqual(ctx.injects.map((i) => i[0]), [['webServer'], ['tools']])
+  assert.equal(ctx.registrations.length, 0)
+})
+
+test('apply：webServer 存在时注册全部 6 条路由；tools 缺失走 inject 等待', () => {
+  const ctx = mockCtx({ webServer: { register: (route) => ctx.registrations.push(route) } })
+  assert.doesNotThrow(() => apply(ctx))
+  const paths = ctx.registrations.map((r) => r.path).sort()
+  assert.deepEqual(paths, [
+    '/api/message-ops/branch',
+    '/api/message-ops/delete',
+    '/api/message-ops/export',
+    '/api/message-ops/messages',
+    '/api/message-ops/restore',
+    '/api/message-ops/revert',
+  ])
+  // tools 缺失 → 容错等待而非 fatal
+  assert.ok(ctx.injects.some(([deps]) => deps[0] === 'tools'))
+})
+
+test('apply：tools 服务存在时直接进入注册路径（包缺失时 catch 静默跳过）', () => {
+  const registered = []
+  const ctx = mockCtx({ webServer: { register: () => {} }, tools: { register: (t) => registered.push(t) } })
+  assert.doesNotThrow(() => apply(ctx))
+  // 动态 import('@deepseek-ai/dsh-tools') 在本测试环境不可解析 → 工具跳过，
+  // 但绝不能让插件 apply 抛错；异步分支也不能产生未处理拒绝。
+  assert.equal(registered.length, 0)
+})

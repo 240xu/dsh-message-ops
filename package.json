@@ -1,23 +1,32 @@
 {
   "name": "@240xu/dsh-message-ops",
-  "version": "0.1.0",
-  "description": "DSH web plugin: message rollback + message delete + message branch in one plugin. Revert/delete use DSH-native surface replace (append-only, recoverable); branch forks a session from any message into a new session with parentSession linkage. Zero npm dependencies (node:zlib zstd) — Windows / Termux / Linux alike.",
+  "version": "0.2.0",
+  "description": "DSH web plugin: message rollback + delete + branch + Markdown export + restore-replay + a message_ops agent tool, in one plugin. Revert/delete use DSH-native surface replace (append-only, recoverable); branch forks a session from any message into a new session with parentSession linkage. Zero npm dependencies (node:zlib zstd) — Windows / Termux / Linux alike.",
   "type": "module",
   "license": "MIT",
   "author": "240xu",
-  "keywords": ["dsh-plugin"],
+  "keywords": [
+    "dsh-plugin"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/240xu/dsh-message-ops.git"
   },
-  "files": ["src/", "test/", "cordis.patch.yml", "README.md", "LICENSE"],
+  "files": [
+    "src/",
+    "test/",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
     "./client": "./src/client.js",
     "./session-file": "./src/session-file.js",
     "./branch": "./src/branch.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./ops-core": "./src/ops-core.js"
   },
   "engines": {
     "node": ">=23.5"
@@ -34,6 +43,9 @@
     }
   },
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test \"test/*.test.js\""
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
   }
 }
