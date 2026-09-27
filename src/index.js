@@ -20,10 +20,11 @@
  * @module dsh-message-ops
  */
 
-import { isSessionId, sessionIdVariants, findSessionDirs, readSessionFile, listMessages, computeShadowed } from "./session-file.js";
+import { isSessionId, sessionIdVariants, findSessionDirs, readSessionFile, readSessionFileAsync, listMessages, computeShadowed } from "./session-file.js";
 import { applyBranch } from "./branch.js";
 import {
   OpsError, planRevert, planDelete, planRestore, applyRestore, applySurfaceReplace, exportMarkdown,
+  isTrustedApiRequest, isJsonContentType,
 } from "./ops-core.js";
 
 export const name = "dsh-message-ops";
@@ -38,12 +39,47 @@ function sendJson(res, status, body) {
   res.end(payload);
 }
 
+const MAX_BODY_BYTES = 1024 * 1024; // 评审 P2：无上限的 body 缓存可打爆进程
+
 async function readJsonBody(req) {
   const chunks = [];
-  for await (const c of req) chunks.push(c);
+  let total = 0;
+  for await (const c of req) {
+    total += c.length;
+    if (total > MAX_BODY_BYTES) throw new OpsError("request body too large", 413);
+    chunks.push(c);
+  }
   if (chunks.length === 0) return {};
   try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
   catch { return null; }
+}
+
+/** 统一入口围栏：全部 /api/message-ops/* 路由先过这一层。 */
+function fence(req, res) {
+  if (!isTrustedApiRequest(req)) {
+    sendJson(res, 403, { ok: false, error: "untrusted request origin (loopback Host + same-origin only)" });
+    return false;
+  }
+  return true;
+}
+
+/** 写操作围栏：入口信任 + Content-Type 必须 application/json（CSRF 纵深）。 */
+function writeFence(req, res) {
+  if (!fence(req, res)) return false;
+  if (!isJsonContentType(req)) {
+    sendJson(res, 415, { ok: false, error: "content-type must be application/json" });
+    return false;
+  }
+  return true;
+}
+
+/** POST body 读取（信任围栏之后）：413/400 语义区分。 */
+async function readFencedBody(req, res) {
+  try { return await readJsonBody(req); }
+  catch (err) {
+    sendJson(res, err instanceof OpsError ? err.status : 400, { ok: false, error: String(err && err.message ? err.message : err) });
+    return undefined;
+  }
 }
 
 /** 从 sessions 注册表解析（两种 id 拼写都试）。 */
@@ -81,11 +117,19 @@ function flushSessions(ctx, session) {
 // 核心操作：HTTP 与 message_ops 工具共用（返回普通对象，失败抛 OpsError）
 // ---------------------------------------------------------------------------
 
-function opsList(targetCtx, sessionId) {
-  if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
+/** 多 project slug 命中同一 id 时的静默 dirs[0] 是隐患（评审 P2）：显式报歧义。 */
+function pickSessionDir(sessionId) {
   const dirs = findSessionDirs(sessionId);
   if (dirs.length === 0) throw new OpsError("session log not found", 404);
-  const { header, events } = readSessionFile(dirs[0].logPath);
+  if (dirs.length > 1) throw new OpsError(`ambiguous session id: found in ${dirs.length} project slugs (${dirs.map((d) => d.dir).join(", ")})`, 409);
+  return dirs[0];
+}
+
+async function opsList(targetCtx, sessionId) {
+  if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
+  const { logPath } = pickSessionDir(sessionId);
+  // 大日志的逐帧解压走异步让出路径，避免阻塞 GUI 事件循环（评审 P1）。
+  const { header, events } = await readSessionFileAsync(logPath);
   const messages = listMessages(events);
   const shadowed = computeShadowed(events);
   const live = resolveSession(targetCtx, sessionId);
@@ -130,20 +174,18 @@ function opsBranch(targetCtx, sessionId, upToSeq) {
   if (isRunning(targetCtx, sessionId)) {
     throw new OpsError("session is running; stop it first (the log may be mid-append)", 409);
   }
-  const dirs = findSessionDirs(sessionId);
-  if (dirs.length === 0) throw new OpsError("session log not found", 404);
-  return { ok: true, ...applyBranch(dirs[0].logPath, upToSeq) };
+  const { logPath } = pickSessionDir(sessionId);
+  return { ok: true, ...applyBranch(logPath, upToSeq) };
 }
 
-function opsRestore(targetCtx, sessionId, restoreSeq) {
+async function opsRestore(targetCtx, sessionId, restoreSeq) {
   if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
   if (!Number.isSafeInteger(restoreSeq) || restoreSeq < 0) throw new OpsError("invalid seq", 400);
   if (isRunning(targetCtx, sessionId)) throw new OpsError("session is running; stop it first", 409);
   const session = resolveSession(targetCtx, sessionId);
   if (session === undefined) throw new OpsError("session not found in registry (is it loaded?)", 404);
-  const dirs = findSessionDirs(sessionId);
-  if (dirs.length === 0) throw new OpsError("session log not found", 404);
-  const { events } = readSessionFile(dirs[0].logPath);
+  const { logPath } = pickSessionDir(sessionId);
+  const { events } = await readSessionFileAsync(logPath);
   const plan = planRestore(events, restoreSeq);
   const result = applyRestore(session, plan, {
     flush: () => { flushSessions(targetCtx, session); },
@@ -151,13 +193,17 @@ function opsRestore(targetCtx, sessionId, restoreSeq) {
   return { ok: true, ...result, range: { startSeq: plan.startSeq, endSeq: plan.endSeq } };
 }
 
-function opsExport(targetCtx, sessionId, seq) {
+async function opsExport(targetCtx, sessionId, seq) {
   if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
   if (seq !== undefined && (!Number.isSafeInteger(seq) || seq < 0)) throw new OpsError("invalid seq", 400);
-  const dirs = findSessionDirs(sessionId);
-  if (dirs.length === 0) throw new OpsError("session log not found", 404);
-  const { header, events } = readSessionFile(dirs[0].logPath);
-  return { header, markdown: exportMarkdown(header, events, seq), upToSeq: seq };
+  const { logPath } = pickSessionDir(sessionId);
+  const { header, events, frameCount, partial } = await readSessionFileAsync(logPath);
+  let markdown = exportMarkdown(header, events, seq);
+  // 超阈值提示（partial 语义）：内容完整，仅告知本次解压耗时可能较长。
+  if (partial) {
+    markdown += `\n> 注：本日志共 ${frameCount} 个事件帧（超过 ${500} 帧阈值），本次导出已完整读取，但大日志解压耗时较长。\n`;
+  }
+  return { header, markdown, upToSeq: seq, frameCount, partial };
 }
 
 // ---------------------------------------------------------------------------
@@ -287,9 +333,10 @@ export function apply(ctx) {
       kind: "exact",
       path: "/api/message-ops/messages",
       handler: async (req, res) => {
+        if (!fence(req, res)) return;
         try {
           const url = new URL(req.url, "http://localhost");
-          return sendJson(res, 200, opsList(targetCtx, url.searchParams.get("sessionId") || ""));
+          return sendJson(res, 200, await opsList(targetCtx, url.searchParams.get("sessionId") || ""));
         } catch (err) {
           return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
         }
@@ -299,8 +346,10 @@ export function apply(ctx) {
     // --- POST revert / delete：live-session surface replace ------------------
     const commitHandler = (mode) => async (req, res) => {
       if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method not allowed" });
-      const body = await readJsonBody(req);
-      if (!body) return sendJson(res, 400, { ok: false, error: "invalid json" });
+      if (!writeFence(req, res)) return;
+      const body = await readFencedBody(req, res);
+      if (body === undefined) return;
+      if (!body || typeof body !== "object") return sendJson(res, 400, { ok: false, error: "invalid json" });
       try {
         return sendJson(res, 200, opsCommit(targetCtx, mode, body.sessionId, body.seq));
       } catch (err) {
@@ -322,8 +371,10 @@ export function apply(ctx) {
       path: "/api/message-ops/branch",
       handler: async (req, res) => {
         if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method not allowed" });
-        const body = await readJsonBody(req);
-        if (!body) return sendJson(res, 400, { ok: false, error: "invalid json" });
+        if (!writeFence(req, res)) return;
+        const body = await readFencedBody(req, res);
+        if (body === undefined) return;
+        if (!body || typeof body !== "object") return sendJson(res, 400, { ok: false, error: "invalid json" });
         try {
           return sendJson(res, 200, opsBranch(targetCtx, body.sessionId, body.upToSeq));
         } catch (err) {
@@ -338,10 +389,12 @@ export function apply(ctx) {
       path: "/api/message-ops/restore",
       handler: async (req, res) => {
         if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method not allowed" });
-        const body = await readJsonBody(req);
-        if (!body) return sendJson(res, 400, { ok: false, error: "invalid json" });
+        if (!writeFence(req, res)) return;
+        const body = await readFencedBody(req, res);
+        if (body === undefined) return;
+        if (!body || typeof body !== "object") return sendJson(res, 400, { ok: false, error: "invalid json" });
         try {
-          return sendJson(res, 200, opsRestore(targetCtx, body.sessionId, body.seq));
+          return sendJson(res, 200, await opsRestore(targetCtx, body.sessionId, body.seq));
         } catch (err) {
           return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
         }
@@ -353,12 +406,13 @@ export function apply(ctx) {
       kind: "exact",
       path: "/api/message-ops/export",
       handler: async (req, res) => {
+        if (!fence(req, res)) return;
         try {
           const url = new URL(req.url, "http://localhost");
           const sessionId = url.searchParams.get("sessionId") || "";
           const rawSeq = url.searchParams.get("seq");
           const seq = rawSeq === null || rawSeq === "" ? undefined : Number(rawSeq);
-          const { header, markdown, upToSeq } = opsExport(targetCtx, sessionId, seq);
+          const { header, markdown, upToSeq } = await opsExport(targetCtx, sessionId, seq);
           const suffix = upToSeq === undefined ? "full" : `seq-${upToSeq}`;
           res.writeHead(200, {
             "content-type": "text/markdown; charset=utf-8",

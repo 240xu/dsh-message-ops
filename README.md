@@ -44,6 +44,30 @@ dsh plugin --profile web add file:C:/path/to/dsh-message-ops
 | GET  | `/api/message-ops/export?sessionId=<id>&seq=<可选>` | 导出 Markdown（seq ≤ 上界，缺省全部），附件下载 |
 | POST | `/api/message-ops/restore` | `{sessionId, seq}` 回滚恢复：seq 为某次 revert/delete 标记事件的 seq |
 
+## 0.2.1 评审修复（架构评审 arch-review）
+
+- **P0 信任围栏**：全部 6 条 `/api/message-ops/*` 路由接入三层信任判定
+  （回环 Host 挡 DNS rebinding + `sec-fetch-site: cross-site` 拒绝 + Origin
+  同源校验），非回环/跨站请求一律 403。写操作（revert/delete/branch/restore）
+  另要求 `Content-Type: application/json`（text/plain 绕预检的洞 → 415）。
+  **为何不引入一次性 CSRF token**：浏览器对所有 POST（含 text/plain）都附带
+  Origin 头，Origin 同源校验已覆盖跨站 POST；自定义头天然触发预检、与 Origin
+  校验等价——token 只增加握手复杂度而不增加安全性，围栏已足够（论证见
+  `src/ops-core.js` 的 `isJsonContentType` 注释）。
+- **P1 写端 replace 拼写前向兼容**：`applySurfaceReplace` 写入时先按当前
+  运行时 `{startSeq,endSeq}` 形状写；若引擎报 `invalid replace surfaceOp`
+  （validateNext 在事件入 log 前抛出，无半写风险）自动降级 `{start,end}`
+  重试并记住拼写。当前与未来 dsh cohort 都不炸；读端双拼写兼容已统一收敛到
+  `session-file.readReplaceOp` 单点（computeShadowed / planRestore 共用）。
+- **P1 大日志让出**：新增 `readSessionFileAsync`，逐帧解压每 8 帧
+  `setImmediate` 让出事件循环；messages/export/restore 路由改走该路径。
+  帧数超过 500 阈值的 export 在 Markdown 末尾追加耗时提示（partial 语义，
+  内容完整无截断）。
+- **P2**：`readJsonBody` 加 1MB 上限（超限 413）；`findSessionDirs` 多
+  project slug 命中同一 id 时显式报 409 歧义而非静默取第一个；branch 产物
+  不进会话注册表——需刷新会话列表后才可见（此为宿主扫描行为，见 branch 命令
+  返回后请刷新列表）。
+
 ## 0.2.0 新增
 
 ### Agent 工具 `message_ops`

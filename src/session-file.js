@@ -166,17 +166,65 @@ export function listMessages(events) {
 }
 
 /**
+ * 读取一条 replace surfaceOp 的区间（共用单点，读写端拼写必须一致）。
+ * 兼容两种拼写：当前运行时 {op:'replace', startSeq, endSeq} 与
+ * dsh-src 较新副本的 {op:'replace', start, end}；其余视为非法返回 null。
+ */
+export function readReplaceOp(e) {
+  const op = e && e.surfaceOp;
+  if (!op || typeof op !== "object" || op.op !== "replace") return null;
+  const startSeq = Number.isSafeInteger(op.startSeq) ? op.startSeq : op.start;
+  const endSeq = Number.isSafeInteger(op.endSeq) ? op.endSeq : op.end;
+  if (!Number.isSafeInteger(startSeq) || !Number.isSafeInteger(endSeq)) return null;
+  return { startSeq, endSeq };
+}
+
+/**
  * 从磁盘事件流推导「被遮蔽」seq 集合：后来发生的 surface replace 事件
  * 遮蔽 [startSeq..endSeq]（append-only：遮蔽仍在日志但不再可见）。
  */
 export function computeShadowed(events) {
   const shadowed = new Set();
   for (const e of events) {
-    const op = e && e.surfaceOp;
-    if (!op || typeof op !== "object") continue;
-    if (op.op !== "replace") continue;
-    if (!Number.isSafeInteger(op.startSeq) || !Number.isSafeInteger(op.endSeq)) continue;
-    for (let s = op.startSeq; s <= op.endSeq; s++) shadowed.add(s);
+    const range = readReplaceOp(e);
+    if (!range) continue;
+    for (let s = range.startSeq; s <= range.endSeq; s++) shadowed.add(s);
   }
   return shadowed;
+}
+
+const yieldToLoop = () => new Promise((resolve) => setImmediate(resolve));
+
+/**
+ * readSessionFile 的异步变体：逐帧解压循环每 framesPerYield 帧向事件循环
+ * 让出一次（setImmediate），避免大日志把 GUI 的 tick 卡死数秒。
+ * 文件读取与帧边界扫描仍是同步单次系统调用/字节扫描（成本低）；真正昂贵
+ * 的 zstdDecompressSync + JSON.parse 在让出点之间执行。
+ * @returns {{header, events, frameCount, partial}}
+ *   partial：帧数超过 frameBudget（默认 500）时为 true，调用方应向
+ *   用户提示「仅完整读取，无截断，但本次请求耗时可能较长」。
+ */
+export async function readSessionFileAsync(file, { framesPerYield = 8, frameBudget = 500 } = {}) {
+  const buf = fs.readFileSync(file);
+  const { frames } = scanZstdFrames(buf);
+  if (frames.length === 0) throw new Error("empty or header-less session log");
+  const headerText = zstdDecompressSync(buf.subarray(frames[0].start, frames[0].end)).toString("utf8");
+  const header = JSON.parse(headerText.trim());
+  if (header.type !== "session") throw new Error("first frame is not a session header");
+  const events = [];
+  const bodyFrames = frames.slice(1);
+  let framesSinceYield = 0;
+  for (const f of bodyFrames) {
+    const text = zstdDecompressSync(buf.subarray(f.start, f.end)).toString("utf8");
+    for (const line of text.split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      try { events.push(JSON.parse(t)); } catch { /* torn record: skip */ }
+    }
+    if (++framesSinceYield >= framesPerYield) {
+      framesSinceYield = 0;
+      await yieldToLoop();
+    }
+  }
+  return { header, events, frameCount: bodyFrames.length, partial: bodyFrames.length > frameBudget };
 }

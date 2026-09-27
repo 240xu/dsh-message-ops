@@ -16,6 +16,8 @@
  * @module dsh-message-ops/ops-core
  */
 
+import { readReplaceOp } from "./session-file.js";
+
 /** 带语义状态码的操作错误（HTTP 直接映射，工具端转为失败文本）。 */
 export class OpsError extends Error {
   constructor(message, status = 400) {
@@ -56,17 +58,45 @@ export function planDelete(surface, seq) {
   return { startSeq: seq, endSeq: seq, shadowedSeqs: [seq] };
 }
 
+// 写端 replace 拼写（前向兼容雷，评审 P1）：当前运行时引擎
+// （@deepseek-ai/dsh-session/lib/types/surface.js 的 isReplaceOp）要求
+// {op:'replace', startSeq, endSeq} 且恰好 3 个键；dsh-src 较新副本已改名
+// {op:'replace', start, end}（同样恰好 3 个键）。写端做一次运行时探测：
+// 先按当前 cohort 的 startSeq/endSeq 形状写，若引擎报
+// "invalid replace surfaceOp"（validateNext 在事件入 log 前抛出，失败不落
+// 状态、无半写风险），降级用 {start,end} 重试一次并记住结果。读端
+// （readReplaceOp/computeShadowed/planRestore）两种拼写始终兼容。
+let replaceShape = null; // null=未探测 | "legacy"=startSeq/endSeq | "new"=start/end
+
+function replaceOpFor(shape, startSeq, endSeq) {
+  return shape === "new"
+    ? { op: "replace", start: startSeq, end: endSeq }
+    : { op: "replace", startSeq, endSeq };
+}
+
+/** 测试专用：重置写端拼写探测缓存。 */
+export function _resetReplaceShape() { replaceShape = null; }
+
 /**
  * surface replace 落定：append 一条承载 replace 的 system/message。
  * sourceEventSeqs 必须覆盖被遮蔽的全部 surface 节点（引擎
  * assertProvenance 强校验，缺失即抛错）。
  */
 export function applySurfaceReplace(session, startSeq, endSeq, sourceEventSeqs, noticeText) {
-  return session.append(
-    "system/message",
-    { message: { role: "system", content: [{ type: "text", text: noticeText }] } },
-    { surfaceOp: { op: "replace", startSeq, endSeq }, sourceEventSeqs },
-  );
+  const data = { message: { role: "system", content: [{ type: "text", text: noticeText }] } };
+  if (replaceShape) {
+    return session.append("system/message", data, { surfaceOp: replaceOpFor(replaceShape, startSeq, endSeq), sourceEventSeqs });
+  }
+  try {
+    const event = session.append("system/message", data, { surfaceOp: replaceOpFor("legacy", startSeq, endSeq), sourceEventSeqs });
+    replaceShape = "legacy";
+    return event;
+  } catch (err) {
+    if (!/invalid replace surfaceOp/.test(String(err && err.message))) throw err;
+    const event = session.append("system/message", data, { surfaceOp: replaceOpFor("new", startSeq, endSeq), sourceEventSeqs });
+    replaceShape = "new";
+    return event;
+  }
 }
 
 /**
@@ -81,16 +111,12 @@ export function planRestore(events, restoreSeq) {
   if (!Number.isSafeInteger(restoreSeq) || restoreSeq < 0) throw new OpsError("invalid seq", 400);
   const ev = events.find((e) => e && e.seq === restoreSeq);
   if (!ev) throw new OpsError(`restore: event seq ${restoreSeq} not found in log`, 404);
-  const op = ev.surfaceOp;
-  if (!op || typeof op !== "object" || op.op !== "replace") {
-    throw new OpsError(`restore: seq ${restoreSeq} is not a revert/delete marker event (no replace surfaceOp)`, 409);
+  // 读取端拼写统一走 session-file 的 readReplaceOp（双拼写兼容的单点）。
+  const range = readReplaceOp(ev);
+  if (!range) {
+    throw new OpsError(`restore: seq ${restoreSeq} is not a revert/delete marker event (no well-formed replace surfaceOp)`, 409);
   }
-  // 读取端兼容两种拼写：运行时 startSeq/endSeq（当前）与 start/end（dsh-src 较新副本）。
-  const startSeq = Number.isSafeInteger(op.startSeq) ? op.startSeq : op.start;
-  const endSeq = Number.isSafeInteger(op.endSeq) ? op.endSeq : op.end;
-  if (!Number.isSafeInteger(startSeq) || !Number.isSafeInteger(endSeq)) {
-    throw new OpsError(`restore: seq ${restoreSeq} carries a malformed replace surfaceOp`, 409);
-  }
+  const { startSeq, endSeq } = range;
   const replayable = [];
   let skipped = 0;
   for (const e of events) {
@@ -188,4 +214,56 @@ export function exportMarkdown(header, events, upToSeq) {
     }
   }
   return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// HTTP 信任围栏（评审 P0）：插件经 webServer.register 挂载的路由不经过宿主
+// connection RPC 面的 isTrustedApiRequest 围栏（dsh-src
+// packages/client/connection/src/api-request-trust.ts），必须自建。三层：
+//   1. Host 必须是回环地址 → 挡 DNS rebinding（伪造 Host 的攻击页直接 403）；
+//   2. sec-fetch-site: cross-site 拒绝 → 挡跨站浏览器请求；
+//   3. Origin 存在时必须与 Host 同源 → 挡其余跨站 POST/GET。
+// 非浏览器客户端（curl / Agent 工具 / 宿主自身）不带 sec-fetch-site 与
+// Origin，且 Host 均为回环 → 天然放行，无需 token。
+// ---------------------------------------------------------------------------
+
+function headerOf(headers, name) {
+  const value = headers && headers[name];
+  return typeof value === "string" ? value : undefined;
+}
+
+function parseAuthority(authority) {
+  try { return new URL(`http://${authority}`); } catch { return undefined; }
+}
+
+function isLoopbackHostname(hostname) {
+  if (hostname === "localhost" || hostname === "[::1]") return true;
+  const parts = hostname.split(".");
+  return parts.length === 4 && parts[0] === "127" && parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255);
+}
+
+/** 与 slv-check 同款的信任判定（回环 Host + 非 cross-site + Origin 同源）。 */
+export function isTrustedApiRequest(req) {
+  const host = headerOf(req && req.headers, "host");
+  if (host === undefined) return false;
+  const hostUrl = parseAuthority(host);
+  if (hostUrl === undefined) return false;
+  if (!isLoopbackHostname(hostUrl.hostname)) return false;
+  if (headerOf(req.headers, "sec-fetch-site") === "cross-site") return false;
+  const origin = headerOf(req.headers, "origin");
+  if (origin === undefined) return true;
+  try { return new URL(origin).host === hostUrl.host; } catch { return false; }
+}
+
+/**
+ * 写操作 CSRF 防护：Content-Type 必须 application/json（允许 ;charset=… 后缀）。
+ * 为何不需要一次性 token：浏览器对**所有** POST（含 text/plain 绕预检的
+ * 那条路）都会附带 Origin 头，第 3 层 Origin 同源校验已覆盖跨站 POST；
+ * Content-Type 约束是纵深防御（阻止非 JSON 客户端误写），而自定义头
+ * （如 X-Requested-With）天然触发 CORS 预检，与 Origin 校验等价，故
+ * 引入 token 只增加握手复杂度而不增加安全性——围栏已足够（论证记录于此）。
+ */
+export function isJsonContentType(req) {
+  const ct = headerOf(req && req.headers, "content-type") || "";
+  return ct.split(";")[0].trim().toLowerCase() === "application/json";
 }
