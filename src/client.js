@@ -37,6 +37,7 @@ window.__ModuleLoader__.load({
       'dialog.runningWarn': '⚠ 会话正在运行：请先停止该会话再执行回滚/删除/分支。',
       'dialog.pick': '选择一条消息：',
       'dialog.invisible': '（已遮蔽，仅日志可见）',
+      'dialog.showMore': '显示更多（剩余 {n} 条）',
       'dialog.more': '…（仅显示最近 200 条，共 {n} 条）',
       'op.revert': '回滚到此条（含）之后全部移除',
       'op.revertDesc': '遮蔽所选消息及其后所有可见内容；日志 append-only，可通过重新发送恢复语境。',
@@ -70,6 +71,7 @@ window.__ModuleLoader__.load({
       'dialog.runningWarn': '⚠ Session is running: stop it before revert / delete / branch.',
       'dialog.pick': 'Pick a message:',
       'dialog.invisible': ' (shadowed, log-only)',
+      'dialog.showMore': 'Show more ({n} older)',
       'dialog.more': '…(showing latest 200 of {n})',
       'op.revert': 'Revert: remove this message and everything after',
       'op.revertDesc': 'Shadows the picked message and all later visible content; the log stays append-only so context can be restored by re-sending.',
@@ -195,6 +197,7 @@ window.__ModuleLoader__.load({
     // --- 共享对话框 -------------------------------------------------------------
     // 模块级缓存最近一次 target，事件驱动打开。
     const MAX_RENDER = 200
+    const PAGE_SIZE = 50   // 低成本分批渲染：先渲 50 条，按钮渐进展开
 
     function OpsDialog(props) {
       const t = (props && props.t) || __t
@@ -207,6 +210,7 @@ window.__ModuleLoader__.load({
       const [mode, setMode] = useState(null)         // revert|delete|branch
       const [acknowledged, setAcknowledged] = useState(false)
       const [busyMsg, setBusyMsg] = useState('')
+      const [renderLimit, setRenderLimit] = useState(PAGE_SIZE) // 已展开的渲染条数
       const [doneMsg, setDoneMsg] = useState('')
       const [error, setError] = useState(null)
 
@@ -217,6 +221,7 @@ window.__ModuleLoader__.load({
           setState('loading')
           setMessages([]); setSessionMeta(null); setPicked(null)
           setMode(null); setAcknowledged(false); setError(null); setDoneMsg('')
+          setRenderLimit(PAGE_SIZE)
         }
         window.addEventListener(EVENT, handler)
         return () => window.removeEventListener(EVENT, handler)
@@ -301,8 +306,12 @@ window.__ModuleLoader__.load({
       if (!target) return null
 
       const visible = messages.filter((m) => m.visible !== false)
-      const shown = visible.slice(-MAX_RENDER)
-      const hiddenCount = visible.length - shown.length
+      const shownBase = visible.slice(-MAX_RENDER)
+      const hiddenCount = visible.length - shownBase.length
+      // 分批渲染（评审 M1）：只渲染 renderLimit 条，更早的留给「显示更多」
+      // 渐进展开，避免 200 行 radio 列表一次进 DOM。
+      const shown = shownBase.slice(-renderLimit)
+      const pagedCount = shownBase.length - shown.length
       const pickedMsg = picked != null ? messages.find((m) => m.seq === picked) : null
 
       let body
@@ -318,6 +327,13 @@ window.__ModuleLoader__.load({
             hiddenCount > 0
               ? React.createElement('div', { key: 'more', style: { ...rowStyle, cursor: 'default', color: 'var(--dsw-alias-label-secondary,#8a8a8e)' } },
                   t('dialog.more', { n: String(visible.length) }))
+              : null,
+            pagedCount > 0
+              ? React.createElement('button', {
+                  key: 'show-more', type: 'button',
+                  style: { ...rowStyle, border: 'none', width: '100%', color: 'var(--dsw-alias-label-secondary,#8a8a8e)', cursor: 'pointer' },
+                  onClick: () => setRenderLimit((l) => Math.min(l + PAGE_SIZE, MAX_RENDER)),
+                }, t('dialog.showMore', { n: String(pagedCount) }))
               : null,
             shown.map((m, i) => React.createElement('label', {
               key: m.seq + '-' + i, style: {
@@ -471,8 +487,34 @@ window.__ModuleLoader__.load({
       if (window.__dshMessageOpsSidebarInstalled) return
       window.__dshMessageOpsSidebarInstalled = true
       try { ensureSidebarOpsItem() } catch (e) { /* never crash the UI */ }
-      var observer = new MutationObserver(function () {
-        try { ensureSidebarOpsItem() } catch (e) { /* never crash the UI */ }
+      // 观察范围收窄（评审 M2）：仍需 observe document.body（会话行菜单由宿主
+      // React 动态渲染在侧栏任意挂载点，安装期无法锚定稳定容器），但回调改为
+      // 精确过滤——只有新增节点本身就是（或包含）[role=menu] 时才调度探测，
+      // 其余海量 childList mutation（聊天流渲染、流式 chunk 等）零探测成本；
+      // 同帧多次命中经 setTimeout 合并为一次探测。
+      var pending = false
+      function scheduleEnsure() {
+        if (pending) return
+        pending = true
+        setTimeout(function () {
+          pending = false
+          try { ensureSidebarOpsItem() } catch (e) { /* never crash the UI */ }
+        }, 0)
+      }
+      var observer = new MutationObserver(function (mutations) {
+        for (var i = 0; i < mutations.length; i++) {
+          var added = mutations[i].addedNodes
+          for (var j = 0; j < added.length; j++) {
+            var n = added[j]
+            if (n.nodeType !== 1) continue
+            var isMenu = false
+            try {
+              isMenu = (typeof n.matches === 'function' && n.matches('[role=menu]'))
+                || (typeof n.querySelector === 'function' && n.querySelector('[role=menu]') !== null)
+            } catch (e) { isMenu = false }
+            if (isMenu) { scheduleEnsure(); return }
+          }
+        }
       })
       observer.observe(document.body, { childList: true, subtree: true })
     }

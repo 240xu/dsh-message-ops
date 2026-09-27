@@ -44,6 +44,16 @@ dsh plugin --profile web add file:C:/path/to/dsh-message-ops
 | GET  | `/api/message-ops/export?sessionId=<id>&seq=<可选>` | 导出 Markdown（seq ≤ 上界，缺省全部），附件下载 |
 | POST | `/api/message-ops/restore` | `{sessionId, seq}` 回滚恢复：seq 为某次 revert/delete 标记事件的 seq |
 
+## 0.2.2 前端收尾（评审 M1/M2）
+
+- **M2 观察范围收窄**：侧栏行菜单注入的 `MutationObserver` 仍观察
+  `document.body`（菜单由宿主 React 动态渲染，安装期无稳定锚点），但回调改为
+  精确过滤——只有新增节点本身是（或包含）`[role=menu]` 时才调度探测；聊天流
+  渲染、流式 chunk 等海量 mutation 零探测成本；同帧多次命中合并为一次探测。
+- **M1 分批渲染**：消息列表先渲 50 条，顶部「显示更多（剩余 N 条）」按钮每次
+  渐进展开 50 条（上限仍为最近 200 条），避免 200 行单选列表一次性进 DOM；
+  打开新会话时分页重置。
+
 ## 0.2.1 评审修复（架构评审 arch-review）
 
 - **P0 信任围栏**：全部 6 条 `/api/message-ops/*` 路由接入三层信任判定
