@@ -1,0 +1,5 @@
+# dsh-message-ops bundle layer: inserts the plugin row. Row id stays stable so
+# re-adds and profile patches can target it.
+- insert:
+    - id: dsh-message-ops
+      name: '@240xu/dsh-message-ops'
