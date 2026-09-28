@@ -16,7 +16,11 @@
  * @module dsh-message-ops/ops-core
  */
 
-import { readReplaceOp } from "./session-file.js";
+import { readReplaceOp, messageText } from "./session-file.js";
+
+// messageText 的单点实现在 session-file.js（listMessages 同用）；此处转出保持
+// 既有导入面兼容（ops-core 的 messageText/exportMarkdown 调用方不受影响）。
+export { messageText };
 
 /** 带语义状态码的操作错误（HTTP 直接映射，工具端转为失败文本）。 */
 export class OpsError extends Error {
@@ -24,17 +28,6 @@ export class OpsError extends Error {
     super(message);
     this.status = status;
   }
-}
-
-/** 从 message 事件提取首个非空 text 块（与 listMessages 同一规则）。 */
-export function messageText(e) {
-  const msg = e && e.data && e.data.message;
-  const content = msg && Array.isArray(msg.content) ? msg.content : (e && e.data && e.data.content);
-  if (!Array.isArray(content)) return "";
-  for (const c of content) {
-    if (c && c.type === "text" && typeof c.text === "string" && c.text.trim()) return c.text;
-  }
-  return "";
 }
 
 /** planRevert：回撤语义 = 遮蔽 targetSeq 及其之后全部可见节点（连续到末尾）。 */

@@ -18,6 +18,17 @@ import { constants, zstdCompressSync, zstdDecompressSync } from "node:zlib";
 
 const ZSTD_MAGIC = 0xfd2fb528;
 
+/** 从 message 事件提取首个非空 text 块（listMessages / ops-core 共用单点）。 */
+export function messageText(e) {
+  const msg = e && e.data && e.data.message;
+  const content = msg && Array.isArray(msg.content) ? msg.content : (e && e.data && e.data.content);
+  if (!Array.isArray(content)) return "";
+  for (const c of content) {
+    if (c && c.type === "text" && typeof c.text === "string" && c.text.trim()) return c.text;
+  }
+  return "";
+}
+
 /** 与 DSH 宿主一致：帧带 checksum（ZSTD_c_checksumFlag=1）。 */
 function compressFrame(input) {
   return zstdCompressSync(Buffer.from(input, "utf8"), {
@@ -49,25 +60,42 @@ export function scanZstdFrames(buf) {
 }
 
 /**
- * 读取会话日志 → { header, events }。撕裂的最终帧按宿主同款
- * 「完整前缀」语义忽略（完整帧全部恢复）。
+ * 逐行解帧：首个 type:"session" 行作 header，其余行作事件。
+ * 一条路径同时覆盖两种持久化格式（compat-audit P0）：
+ *   - v3 多帧：帧 0 = 恰一行 header，其后每帧一批事件行；
+ *   - 旧单帧 session.jsonl.zstd：整个文件一帧，解压出多行 NDJSON，
+ *     首行 header、其余事件——旧实现把帧 0 整段 JSON.parse 会直接崩。
+ * 撕裂行（JSON.parse 失败）按宿主「完整前缀」语义跳过。
+ */
+function collectHeaderAndEvents(text, events) {
+  let header = null;
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    let json;
+    try { json = JSON.parse(t); } catch { continue; /* torn record: skip */ }
+    if (!header && json && typeof json === "object" && json.type === "session") { header = json; continue; }
+    events.push(json);
+  }
+  return header;
+}
+
+/**
+ * 读取会话日志 → { header, events }。两种格式（v3 多帧 / 旧单帧）同一条
+ * 逐行扫描路径，见 collectHeaderAndEvents。
  */
 export function readSessionFile(file) {
   const buf = fs.readFileSync(file);
   const { frames } = scanZstdFrames(buf);
   if (frames.length === 0) throw new Error("empty or header-less session log");
-  const headerText = zstdDecompressSync(buf.subarray(frames[0].start, frames[0].end)).toString("utf8");
-  const header = JSON.parse(headerText.trim());
-  if (header.type !== "session") throw new Error("first frame is not a session header");
   const events = [];
-  for (const f of frames.slice(1)) {
+  let header = null;
+  for (const f of frames) {
     const text = zstdDecompressSync(buf.subarray(f.start, f.end)).toString("utf8");
-    for (const line of text.split("\n")) {
-      const t = line.trim();
-      if (!t) continue;
-      try { events.push(JSON.parse(t)); } catch { /* torn record: skip */ }
-    }
+    const found = collectHeaderAndEvents(text, events);
+    if (!header) header = found;
   }
+  if (!header) throw new Error(`session log ${file}: no {type:"session"} header line in any frame`);
   return { header, events };
 }
 
@@ -116,8 +144,14 @@ export function findSessionDirs(sessionId) {
       try {
         if (!fs.statSync(dir).isDirectory()) continue;
       } catch { continue; }
-      const logPath = path.join(dir, "session.v3.jsonl.zstd");
-      try { fs.statSync(logPath); } catch { continue; }
+      // 探测序列（用户实测 DSH 已升级 v4 格式）：v4 → v3 → 旧单帧，
+      // 高版本优先；文件名与 header.version 对应，读取逻辑三格式同构。
+      let logPath = null;
+      for (const name of ["session.v4.jsonl.zstd", "session.v3.jsonl.zstd", "session.jsonl.zstd"]) {
+        const candidate = path.join(dir, name);
+        try { fs.statSync(candidate); logPath = candidate; break; } catch { /* probe next */ }
+      }
+      if (!logPath) continue;
       if (!found.some((f) => f.dir === dir)) found.push({ dir, logPath });
     }
   }
@@ -135,16 +169,8 @@ export function listMessages(events) {
   for (const e of events) {
     if (!e || typeof e.seq !== "number") continue;
     if (e.type === "user/message" || e.type === "assistant/message" || e.type === "system/message") {
+      const text = messageText(e);
       const msg = e.data && e.data.message;
-      const content = msg && Array.isArray(msg.content) ? msg.content : (e.data && e.data.content);
-      let text = "";
-      if (Array.isArray(content)) {
-        for (const c of content) {
-          if (c && c.type === "text" && typeof c.text === "string" && c.text.trim()) {
-            text = c.text; break;
-          }
-        }
-      }
       messages.push({
         seq: e.seq,
         type: e.type,
@@ -208,23 +234,19 @@ export async function readSessionFileAsync(file, { framesPerYield = 8, frameBudg
   const buf = fs.readFileSync(file);
   const { frames } = scanZstdFrames(buf);
   if (frames.length === 0) throw new Error("empty or header-less session log");
-  const headerText = zstdDecompressSync(buf.subarray(frames[0].start, frames[0].end)).toString("utf8");
-  const header = JSON.parse(headerText.trim());
-  if (header.type !== "session") throw new Error("first frame is not a session header");
   const events = [];
-  const bodyFrames = frames.slice(1);
+  let header = null;
   let framesSinceYield = 0;
-  for (const f of bodyFrames) {
+  for (const f of frames) {
     const text = zstdDecompressSync(buf.subarray(f.start, f.end)).toString("utf8");
-    for (const line of text.split("\n")) {
-      const t = line.trim();
-      if (!t) continue;
-      try { events.push(JSON.parse(t)); } catch { /* torn record: skip */ }
-    }
+    const found = collectHeaderAndEvents(text, events);
+    if (!header) header = found;
     if (++framesSinceYield >= framesPerYield) {
       framesSinceYield = 0;
       await yieldToLoop();
     }
   }
-  return { header, events, frameCount: bodyFrames.length, partial: bodyFrames.length > frameBudget };
+  if (!header) throw new Error(`session log ${file}: no {type:"session"} header line in any frame`);
+  const bodyFrames = frames.length - 1;
+  return { header, events, frameCount: bodyFrames, partial: bodyFrames > frameBudget };
 }

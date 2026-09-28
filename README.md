@@ -44,6 +44,24 @@ dsh plugin --profile web add file:C:/path/to/dsh-message-ops
 | GET  | `/api/message-ops/export?sessionId=<id>&seq=<可选>` | 导出 Markdown（seq ≤ 上界，缺省全部），附件下载 |
 | POST | `/api/message-ops/restore` | `{sessionId, seq}` 回滚恢复：seq 为某次 revert/delete 标记事件的 seq |
 
+## 0.2.3 格式兼容（compat-audit + 用户实测紧急修复）
+
+- **P0 旧单帧 `session.jsonl.zstd` 读取必崩**：`readSessionFile` 旧实现把帧 0
+  整段 `JSON.parse`——旧单帧格式整个文件是一帧、解压出多行 NDJSON，直接抛异常，
+  与「旧格式兼容」声明矛盾。现改为**逐行扫描统一路径**：全部帧解压后按行扫描，
+  首个 `type:"session"` 行作 header、其余行作事件，v3 多帧 / v4 多帧 / 旧单帧
+  三种格式一条代码路径（撕裂行仍按完整前缀语义跳过）。
+- **P0 v4 会话格式（用户实测 3080 服务暴露）**：DSH 已升级 v4 持久化
+  （`session.v4.jsonl.zstd`，结构同 v3，仅文件名与 `version` 数字不同）。
+  `findSessionDirs` 探测序列改为 **v4 → v3 → 旧单帧**（此前只找 v3，最新会话
+  全部 "session log not found"）；`readSessionFile` 不做 version 硬校验；
+  `applyBranch` 分支写回沿用读到的原格式版本（`session.v<version>.jsonl.zstd`），
+  不再写死 v3。
+- **dedup**：`listMessages` 内联文本提取收敛到 `session-file.messageText`
+  单点（ops-core 转出保持导入面兼容），消除双实现漂移面。
+- 回归：40 项测试全绿，含旧单帧/ v4 fixture 往返、listMessages、
+  findSessionDirs 三格式发现与 v4 分支写回；真实 v4 会话日志已实测通过。
+
 ## 0.2.2 前端收尾（评审 M1/M2）
 
 - **M2 观察范围收窄**：侧栏行菜单注入的 `MutationObserver` 仍观察

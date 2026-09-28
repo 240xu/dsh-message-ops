@@ -35,16 +35,19 @@ export function planBranch(header, events, upToSeq) {
 }
 
 /**
- * 落盘：在同 project 目录下创建 <newId>/session.v3.jsonl.zstd。
+ * 落盘：在同 project 目录下创建 <newId>/session.v<version>.jsonl.zstd。
+ * 写回沿用读到的原格式版本（v4/v3/旧单帧），不写死版本号。
  * @returns {{newId: string, dir: string, logPath: string, keptEvents: number}}
  */
 export function applyBranch(logPath, upToSeq) {
   const { header, events } = readSessionFile(logPath);
   const { header: newHeader, events: kept } = planBranch(header, events, upToSeq);
+  const version = Number(newHeader.version) === 4 ? 4 : Number(newHeader.version) === 3 ? 3 : null;
+  const logName = version ? `session.v${version}.jsonl.zstd` : "session.jsonl.zstd";
   const dir = path.dirname(path.resolve(logPath));
   const newDir = path.join(path.dirname(dir), newHeader.id);
   fs.mkdirSync(newDir, { recursive: true });
-  const newLogPath = path.join(newDir, "session.v3.jsonl.zstd");
+  const newLogPath = path.join(newDir, logName);
   const buf = encodeSessionFile(newHeader, kept);
   // 原子写：先写临时名再 rename，避免半写日志被会话扫描读到。
   const tmpPath = newLogPath + ".tmp-messageops";
