@@ -44,6 +44,13 @@ dsh plugin --profile web add file:C:/path/to/dsh-message-ops
 | GET  | `/api/message-ops/export?sessionId=<id>&seq=<可选>` | 导出 Markdown（seq ≤ 上界，缺省全部），附件下载 |
 | POST | `/api/message-ops/restore` | `{sessionId, seq}` 回滚恢复：seq 为某次 revert/delete 标记事件的 seq |
 
+## 0.2.4 UI GAP（ux-scout dsh-ui-spec G-M1）
+
+- **S6 违规修复**：回滚/删除成功后不再 900ms 裸 `location.reload()`——改为
+  devkit 标准 toast（`window.__dshDevkit.toast` 探测，无 devkit 时降级为对话框
+  内完成文案）+ done 态新增「刷新页面」按钮由用户手动刷新；与 branch 路径
+  （refreshList 不刷新页面）行为拉齐。
+
 ## 0.2.3 格式兼容（compat-audit + 用户实测紧急修复）
 
 - **P0 旧单帧 `session.jsonl.zstd` 读取必崩**：`readSessionFile` 旧实现把帧 0

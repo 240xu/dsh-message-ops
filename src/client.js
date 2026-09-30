@@ -54,8 +54,9 @@ window.__ModuleLoader__.load({
       'busy.delete': '删除中…',
       'busy.branch': '分支中…',
       'done.branch': '分支完成：新会话 {id}（列表刷新后可见）',
-      'done.revert': '回滚完成，页面即将刷新…',
-      'done.delete': '删除完成，页面即将刷新…',
+      'done.revert': '回滚完成，刷新页面后生效',
+      'done.delete': '删除完成，刷新页面后生效',
+      'action.reload': '刷新页面',
       'errorPrefix': '操作失败：',
       'menu.ops': '消息操作',
     }
@@ -88,8 +89,9 @@ window.__ModuleLoader__.load({
       'busy.delete': 'Deleting…',
       'busy.branch': 'Branching…',
       'done.branch': 'Branched: new session {id} (visible after list refresh)',
-      'done.revert': 'Reverted; reloading…',
-      'done.delete': 'Deleted; reloading…',
+      'done.revert': 'Reverted; reload to apply',
+      'done.delete': 'Deleted; reload to apply',
+      'action.reload': 'Reload page',
       'errorPrefix': 'Operation failed: ',
       'menu.ops': 'Message ops',
     }
@@ -290,10 +292,18 @@ window.__ModuleLoader__.load({
                 try { Promise.resolve(__sessionsSvc.refreshList()).catch(() => {}) } catch { /* ignore */ }
               }
             } else {
+              // S6 修复（G-M1）：不再 900ms 裸 location.reload。成功走 devkit
+              // 标准 toast（无 devkit 时降级为对话框内 doneMsg），并提供手动
+              // 「刷新页面」按钮；与 branch 路径的 refreshList 不刷新行为拉齐。
               setDoneMsg(t(mode === 'revert' ? 'done.revert' : 'done.delete'))
               setBusyMsg('')
               setState('done')
-              setTimeout(() => { window.location.reload() }, 900)
+              try {
+                const dk = window.__dshDevkit
+                if (dk && typeof dk.toast === 'function') {
+                  dk.toast(t(mode === 'revert' ? 'done.revert' : 'done.delete'), { kind: 'ok' })
+                }
+              } catch { /* toast 缺席不阻断成功反馈 */ }
             }
           })
           .catch((reason) => {
@@ -398,6 +408,11 @@ window.__ModuleLoader__.load({
               ...(!canRun ? { opacity: 0.5, cursor: 'default' } : {}),
             },
           }, confirmLabel),
+          ...(state === 'done' && (mode === 'revert' || mode === 'delete') ? [React.createElement('button', {
+            key: 'reload', type: 'button',
+            onClick: () => { try { window.location.reload() } catch { /* non-browser guard */ } },
+            style: primaryBtnStyle,
+          }, t('action.reload'))] : []),
         ],
       }, [
         React.createElement('div', { key: 'meta', style: metaStyle },
