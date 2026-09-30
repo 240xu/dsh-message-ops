@@ -288,8 +288,14 @@ window.__ModuleLoader__.load({
               setDoneMsg(t('done.branch', { id: data.newId || '' }))
               setBusyMsg('')
               setState('done')
-              if (__sessionsSvc && typeof __sessionsSvc.refreshList === 'function') {
-                try { Promise.resolve(__sessionsSvc.refreshList()).catch(() => {}) } catch { /* ignore */ }
+              // ISessions.refresh() 是宿主现行 API；refreshList 是旧名兜底。
+              if (__sessionsSvc) {
+                try {
+                  const r = typeof __sessionsSvc.refresh === 'function'
+                    ? __sessionsSvc.refresh()
+                    : (typeof __sessionsSvc.refreshList === 'function' ? __sessionsSvc.refreshList() : null)
+                  if (r != null) Promise.resolve(r).catch(() => {})
+                } catch { /* ignore */ }
               }
             } else {
               // S6 修复（G-M1）：不再 900ms 裸 location.reload。成功走 devkit
