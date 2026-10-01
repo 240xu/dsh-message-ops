@@ -94,9 +94,9 @@ window.__ModuleLoader__.load({
       'op.branchDesc': 'Copies everything up to and including the picked message into a new session (original untouched, non-destructive).',
       'op.restore': 'Restore (replay shadowed messages)',
       'op.restoreDesc': 'Only when the selected row is a revert/delete marker. This is a replay, not an un-shadow: shadowed user/assistant messages are re-appended with NEW seqs and a [Restored] prefix; non-replayable events (tool calls) are skipped and counted.',
-      'slot.revert': '⏪ Revert here',
-      'slot.delete': '✂ Delete this',
-      'slot.branch': '⑂ Branch here',
+      'slot.revert': 'Revert to here',
+      'slot.delete': 'Delete this message',
+      'slot.branch': 'Branch from here',
       'toast.openNew': 'Open new session',
       'fork.official': 'Branched (official fork): new session {id}',
       'fork.disk': 'Branched: new session {id} (visible after list refresh)',
@@ -559,14 +559,19 @@ window.__ModuleLoader__.load({
       IconClock = P && P.IconClockOutlineRegular
       IconTrash = P && P.IconTrashOutlineRegular
     } catch { /* fallback below */ }
-    if (!IconClock) IconClock = function () {
-      return React.createElement('svg', { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none' },
-        React.createElement('circle', { cx: 8, cy: 8, r: 6.2, stroke: 'currentColor', strokeWidth: 1.3 }),
-        React.createElement('path', { d: 'M8 4.8V8l2.2 1.6', stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round' }))
+    if (!IconClock) IconClock = function ClockFallback() {
+      // 官方 IconClockOutlineArtwork 1:1 路径（ Regular = 1px stroke）
+      return React.createElement('svg', { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true, stroke: 'currentColor', strokeWidth: 1 },
+        React.createElement('path', { d: 'M8 14C11.3137 14 14 11.3137 14 8C14 4.68629 11.3137 2 8 2C4.68629 2 2 4.68629 2 8C2 11.3137 4.68629 14 8 14Z' }),
+        React.createElement('path', { d: 'M8 4.31V8.46L11 10.08' }))
     }
-    if (!IconTrash) IconTrash = function () {
-      return React.createElement('svg', { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none' },
-        React.createElement('path', { d: 'M3 5h10M6.5 5V3.5h3V5M4.5 5l.6 7.5h5.8L11.5 5', stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round' }))
+    if (!IconTrash) IconTrash = function TrashFallback() {
+      // 官方 IconTrashOutlineArtwork 1:1 路径
+      return React.createElement('svg', { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true, stroke: 'currentColor', strokeWidth: 1 },
+        React.createElement('path', { d: 'M1.28149 3.88831H14.7187' }),
+        React.createElement('path', { d: 'M5.41602 3.88833V2.47962C5.41602 2.29282 5.52492 2.11366 5.71876 1.98157C5.9126 1.84948 6.17551 1.77527 6.44964 1.77527H9.55053C9.82466 1.77527 10.0876 1.84948 10.2814 1.98157C10.4752 2.11366 10.5841 2.29282 10.5841 2.47962V3.88833' }),
+        React.createElement('path', { d: 'M3.29749 5.10193L4.06585 13.0192C4.10899 13.4595 4.48223 13.7942 4.92504 13.7942H11.0751C11.5179 13.7942 11.8912 13.4595 11.9343 13.0192L12.7027 5.10193' }),
+        React.createElement('path', { d: 'M6.27637 7.51831V11.1829M9.72378 7.51831V11.1829' }))
     }
 
     // --- 0.3.0 assistant-actions 官方槽：每条 AI 消息旁的原生回撤按钮 ------------

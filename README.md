@@ -161,8 +161,8 @@ MIT
 针对 dsh 0.2.0-rc.2 的用户级操作面（agent 工具保留，但 UI 为主推入口）：
 
 - **每条 AI 消息旁的原生回撤按钮**：注入官方 `conversation.chat.assistant-actions`
-  槽（0.2.0 正式扩展点，条目收持久化 messageId）——「⏪ 回滚到此 / ✂ 删除此条 /
-  ⑂ 从此分支」直接出现在消息操作行，与官方点赞/点踩并列；0.1.x 无此槽自动 no-op。
+  槽（0.2.0 正式扩展点，条目收持久化 messageId）——「回滚到此 / 删除此条 /
+  从此分支」直接出现在消息操作行，与官方点赞/点踩并列；0.1.x 无此槽自动 no-op。
   messageId→seq 反查经 `/api/message-ops/messages`（每会话索引缓存）。
 - **分支双路径**：0.2.0+ 优先官方 `sessions.fork({sessionId, atSeq, increaseTitle})`
   （子会话自动进宿主列表，成功后可一键 `uiWorkspace.openSession` 打开）；
@@ -181,3 +181,10 @@ MIT
   （限已完成轮次最后一条）；任意位置分支保留在对话框（官方没有的能力）。
 - **原生观感**：按钮改用官方 primitives 图标（IconClockOutline/IconTrashOutline，
   require 失败回退内联 SVG）；S3 命中区 ≥44px；S11 双提交防护（busy 互斥）。
+
+### 0.3.2 · 图标规范化
+
+- 槽按钮去掉文字 emoji——0.2.0+ 直接用官方 primitives 图标（与原生操作行 1:1 同款）；
+  回退路径的 SVG 也改为官方 IconClockOutline/IconTrashOutline 的精确 path 数据
+  （1px stroke，与 Regular 变体一致），不再手绘。
+- 字典文案去 emoji（label 仅用于 tooltip/aria，不参与渲染）。
