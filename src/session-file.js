@@ -171,10 +171,16 @@ export function listMessages(events) {
     if (e.type === "user/message" || e.type === "assistant/message" || e.type === "system/message") {
       const text = messageText(e);
       const msg = e.data && e.data.message;
+      // id：宿主持久化的消息身份（user 在 data.id、assistant 在 data.message.id），
+      // 供 0.2.0 assistant-actions 槽（ownerProps={messageId}）反查 seq。
+      // marker：本事件是 revert/delete 落定的 replace 标记 → 对话框据此提供「恢复」模式。
+      const isReplaceMarker = !!(e.surfaceOp && typeof e.surfaceOp === "object" && e.surfaceOp.op === "replace");
       messages.push({
         seq: e.seq,
         type: e.type,
         role: (msg && msg.role) || (e.type === "user/message" ? "user" : e.type === "assistant/message" ? "assistant" : "system"),
+        id: (msg && msg.id) || e.data.id || null,
+        marker: isReplaceMarker,
         snippet: text.replace(/\s+/g, " ").trim().slice(0, 160),
         time: e.time ?? null,
         turn: (e.data && e.data.turn) ?? null,

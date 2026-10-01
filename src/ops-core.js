@@ -260,3 +260,37 @@ export function isJsonContentType(req) {
   const ct = headerOf(req && req.headers, "content-type") || "";
   return ct.split(";")[0].trim().toLowerCase() === "application/json";
 }
+
+// ---------------------------------------------------------------------------
+// 0.3.0 用户 UI 回撤体系：分支双路径 feature-detect（纯函数，client 与测试共用）
+// ---------------------------------------------------------------------------
+
+/**
+ * 分支双路径判定：0.2.0+ 的官方 sessions.fork({sessionId, atSeq})（原生 fork、
+ * 子会话进宿主列表）优先；0.1.x / fork 缺席 / 调用失败回退本插件磁盘
+ * applyBranch（写盘后需刷新列表才可见）。
+ * @param {object=} svc ctx.get('sessions') 服务（0.1.x/0.2.0 形状均可）
+ * @returns {{kind:'official', fork:(opts:object)=>Promise<string>} | {kind:'disk'}}
+ */
+export function pickForkPath(svc) {
+  if (svc && typeof svc.fork === "function") {
+    return { kind: "official", fork: (opts) => svc.fork(opts) };
+  }
+  return { kind: "disk" };
+}
+
+/**
+ * messageId → seq 索引（0.2.0 assistant-actions 槽 ownerProps 只给 messageId；
+ * seq 由 messages 列表反查）。同 id 多条取最小 seq（重试链取最早可见节点）。
+ * @param {Array<{seq:number, id?:string|null}>} messages listMessages 输出
+ * @returns {Map<string, number>}
+ */
+export function buildSeqIndex(messages) {
+  const map = new Map();
+  for (const m of messages || []) {
+    if (!m || typeof m.seq !== "number" || !m.id) continue;
+    const prev = map.get(m.id);
+    if (prev === undefined || m.seq < prev) map.set(m.id, m.seq);
+  }
+  return map;
+}

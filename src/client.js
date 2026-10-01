@@ -58,6 +58,18 @@ window.__ModuleLoader__.load({
       'done.delete': '删除完成，刷新页面后生效',
       'action.reload': '刷新页面',
       'errorPrefix': '操作失败：',
+      'op.restore': '恢复（重放被遮蔽的消息）',
+      'op.restoreDesc': '仅当选中行是回滚/删除标记时可用。这是重放而非取消遮蔽：被遮蔽的用户/助手消息会以新 seq 重新追加并带「[恢复]」前缀；不可重放的事件（如工具调用）会被跳过并计数。',
+      'slot.revert': '回滚到此条',
+      'slot.delete': '删除此条',
+      'slot.branch': '从此分支',
+      'toast.openNew': '打开新会话',
+      'fork.official': '分支完成：新会话 {id}',
+      'fork.disk': '分支完成：新会话 {id}（列表刷新后可见）',
+      'done.restore': '恢复完成：重放 {n} 条，跳过不可重放 {s} 条',
+      'busy.restore': '恢复中…',
+      'confirm.restore': '恢复',
+      'ack.restore': '我已了解：恢复将以新 seq 重放被遮蔽的消息（原日志不变）',
       'menu.ops': '消息操作',
     }
 
@@ -80,6 +92,14 @@ window.__ModuleLoader__.load({
       'op.deleteDesc': 'Shadows only the picked message; everything else stays.',
       'op.branch': 'Branch into a new session from here',
       'op.branchDesc': 'Copies everything up to and including the picked message into a new session (original untouched, non-destructive).',
+      'op.restore': 'Restore (replay shadowed messages)',
+      'op.restoreDesc': 'Only when the selected row is a revert/delete marker. This is a replay, not an un-shadow: shadowed user/assistant messages are re-appended with NEW seqs and a [Restored] prefix; non-replayable events (tool calls) are skipped and counted.',
+      'slot.revert': '⏪ Revert here',
+      'slot.delete': '✂ Delete this',
+      'slot.branch': '⑂ Branch here',
+      'toast.openNew': 'Open new session',
+      'fork.official': 'Branched (official fork): new session {id}',
+      'fork.disk': 'Branched: new session {id} (visible after list refresh)',
       'ack.revert': 'I understand: revert shadows the picked message and everything after it',
       'ack.delete': 'I understand: this message will be shadowed (kept in the log)',
       'confirm.revert': 'Revert',
@@ -89,6 +109,10 @@ window.__ModuleLoader__.load({
       'busy.delete': 'Deleting…',
       'busy.branch': 'Branching…',
       'done.branch': 'Branched: new session {id} (visible after list refresh)',
+      'done.restore': 'Restored: replayed {n}, skipped non-replayable {s}',
+      'busy.restore': 'Restoring…',
+      'confirm.restore': 'Restore',
+      'ack.restore': 'I understand: restore re-appends shadowed messages with new seqs (the log stays append-only)',
       'done.revert': 'Reverted; reload to apply',
       'done.delete': 'Deleted; reload to apply',
       'action.reload': 'Reload page',
@@ -98,6 +122,9 @@ window.__ModuleLoader__.load({
 
     var __locale = null
     var __sessionsSvc = null
+    var __uiWorkspace = null
+    // messageId→seq 索引缓存（每会话一次拉取；0.3.0 assistant-actions 槽用）
+    var __seqIndexCache = new Map()
 
     function localeFallbackLang() {
       if (typeof navigator === 'undefined') return 'zh'
@@ -209,7 +236,8 @@ window.__ModuleLoader__.load({
       const [messages, setMessages] = useState([])
       const [sessionMeta, setSessionMeta] = useState(null)
       const [picked, setPicked] = useState(null)     // seq
-      const [mode, setMode] = useState(null)         // revert|delete|branch
+      const [mode, setMode] = useState(null)         // revert|delete|branch|restore
+      const [childId, setChildId] = useState(null)   // 官方 fork 成功后的子会话 id
       const [acknowledged, setAcknowledged] = useState(false)
       const [busyMsg, setBusyMsg] = useState('')
       const [renderLimit, setRenderLimit] = useState(PAGE_SIZE) // 已展开的渲染条数
@@ -221,8 +249,11 @@ window.__ModuleLoader__.load({
           const d = e && e.detail ? e.detail : {}
           setTarget({ sessionId: d.sessionId || null, title: d.title || null, running: d.running === true })
           setState('loading')
-          setMessages([]); setSessionMeta(null); setPicked(null)
-          setMode(null); setAcknowledged(false); setError(null); setDoneMsg('')
+          setMessages([]); setSessionMeta(null)
+          // 槽按钮预置：携带 seq（picked）与 mode 直接进入确认态
+          setPicked(typeof d.seq === 'number' ? d.seq : null)
+          setMode(typeof d.mode === 'string' ? d.mode : null)
+          setAcknowledged(false); setError(null); setDoneMsg('')
           setRenderLimit(PAGE_SIZE)
         }
         window.addEventListener(EVENT, handler)
@@ -266,27 +297,20 @@ window.__ModuleLoader__.load({
         setMode(m); setAcknowledged(false); setError(null)
       }, [picked, state])
 
-      const run = useCallback(() => {
-        if (state === 'busy' || picked == null || !mode) return
-        if (mode !== 'branch' && !acknowledged) return
-        setBusyMsg(t(mode === 'revert' ? 'busy.revert' : mode === 'delete' ? 'busy.delete' : 'busy.branch'))
-        setState('busy'); setError(null)
-        const path = mode === 'revert' ? 'revert' : mode === 'delete' ? 'delete' : 'branch'
-        const body = mode === 'branch'
-          ? { sessionId: target.sessionId, upToSeq: picked }
-          : { sessionId: target.sessionId, seq: picked }
-        fetch('/api/message-ops/' + path, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(body),
-        })
-          .then(async (res) => {
-            let data = {}
-            try { data = await res.json() } catch { /* keep {} */ }
-            if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
-            if (mode === 'branch') {
-              setDoneMsg(t('done.branch', { id: data.newId || '' }))
+      // 磁盘分支回退（0.1.x / 官方 fork 失败时）：POST /api/message-ops/branch
+      const diskBranch = (cause) => {
+        const finish = () => {
+          fetch('/api/message-ops/branch', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionId: target.sessionId, upToSeq: picked }),
+          })
+            .then(async (res) => {
+              let data = {}
+              try { data = await res.json() } catch { /* keep {} */ }
+              if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
+              setDoneMsg(t('fork.disk', { id: data.newId || '' }))
               setBusyMsg('')
+              setChildId(null)
               setState('done')
               // ISessions.refresh() 是宿主现行 API；refreshList 是旧名兜底。
               if (__sessionsSvc) {
@@ -297,20 +321,68 @@ window.__ModuleLoader__.load({
                   if (r != null) Promise.resolve(r).catch(() => {})
                 } catch { /* ignore */ }
               }
-            } else {
-              // S6 修复（G-M1）：不再 900ms 裸 location.reload。成功走 devkit
-              // 标准 toast（无 devkit 时降级为对话框内 doneMsg），并提供手动
-              // 「刷新页面」按钮；与 branch 路径的 refreshList 不刷新行为拉齐。
-              setDoneMsg(t(mode === 'revert' ? 'done.revert' : 'done.delete'))
+            })
+            .catch((reason) => {
               setBusyMsg('')
-              setState('done')
-              try {
-                const dk = window.__dshDevkit
-                if (dk && typeof dk.toast === 'function') {
-                  dk.toast(t(mode === 'revert' ? 'done.revert' : 'done.delete'), { kind: 'ok' })
-                }
-              } catch { /* toast 缺席不阻断成功反馈 */ }
-            }
+              setState('ready')
+              setError(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)))
+            })
+        }
+        if (cause) {
+          // 官方 fork 失败原因留痕后回退
+          setError(t('errorPrefix') + (cause && cause.message ? cause.message : String(cause)) + ' → fallback')
+        }
+        finish()
+      }
+
+      const run = useCallback(() => {
+        if (state === 'busy' || picked == null || !mode) return
+        if (mode !== 'branch' && mode !== 'restore' && !acknowledged) return
+        setBusyMsg(t('busy.' + (mode === 'revert' || mode === 'delete' || mode === 'restore' ? mode : 'branch')))
+        setState('busy'); setError(null)
+        if (mode === 'branch') {
+          // 0.3.0 分支双路径：官方 sessions.fork({atSeq})（0.2.0+，子会话进宿主
+          // 列表并可立即打开）优先；0.1.x / fork 缺席回退磁盘 applyBranch。
+          const forkPath = pickForkPath(__sessionsSvc)
+          if (forkPath.kind === 'official') {
+            forkPath.fork({ sessionId: target.sessionId, atSeq: picked, increaseTitle: true })
+              .then((childId) => {
+                setDoneMsg(t('fork.official', { id: String(childId || '') }))
+                setBusyMsg('')
+                setChildId(childId || null)
+                setState('done')
+                notifyDone(t('fork.official', { id: String(childId || '') }))
+              })
+              .catch((reason) => {
+                // 官方 fork 失败（如未编目）→ 回退磁盘分支，不中断用户
+                return diskBranch(reason)
+              })
+            return
+          }
+          diskBranch(null)
+          return
+        }
+        const path = mode === 'restore' ? 'restore' : mode
+        const body = { sessionId: target.sessionId, seq: picked }
+        fetch('/api/message-ops/' + path, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+          .then(async (res) => {
+            let data = {}
+            try { data = await res.json() } catch { /* keep {} */ }
+            if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
+            // S6 修复（G-M1）：不再 900ms 裸 location.reload。成功走 devkit
+            // 标准 toast（无 devkit 时降级为对话框内 doneMsg），并提供手动
+            // 「刷新页面」按钮。
+            const okMsg = mode === 'restore'
+              ? t('done.restore', { n: String(data.restoredCount != null ? data.restoredCount : '?'), s: String(data.skipped != null ? data.skipped : 0) })
+              : t(mode === 'revert' ? 'done.revert' : 'done.delete')
+            setDoneMsg(okMsg)
+            setBusyMsg('')
+            setState('done')
+            notifyDone(okMsg)
           })
           .catch((reason) => {
             setBusyMsg('')
@@ -371,7 +443,8 @@ window.__ModuleLoader__.load({
             )),
           ),
           pickedMsg ? React.createElement('div', { key: 'ops' },
-            ['revert', 'delete', 'branch'].map((m, i) => React.createElement('div', { key: m, style: { marginTop: i === 0 ? 8 : 4 } },
+            // restore 仅对 revert/delete 落定的 replace 标记行提供（重放语义）
+            ['revert', 'delete', 'branch'].concat(pickedMsg.marker ? ['restore'] : []).map((m, i) => React.createElement('div', { key: m, style: { marginTop: i === 0 ? 8 : 4 } },
               React.createElement('label', { style: optStyle },
                 React.createElement('input', {
                   type: 'radio', name: 'dsh-message-ops-mode', checked: mode === m,
@@ -386,7 +459,7 @@ window.__ModuleLoader__.load({
                   type: 'checkbox', checked: acknowledged, disabled: state === 'busy',
                   onChange: (e) => setAcknowledged(e.target.checked),
                 }),
-                t(mode === 'revert' ? 'ack.revert' : 'ack.delete'))
+                t(mode === 'revert' ? 'ack.revert' : mode === 'restore' ? 'ack.restore' : 'ack.delete'))
             : null,
         ])
       }
@@ -419,6 +492,16 @@ window.__ModuleLoader__.load({
             onClick: () => { try { window.location.reload() } catch { /* non-browser guard */ } },
             style: primaryBtnStyle,
           }, t('action.reload'))] : []),
+          ...(state === 'done' && mode === 'branch' && childId ? [React.createElement('button', {
+            key: 'open-new', type: 'button',
+            onClick: () => {
+              try {
+                // 0.2.0+：uiWorkspace.openSession 是宿主唯一打开通道
+                if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(childId)
+              } catch { /* 打开失败不阻断 */ }
+            },
+            style: primaryBtnStyle,
+          }, t('toast.openNew'))] : []),
         ],
       }, [
         React.createElement('div', { key: 'meta', style: metaStyle },
@@ -430,6 +513,22 @@ window.__ModuleLoader__.load({
     }
 
     // --- 头部按钮 ---------------------------------------------------------------
+
+    // 0.3.0 分支双路径选择：0.2.0+ 官方 sessions.fork({atSeq}) 优先。
+    function pickForkPath(sessionsSvc) {
+      if (sessionsSvc && typeof sessionsSvc.fork === 'function') {
+        return { kind: 'official', fork: sessionsSvc.fork.bind(sessionsSvc) }
+      }
+      return { kind: 'disk' }
+    }
+
+    // 成功反馈统一出口：devkit 标准 toast 优先，无 devkit 时对话框内文案兜底。
+    function notifyDone(msg) {
+      try {
+        const dk = window.__dshDevkit
+        if (dk && typeof dk.toast === 'function') dk.toast(msg, { kind: 'ok' })
+      } catch { /* toast 缺席不阻断成功反馈 */ }
+    }
 
     function OpsButton(props) {
       const { sessionId, useSessions } = props
@@ -449,6 +548,67 @@ window.__ModuleLoader__.load({
         type: 'button', title: t('button.title'), 'aria-label': t('button.title'),
         style: btnStyle, onClick: openDialog,
       }, React.createElement(BranchIcon))
+    }
+
+    // --- 0.3.0 assistant-actions 官方槽：每条 AI 消息旁的原生回撤按钮 ------------
+    // 契约（dsh-cordis-client-runner）：scope session，条目组件收 { messageId } +
+    // 标准props（useSessions/sessionId/useSession/useChat…）。0.1.x 无此 key，
+    // slots.inject 自动 no-op。
+    const CHAT_ACTIONS_SLOT = 'conversation.chat.assistant-actions'
+    const CHAT_ACTIONS_ID = 'message-ops-row'
+
+    function MsgSlotActions(props) {
+      const { messageId, sessionId, useSessions, useSession } = props
+      const t = (props && props.t) || __t
+      useLocaleRevision()
+      const sessions = useSessions ? useSessions((s) => s) : undefined
+      const summary = sessions && sessions.byId ? sessions.byId[sessionId] : undefined
+      const running = summary ? summary.running === true : false
+      // messageId → seq 反查：官方槽只给 messageId；seq 由槽按钮需要。
+      // 路径：messages 端点一次性拉取建索引（每会话缓存），失败则按钮隐藏。
+      const [seq, setSeq] = React.useState(null)
+      React.useEffect(() => {
+        if (!messageId || !sessionId) return
+        let alive = true
+        const cached = __seqIndexCache.get(sessionId)
+        const resolve = (index) => {
+          if (!alive) return
+          const hit = index.get(String(messageId))
+          if (typeof hit === 'number') setSeq(hit)
+        }
+        if (cached && typeof cached.then === 'function') cached.then(resolve).catch(() => {})
+        else if (cached) resolve(cached)
+        else {
+          const p = fetch('/api/message-ops/messages?sessionId=' + encodeURIComponent(sessionId))
+            .then((r) => (r.ok ? r.json() : { messages: [] }))
+            .then((data) => {
+              const index = new Map()
+              for (const m of (data && data.messages) || []) {
+                if (m && m.id != null) index.set(String(m.id), m.seq)
+              }
+              __seqIndexCache.set(sessionId, index)
+              return index
+            })
+          __seqIndexCache.set(sessionId, p)
+          p.then(resolve).catch(() => {})
+        }
+        return () => { alive = false }
+      }, [messageId, sessionId])
+      if (seq == null) return null
+      const open = (mode) => window.dispatchEvent(new CustomEvent(EVENT, {
+        detail: { sessionId, seq, mode, title: summary && summary.title ? summary.title : null, running },
+      }))
+      const btn = (label, mode, disabled) => React.createElement('button', {
+        type: 'button', title: t('slot.' + mode), 'aria-label': t('slot.' + mode), disabled: !!disabled,
+        style: { padding: '2px 6px', border: 'none', background: 'transparent', color: 'inherit',
+                 opacity: disabled ? 0.4 : 0.72, cursor: disabled ? 'default' : 'pointer', font: 'inherit', fontSize: 12 },
+        onClick: () => { if (!disabled) open(mode) },
+      }, label)
+      return React.createElement('span', { style: { display: 'inline-flex', gap: 2 } },
+        btn(t('slot.revert'), 'revert', running),
+        btn(t('slot.delete'), 'delete', running),
+        btn(t('slot.branch'), 'branch', false),
+      )
     }
 
     // --- 侧栏行菜单注入（DOM 级，同 session-delete 模式） ------------------------
@@ -554,6 +714,10 @@ window.__ModuleLoader__.load({
 
     function apply(ctx) {
       __sessionsSvc = ctx.get('sessions')
+      __uiWorkspace = typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : null
+      if (!__uiWorkspace) {
+        try { ctx.inject(['uiWorkspace'], (sub) => { __uiWorkspace = sub.uiWorkspace || sub }) } catch { /* 0.1.x 无此服务 */ }
+      }
       if (!__sessionsSvc) {
         ctx.inject(['sessions'], (sub) => { __sessionsSvc = sub.sessions })
       }
@@ -569,6 +733,11 @@ window.__ModuleLoader__.load({
         name: SLOT, id: ROW_ID, order: 31,
         ...(__locale ? { locale: NS } : {}),
       }, OpsButton))
+      // 0.3.0：每条 AI 消息旁的原生回撤按钮（0.1.x 无此槽，inject 自动 no-op）
+      ctx.slots.inject(CHAT_ACTIONS_SLOT, () => ctx.slots.register({
+        name: CHAT_ACTIONS_SLOT, id: CHAT_ACTIONS_ID, order: 20,
+        ...(__locale ? { locale: NS } : {}),
+      }, MsgSlotActions))
       ctx.slots.inject(OVERLAY_SLOT, () => ctx.slots.register({
         name: OVERLAY_SLOT, id: DIALOG_ID, order: 101,
         ...(__locale ? { locale: NS } : {}),

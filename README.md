@@ -155,3 +155,20 @@ node --check src/*.js
 ## License
 
 MIT
+
+## 0.3.0 · 用户 UI 回撤体系（官方槽集成）
+
+针对 dsh 0.2.0-rc.2 的用户级操作面（agent 工具保留，但 UI 为主推入口）：
+
+- **每条 AI 消息旁的原生回撤按钮**：注入官方 `conversation.chat.assistant-actions`
+  槽（0.2.0 正式扩展点，条目收持久化 messageId）——「⏪ 回滚到此 / ✂ 删除此条 /
+  ⑂ 从此分支」直接出现在消息操作行，与官方点赞/点踩并列；0.1.x 无此槽自动 no-op。
+  messageId→seq 反查经 `/api/message-ops/messages`（每会话索引缓存）。
+- **分支双路径**：0.2.0+ 优先官方 `sessions.fork({sessionId, atSeq, increaseTitle})`
+  （子会话自动进宿主列表，成功后可一键 `uiWorkspace.openSession` 打开）；
+  官方 fork 失败或 0.1.x 回退磁盘级 applyBranch（原路径保留）。
+- **恢复（restore）补完**：选中 revert/delete 落定的 replace 标记行时，对话框
+  提供「恢复」操作（重放语义：新 seq + `[恢复]` 前缀，不可重放事件计数跳过），
+  确认弹窗内联语义说明（评审缺口销账）。
+- 官方已有但易混淆的：0.2.0 原生分支按钮（仅限已完成轮次最后一条消息）与
+  本插件的「任意位置分支/回滚」互补不冲突。
