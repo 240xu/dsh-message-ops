@@ -1,2 +1,4 @@
-*.bak*
 node_modules/
+.e2e/*.png
+.e2e/crash*.txt
+.scratch/
