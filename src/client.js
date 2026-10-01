@@ -523,10 +523,10 @@ window.__ModuleLoader__.load({
     }
 
     // 成功反馈统一出口：devkit 标准 toast 优先，无 devkit 时对话框内文案兜底。
-    function notifyDone(msg) {
+    function notifyDone(msg, kind) {
       try {
         const dk = window.__dshDevkit
-        if (dk && typeof dk.toast === 'function') dk.toast(msg, { kind: 'ok' })
+        if (dk && typeof dk.toast === 'function') dk.toast(msg, { kind: kind || 'ok' })
       } catch { /* toast 缺席不阻断成功反馈 */ }
     }
 
@@ -550,6 +550,25 @@ window.__ModuleLoader__.load({
       }, React.createElement(BranchIcon))
     }
 
+    // 官方图标适配：0.2.0 primitives 的 IconClock/IconTrash 与原生操作行同款；
+    // require 失败（0.1.x 或裁剪环境）回退内联 SVG，槽在 0.1.x 本就不存在，仅防御。
+    var IconClock = null
+    var IconTrash = null
+    try {
+      const P = require('@deepseek-ai/dsh-client-ui-primitives')
+      IconClock = P && P.IconClockOutlineRegular
+      IconTrash = P && P.IconTrashOutlineRegular
+    } catch { /* fallback below */ }
+    if (!IconClock) IconClock = function () {
+      return React.createElement('svg', { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none' },
+        React.createElement('circle', { cx: 8, cy: 8, r: 6.2, stroke: 'currentColor', strokeWidth: 1.3 }),
+        React.createElement('path', { d: 'M8 4.8V8l2.2 1.6', stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round' }))
+    }
+    if (!IconTrash) IconTrash = function () {
+      return React.createElement('svg', { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none' },
+        React.createElement('path', { d: 'M3 5h10M6.5 5V3.5h3V5M4.5 5l.6 7.5h5.8L11.5 5', stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round' }))
+    }
+
     // --- 0.3.0 assistant-actions 官方槽：每条 AI 消息旁的原生回撤按钮 ------------
     // 契约（dsh-cordis-client-runner）：scope session，条目组件收 { messageId } +
     // 标准props（useSessions/sessionId/useSession/useChat…）。0.1.x 无此 key，
@@ -558,22 +577,21 @@ window.__ModuleLoader__.load({
     const CHAT_ACTIONS_ID = 'message-ops-row'
 
     function MsgSlotActions(props) {
-      const { messageId, sessionId, useSessions, useSession } = props
+      const { messageId, sessionId, useSessions } = props
       const t = (props && props.t) || __t
       useLocaleRevision()
       const sessions = useSessions ? useSessions((s) => s) : undefined
       const summary = sessions && sessions.byId ? sessions.byId[sessionId] : undefined
       const running = summary ? summary.running === true : false
-      // messageId → seq 反查：官方槽只给 messageId；seq 由槽按钮需要。
-      // 路径：messages 端点一次性拉取建索引（每会话缓存），失败则按钮隐藏。
       const [seq, setSeq] = React.useState(null)
+      const [busy, setBusy] = React.useState(null) // 'revert' | 'delete' | null（S11 双提交防护）
       React.useEffect(() => {
         if (!messageId || !sessionId) return
         let alive = true
         const cached = __seqIndexCache.get(sessionId)
         const resolve = (index) => {
           if (!alive) return
-          const hit = index.get(String(messageId))
+          const hit = index && index.get(String(messageId))
           if (typeof hit === 'number') setSeq(hit)
         }
         if (cached && typeof cached.then === 'function') cached.then(resolve).catch(() => {})
@@ -594,20 +612,42 @@ window.__ModuleLoader__.load({
         }
         return () => { alive = false }
       }, [messageId, sessionId])
+
+      // opencode 式一键回撤：点击立即执行（无对话框），成功走 devkit toast。
+      // 宿主 0.2.0 chat store 原生响应 surface replace 事件——遮蔽无需刷新页面。
+      const run = (mode) => {
+        if (busy || seq == null || running) return
+        setBusy(mode)
+        fetch('/api/message-ops/' + mode, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sessionId, seq }),
+        })
+          .then(async (res) => {
+            let data = {}
+            try { data = await res.json() } catch { /* keep {} */ }
+            if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status))
+            notifyDone(t(mode === 'revert' ? 'done.revert' : 'done.delete'))
+          })
+          .catch((reason) => {
+            notifyDone(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
+          })
+          .finally(() => setBusy(null))
+      }
+
       if (seq == null) return null
-      const open = (mode) => window.dispatchEvent(new CustomEvent(EVENT, {
-        detail: { sessionId, seq, mode, title: summary && summary.title ? summary.title : null, running },
-      }))
-      const btn = (label, mode, disabled) => React.createElement('button', {
-        type: 'button', title: t('slot.' + mode), 'aria-label': t('slot.' + mode), disabled: !!disabled,
-        style: { padding: '2px 6px', border: 'none', background: 'transparent', color: 'inherit',
-                 opacity: disabled ? 0.4 : 0.72, cursor: disabled ? 'default' : 'pointer', font: 'inherit', fontSize: 12 },
-        onClick: () => { if (!disabled) open(mode) },
-      }, label)
-      return React.createElement('span', { style: { display: 'inline-flex', gap: 2 } },
-        btn(t('slot.revert'), 'revert', running),
-        btn(t('slot.delete'), 'delete', running),
-        btn(t('slot.branch'), 'branch', false),
+      // 官方图标（与原生操作行同款）；S3：视觉 16px，命中区 ≥44px。
+      const act = (icon, label, mode) => React.createElement('button', {
+        type: 'button', title: running ? t('dialog.runningWarn') : t('slot.' + mode),
+        'aria-label': t('slot.' + mode), disabled: !!busy || running,
+        style: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                 minWidth: 44, minHeight: 44, padding: 0, border: 'none', background: 'transparent',
+                 color: 'inherit', opacity: busy && busy !== mode ? 0.4 : running ? 0.35 : 0.72,
+                 cursor: busy || running ? 'default' : 'pointer', borderRadius: 6 },
+        onClick: () => run(mode),
+      }, icon)
+      return React.createElement('span', { style: { display: 'inline-flex', gap: 0 } },
+        act(React.createElement(IconClock, { size: 16 }), t('slot.revert'), 'revert'),
+        act(React.createElement(IconTrash, { size: 16 }), t('slot.delete'), 'delete'),
       )
     }
 
