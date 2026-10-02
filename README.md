@@ -225,3 +225,15 @@ MIT
 - 0.4.1 的自动折叠 useEffect 位于「无标记早退」之后——标记从 0 变非 0 时多出
   第 4 个 hook，React 抛出 hooks 顺序错误并卸载整个槽（dock 永远不可见，
   Playwright 抓到 React #310）。已把该 effect 移到早退之前（无条件 hook）。
+
+## 0.5.0 · 「按钮没有用」根因修复 + 消息引用
+
+- **根因**：宿主 live 投影只处理 compaction 类 surface replace——插件标记落盘后
+  打开的会话视图不会收起，所以回撤/删除按钮点了「没反应」（0.3.x 引入的回归）。
+- **修复**：回撤成功后经官方 `uiWorkspace.openSession(sessionId)` 重建会话视图，
+  遮蔽立即呈现（无需刷新页面）；dock 的恢复同样触发视图重建。
+- **消息引用（新）**：AI 消息操作行新增「引用到输入框」——经官方
+  `InputActions.captureInsertion + insertText` 把消息全文以 markdown 引用块
+  （`> ` 前缀）插入输入框，零 DOM hack。
+- 槽按钮收敛为两个：**⏱ 回撤到此** 与 **❝ 引用**；删除/分支保留在对话框
+  （官方分支按钮已覆盖最后一条消息场景）。

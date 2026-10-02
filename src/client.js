@@ -75,6 +75,9 @@ window.__ModuleLoader__.load({
       'dock.collapse': '折叠回撤列表',
       'dock.restore': '恢复',
       'dock.restoring': '恢复中…',
+      'slot.quote': '引用到输入框',
+      'quote.done': '已引用到输入框',
+      'quote.unavailable': '引用不可用（输入框不可写或无全文）',
       'menu.ops': '消息操作',
     }
 
@@ -128,6 +131,9 @@ window.__ModuleLoader__.load({
       'dock.shadowedN': '{n} shadowed',
       'dock.restore': 'Restore',
       'dock.restoring': 'Restoring…',
+      'slot.quote': 'Quote to composer',
+      'quote.done': 'Quoted into composer',
+      'quote.unavailable': 'Quote unavailable (composer locked or no full text)',
       'menu.ops': 'Message ops',
     }
 
@@ -137,6 +143,8 @@ window.__ModuleLoader__.load({
     var __uiWorkspace = null
     // messageId→seq 索引缓存（每会话一次拉取；0.3.0 assistant-actions 槽用）
     var __seqIndexCache = new Map()
+    // messageId→全文缓存（0.5.0 消息引用用）
+    var __fullTextCache = new Map()
 
     function localeFallbackLang() {
       if (typeof navigator === 'undefined') return 'zh'
@@ -582,6 +590,15 @@ window.__ModuleLoader__.load({
         React.createElement('path', { d: 'M8 14C11.3137 14 14 11.3137 14 8C14 4.68629 11.3137 2 8 2C4.68629 2 2 4.68629 2 8C2 11.3137 4.68629 14 8 14Z' }),
         React.createElement('path', { d: 'M8 4.31V8.46L11 10.08' }))
     }
+    var IconQuote = null
+    try {
+      const P2 = require('@deepseek-ai/dsh-client-ui-primitives')
+      IconQuote = P2 && (P2.IconChatOutlineRegular || P2.IconCopyOutlineRegular)
+    } catch { /* fallback below */ }
+    if (!IconQuote) IconQuote = function QuoteFallback() {
+      return React.createElement('svg', { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true, stroke: 'currentColor', strokeWidth: 1 },
+        React.createElement('path', { d: 'M3 6.5A3.5 3.5 0 0 1 6.5 3H7v1.5h-.5A2 2 0 0 0 4.5 6.5V7H7v3.5H3V6.5ZM9 6.5A3.5 3.5 0 0 1 12.5 3H13v1.5h-.5A2 2 0 0 0 10.5 6.5V7H13v3.5H9V6.5Z' }))
+    }
     if (!IconTrash) IconTrash = function TrashFallback() {
       // 官方 IconTrashOutlineArtwork 1:1 路径
       return React.createElement('svg', { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true, stroke: 'currentColor', strokeWidth: 1 },
@@ -599,15 +616,16 @@ window.__ModuleLoader__.load({
     const CHAT_ACTIONS_ID = 'message-ops-row'
 
     function MsgSlotActions(props) {
-      const { messageId, sessionId, useSessions, inputActions } = props
-      if (inputActions && typeof inputActions.setDraft === 'function') __inputActions = inputActions
+      const { messageId, sessionId, useSessions, inputActions, useChat } = props
       const t = (props && props.t) || __t
       useLocaleRevision()
+      if (inputActions && typeof inputActions.setDraft === 'function') __inputActions = inputActions
       const sessions = useSessions ? useSessions((s) => s) : undefined
       const summary = sessions && sessions.byId ? sessions.byId[sessionId] : undefined
       const running = summary ? summary.running === true : false
       const [seq, setSeq] = React.useState(null)
-      const [busy, setBusy] = React.useState(null) // 'revert' | 'delete' | null（S11 双提交防护）
+      const [fullText, setFullText] = React.useState(null)
+      const [busy, setBusy] = React.useState(null) // 'revert' | null（S11 双提交防护）
       React.useEffect(() => {
         if (!messageId || !sessionId) return
         let alive = true
@@ -624,10 +642,13 @@ window.__ModuleLoader__.load({
             .then((r) => (r.ok ? r.json() : { messages: [] }))
             .then((data) => {
               const index = new Map()
+              const full = new Map()
               for (const m of (data && data.messages) || []) {
                 if (m && m.id != null) index.set(String(m.id), m.seq)
+                if (m && m.id != null && m.fullText) full.set(String(m.id), m.fullText)
               }
               __seqIndexCache.set(sessionId, index)
+              __fullTextCache.set(sessionId, full)
               return index
             })
           __seqIndexCache.set(sessionId, p)
@@ -636,12 +657,37 @@ window.__ModuleLoader__.load({
         return () => { alive = false }
       }, [messageId, sessionId])
 
-      // opencode 式一键回撤：点击立即执行（无对话框），成功走 devkit toast。
-      // 宿主 0.2.0 chat store 原生响应 surface replace 事件——遮蔽无需刷新页面。
-      const run = (mode) => {
+      // 原文（引用用）：seq 解析后按需取全文
+      React.useEffect(() => {
+        if (seq == null || !sessionId) return
+        let alive = true
+        const cached = __fullTextCache.get(sessionId)
+        const resolve = (full) => {
+          if (!alive) return
+          const hit = full && full.get(String(messageId))
+          if (typeof hit === 'string') setFullText(hit)
+        }
+        if (cached && typeof cached.then === 'function') cached.then(resolve).catch(() => {})
+        else if (cached) resolve(cached)
+        return () => { alive = false }
+      }, [seq, messageId, sessionId])
+
+      // 0.5.0 回撤后的视图刷新：openSession(reveal) 重建会话视图 → 遮蔽立即呈现。
+      // （宿主 live 投影只处理 compaction 类 replace，插件标记需要视图重建才可见。）
+      const revealSession = () => {
+        try {
+          if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') {
+            __uiWorkspace.openSession(sessionId)
+            return true
+          }
+        } catch { /* fallthrough */ }
+        return false
+      }
+
+      const runRevert = () => {
         if (busy || seq == null || running) return
-        setBusy(mode)
-        fetch('/api/message-ops/' + mode, {
+        setBusy('revert')
+        fetch('/api/message-ops/revert', {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ sessionId, seq }),
         })
@@ -649,7 +695,8 @@ window.__ModuleLoader__.load({
             let data = {}
             try { data = await res.json() } catch { /* keep {} */ }
             if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status))
-            notifyDone(t(mode === 'revert' ? 'done.revert' : 'done.delete'))
+            notifyDone(t('done.revert'))
+            revealSession()
           })
           .catch((reason) => {
             notifyDone(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
@@ -657,37 +704,38 @@ window.__ModuleLoader__.load({
           .finally(() => setBusy(null))
       }
 
+      // 0.5.0 消息引用：官方 InputActions.captureInsertion + insertText（零 DOM hack）
+      const runQuote = () => {
+        try {
+          if (!inputActions || typeof inputActions.captureInsertion !== 'function' || typeof inputActions.insertText !== 'function') {
+            notifyDone(t('quote.unavailable'), 'warn')
+            return
+          }
+          const span = inputActions.captureInsertion()
+          const text = fullText != null ? fullText : (summary && summary.title ? '' : null)
+          if (text == null) { notifyDone(t('quote.unavailable'), 'warn'); return }
+          const quoted = text.split('\n').map((l) => '> ' + l).join('\n') + '\n\n'
+          const ok = inputActions.insertText(quoted, span)
+          notifyDone(ok ? t('quote.done') : t('quote.unavailable'), ok ? 'ok' : 'warn')
+        } catch (e) {
+          notifyDone(t('errorPrefix') + (e && e.message ? e.message : String(e)), 'error')
+        }
+      }
+
       if (seq == null) return null
-      // 官方图标（与原生操作行同款）；S3：视觉 16px，命中区 ≥44px。
-      const act = (icon, label, mode) => React.createElement('button', {
-        type: 'button', title: running ? t('dialog.runningWarn') : t('slot.' + mode),
-        'aria-label': t('slot.' + mode), disabled: !!busy || running,
+      const act = (icon, label, mode, onClick, disabled) => React.createElement('button', {
+        type: 'button', title: running && mode === 'revert' ? t('dialog.runningWarn') : label,
+        'aria-label': label, disabled: !!disabled,
         style: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                  minWidth: 44, minHeight: 44, padding: 0, border: 'none', background: 'transparent',
-                 color: 'inherit', opacity: busy && busy !== mode ? 0.4 : running ? 0.35 : 0.72,
-                 cursor: busy || running ? 'default' : 'pointer', borderRadius: 6 },
-        onClick: () => run(mode),
+                 color: 'inherit', opacity: busy && busy !== mode ? 0.4 : running && mode === 'revert' ? 0.35 : 0.72,
+                 cursor: disabled ? 'default' : 'pointer', borderRadius: 6 },
+        onClick,
       }, icon)
       return React.createElement('span', { style: { display: 'inline-flex', gap: 0 } },
-        act(React.createElement(IconClock, { size: 16 }), t('slot.revert'), 'revert'),
-        act(React.createElement(IconTrash, { size: 16 }), t('slot.delete'), 'delete'),
+        act(React.createElement(IconClock, { size: 16 }), t('slot.revert'), 'revert', runRevert, running),
+        act(React.createElement(IconQuote, { size: 16 }), t('slot.quote'), 'quote', runQuote, false),
       )
-    }
-
-    // --- 0.4.0 回撤 dock：composer 上方「N 条已回撤」结构化面板（opencode 式） ----
-    // 官方槽 conversation.input.dock（scope session，composer 卡片上方全宽条目）。
-    // ownerProps/standardProps 含 sessionId + useSessions + inputActions。
-    const INPUT_DOCK_SLOT = 'conversation.input.dock'
-    const INPUT_DOCK_ID = 'message-ops-revert-dock'
-
-    // 0.4.2 活跃标记计算：排除 compaction 标记 + 已被恢复（后续 restore notice
-    // 引用其 seq）的标记 —— 对齐 opencode clear 语义：恢复后不再显示为待恢复项。
-    function activeMarkers(msgs) {
-      const restored = new Set()
-      for (const m of msgs || []) {
-        if (m && typeof m.restoresSeq === 'number') restored.add(m.restoresSeq)
-      }
-      return (msgs || []).filter((m) => m.marker && m.sourceKind !== 'compact-checkpoint' && !restored.has(m.seq))
     }
 
     function RevertDock(props) {
@@ -762,6 +810,10 @@ window.__ModuleLoader__.load({
             if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status))
             notifyDone(t('done.restore', { n: String(data.restoredCount != null ? data.restoredCount : '?'), s: String(data.skipped != null ? data.skipped : 0) }))
             setRestoring(null)
+            // 0.5.0：恢复后重建会话视图（重放消息立即可见）
+            try {
+              if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(sessionId)
+            } catch { /* fallthrough */ }
             const fresh = await fetch('/api/message-ops/messages?sessionId=' + encodeURIComponent(sessionId)).then((r) => (r.ok ? r.json() : null)).catch(() => null)
             if (fresh && fresh.ok) setMarkers(activeMarkers(fresh.messages || []))
           })
@@ -926,7 +978,7 @@ window.__ModuleLoader__.load({
         })
       }
       ctx.on('locale/change', refreshSidebarOpsLabel)
-      ctx.slots.inject(SLOT, () => ctx.slots.register({
+      if (window.__MOPS_DISABLE_HEADER !== true) ctx.slots.inject(SLOT, () => ctx.slots.register({
         name: SLOT, id: ROW_ID, order: 31,
         ...(__locale ? { locale: NS } : {}),
       }, OpsButton))

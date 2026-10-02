@@ -20,6 +20,16 @@ delete process.env.LD_PRELOAD;
       try {
         const t = await res.text();
         if (t.includes('message_ops') || t.includes('mopsRd')) mopsResponses.push({ bundle: decodeURIComponent(res.url()).slice(-70), len: t.length, hasMopsRd: t.includes('mopsRd'), has043: t.includes('0.4.3'), stillOldIcon: t.includes('IconTrashOutline16'), sdFixed: t.includes('TrashFallback'), hasMessageEdit: t.includes('MessageEditController') });
+        // header.actions registrant scan: find register calls naming the slot and the adjacent id
+        if (t.includes('conversation.session.header.actions')) {
+          const re = /id:\s*"([^"]{3,40})"[^}]{0,200}?name:\s*"conversation\.session\.header\.actions"/g;
+          const re2 = /name:\s*"conversation\.session\.header\.actions"[^}]{0,200}?id:\s*"([^"]{3,40})"/g;
+          const ids = new Set();
+          let mm;
+          while ((mm = re.exec(t))) ids.add(mm[1]);
+          while ((mm = re2.exec(t))) ids.add(mm[1]);
+          mopsResponses.push({ headerRegistrants: [...ids], bundle: decodeURIComponent(res.url()).slice(-50) });
+        }
       } catch {}
     }
     if (res.url().includes('message-ops/messages')) {
@@ -48,6 +58,7 @@ delete process.env.LD_PRELOAD;
       if (++n > 100) clearInterval(iv);
     }, 50);
   });
+  await page.addInitScript(() => { window.__MOPS_DISABLE_HEADER = true; });
   await page.goto('http://127.0.0.1:3080/?token=' + token, { waitUntil: 'networkidle', timeout: 60000 }).catch(() => {});
   await page.waitForTimeout(3000);
 
@@ -85,14 +96,6 @@ delete process.env.LD_PRELOAD;
     return { dock: true, label: region.getAttribute('aria-label'), h: Math.round(r.height), w: Math.round(r.width), labelShown: labelEl ? labelEl.textContent : null };
   });
   console.log('DOCK', JSON.stringify(dock));
-  const direct = await page.evaluate(() => {
-    const el = document.querySelector('.mopsRd');
-    if (!el) return { found: false };
-    const label = el.getAttribute('aria-label');
-    const r = el.getBoundingClientRect();
-    return { found: true, label, h: Math.round(r.height), w: Math.round(r.width), inComposerZone: r.top > 400 };
-  });
-  console.log('DIRECT', JSON.stringify(direct));
   const ver = await page.evaluate(async () => {
     // find the script tag(s) loading /plugins/ bundles and search for our marker
     const urls = Array.from(document.querySelectorAll('script[src]')).map(s2 => s2.src).filter(u => u.includes('/plugins'));
@@ -162,7 +165,7 @@ delete process.env.LD_PRELOAD;
     return { rows: rowTexts.length, rowTexts };
   });
   console.log('ROWS', JSON.stringify(rows));
-  const direct2 = await page.evaluate(() => {
+  const direct = await page.evaluate(() => {
     const el = document.querySelector('.mopsRd');
     if (!el) return { found: false };
     const label = el.getAttribute('aria-label');
@@ -174,7 +177,7 @@ delete process.env.LD_PRELOAD;
     if (head && !list) head.click();
     return { found: true, label, h: Math.round(r.height), w: Math.round(r.width), rowsN };
   });
-  console.log('DIRECT2', JSON.stringify(direct2));
+  console.log('DIRECT', JSON.stringify(direct));
   await page.screenshot({ path: '08-dock-readonly.png' });
   await browser.close();
 })().catch(e => { console.error('FATAL', String(e).slice(0, 250)); process.exit(1); });
