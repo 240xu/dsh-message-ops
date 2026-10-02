@@ -11,3 +11,11 @@
 - 一键点击 → 正确 payload（sessionId+seq）→ 拦截确认 ✅
 - 运行中会话按钮禁用 ✅
 - 发现：第三方 dsh-message-edit 在 0.2.0 header 槽崩溃（旧 sessions face `.entries`）
+
+## 0.5.x 实测补充（2026-10-02）
+- `e2e-quote-final.cjs`：引用按钮实测——点击「Quote to composer」→ composer
+  contenteditable 出现 `> ` 引用块 ✅（官方 InputActions.insertText 通道）
+- 会话打开的关键：**dblclick** 会话行（单击只选中）；headless locale=en →
+  aria-label 断言用英文文案
+- 0.5.0 曾因 0.4.2 重写误删 INPUT_DOCK 常量导致客户端整体激活失败
+  （页面横幅 Failed to load plugins）→ 0.5.1 修复；vm 冒烟可复现该类问题
