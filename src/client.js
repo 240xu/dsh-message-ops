@@ -22,6 +22,8 @@ window.__ModuleLoader__.load({
     const SLOT = 'conversation.session.header.actions'
     const ROW_ID = 'message-ops'
     const OVERLAY_SLOT = 'shell.overlay'
+    const INPUT_DOCK_SLOT = 'conversation.input.dock'
+    const INPUT_DOCK_ID = 'message-ops-revert-dock'
     const DIALOG_ID = 'message-ops-dialog'
     const EVENT = 'dsh-message-ops:open'
     const NS = 'dsh-message-ops'
