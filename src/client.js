@@ -745,6 +745,8 @@ window.__ModuleLoader__.load({
         return () => { alive = false }
       }, [sessionId])
 
+      // items 变化自动折叠（opencode createEffect 同款；必须在早退之前——Hooks 规则）
+      useEffect(() => { setOpen(false) }, [markers && markers.length, markers && markers[0] && markers[0].seq])
       if (!markers || !markers.length) return null
 
       const restoreRow = (row) => {
@@ -769,8 +771,6 @@ window.__ModuleLoader__.load({
           })
       }
 
-      // items 变化自动折叠（opencode createEffect 同款）
-      useEffect(() => { setOpen(false) }, [markers && markers.length, markers && markers[0] && markers[0].seq])
 
       const headerKbd = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((v) => !v) } }
       const label = t('dock.title', { n: String(markers.length) })

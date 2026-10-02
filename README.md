@@ -219,3 +219,9 @@ MIT
   chevron）、rounded-xl + 0.5px 边框 + bg-layer-01 容器、24px 行高 + neutral
   小按钮（非文字链）、items 变化自动折叠、Enter/Space 键盘切换、18px
   sacrificial 空间。
+
+### 0.4.3 · dock 崩溃修复（Hooks 规则违规）
+
+- 0.4.1 的自动折叠 useEffect 位于「无标记早退」之后——标记从 0 变非 0 时多出
+  第 4 个 hook，React 抛出 hooks 顺序错误并卸载整个槽（dock 永远不可见，
+  Playwright 抓到 React #310）。已把该 effect 移到早退之前（无条件 hook）。

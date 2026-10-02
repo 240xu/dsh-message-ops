@@ -3,6 +3,7 @@ const pw = require('/data/data/com.termux/files/usr/lib/node_modules/@playwright
 const fs = require('fs');
 const token = fs.readFileSync('/data/data/com.termux/files/home/.config/opencode/kpad-dsh.token', 'utf8').trim();
 
+delete process.env.LD_PRELOAD;
 (async () => {
   const browser = await pw.chromium.launch({ headless: true, executablePath: '/data/data/com.termux/files/home/.cache/ms-playwright/chromium_headless_shell-1234/chrome-linux/headless_shell' });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
