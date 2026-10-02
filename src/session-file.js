@@ -184,6 +184,10 @@ export function listMessages(events) {
         snippet: text.replace(/\s+/g, " ").trim().slice(0, 160),
         // 0.4.0 composer 回填：user 消息携带全文（revert 后 setDraft 原文）
         fullText: e.type === "user/message" ? text : null,
+        // 0.4.1 dock：replace 标记携带范围与来源（区分手工回撤 vs compaction）
+        range: isReplaceMarker && e.surfaceOp.startSeq != null && e.surfaceOp.endSeq != null
+          ? { start: e.surfaceOp.startSeq, end: e.surfaceOp.endSeq } : null,
+        sourceKind: (e.data && e.data.source && e.data.source.kind) || null,
         time: e.time ?? null,
         turn: (e.data && e.data.turn) ?? null,
       });

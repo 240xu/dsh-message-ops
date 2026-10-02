@@ -198,3 +198,13 @@ MIT
   逐条「恢复」（restoring 中间态禁用，S11）；无标记时 dock 不渲染。
 - 数据链：messages 端点为 user 消息新增 `fullText` 字段（回填原文）。
 - 0.1.x 宿主两个槽均不存在，inject 自动 no-op。
+
+### 0.4.1 · dock 修复：统计口径 + 原生观感
+
+- **统计修复**：旧版把历史累积的被遮蔽消息全算进「已回撤 N 条」（多次恢复重放后
+  虚高到数百）。现在 dock 只列**手工回撤/删除标记**（排除 compaction checkpoint），
+  每条标记显示其 range 内**当前不可见**的消息数；头部为标记计数。
+- **原生观感**：样式改为官方 GoalDock/TodoDock 同款——36px 高毛玻璃条
+  （`--dsw-specific-menu` + `--dsw-elevation-panel` + `--dsw-radius-md`）、
+  composer 卡片对齐宽度（`--dsh-composer-dock-inset` 系列）、13px/500 label、
+  28px 圆形切换钮——与目标/计划 dock 视觉完全一致。

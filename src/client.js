@@ -70,7 +70,8 @@ window.__ModuleLoader__.load({
       'busy.restore': '恢复中…',
       'confirm.restore': '恢复',
       'ack.restore': '我已了解：恢复将以新 seq 重放被遮蔽的消息（原日志不变）',
-      'dock.title': '已回撤 {n} 条（可恢复）',
+      'dock.title': '回撤记录 · {n}',
+      'dock.shadowedN': '遮蔽 {n} 条',
       'dock.restore': '恢复',
       'dock.restoring': '恢复中…',
       'menu.ops': '消息操作',
@@ -120,7 +121,8 @@ window.__ModuleLoader__.load({
       'done.delete': 'Deleted; reload to apply',
       'action.reload': 'Reload page',
       'errorPrefix': 'Operation failed: ',
-      'dock.title': '{n} rolled back (restorable)',
+      'dock.title': 'Revert history · {n}',
+      'dock.shadowedN': '{n} shadowed',
       'dock.restore': 'Restore',
       'dock.restoring': 'Restoring…',
       'menu.ops': 'Message ops',
@@ -684,25 +686,57 @@ window.__ModuleLoader__.load({
       const summary = sessions && sessions.byId ? sessions.byId[sessionId] : undefined
       const running = summary ? summary.running === true : false
       const [open, setOpen] = useState(false)
-      const [rows, setRows] = useState(null)   // [{seq, snippet, role}] replace 标记行
-      const [shadowedCount, setShadowedCount] = useState(0)
+      const [markers, setMarkers] = useState(null) // [{seq, snippet, range}] 非 compaction 的回撤标记
+      const [hiddenByMarker, setHiddenByMarker] = useState({}) // markerSeq -> 当前不可见条数
       const [restoring, setRestoring] = useState(null)
+      const [styleInjected, setStyleInjected] = useState(false)
+
+      // 官方 dock 视觉（GoalDock/TodoDock 同款值，一次注入）
+      useEffect(() => {
+        if (styleInjected || typeof document === 'undefined') return
+        if (document.getElementById('dsh-message-ops-dock-style')) { setStyleInjected(true); return }
+        const tag = document.createElement('style')
+        tag.id = 'dsh-message-ops-dock-style'
+        tag.textContent = [
+          '.mopsDock{box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance)*2 - var(--dsh-composer-dock-inset)*4);margin:0 auto 8px}',
+          '.mopsDockBar{isolation:isolate;box-sizing:border-box;width:100%;max-width:calc(var(--dsh-composer-card-max-width) - 4 * var(--dsh-composer-dock-inset));border-radius:var(--dsw-radius-md);min-height:36px;box-shadow:var(--dsw-elevation-panel);border:0;align-items:center;gap:10px;margin:0 auto;padding:4px 5px 4px 12px;display:flex;position:relative}',
+          '.mopsDockBar:before{z-index:-1;border-radius:inherit;background:var(--dsw-specific-menu);backdrop-filter:var(--dsw-menu-backdrop-filter);content:"";pointer-events:none;position:absolute;inset:0}',
+          '.mopsDockLabel{color:var(--dsw-alias-label-primary);flex:none;font-size:13px;font-weight:500;line-height:24px}',
+          '.mopsDockToggle{width:28px;height:28px;color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:none;border-radius:999px;justify-content:center;align-items:center;padding:0;display:inline-flex;font:inherit}',
+          '.mopsDockRow{display:flex;align-items:center;gap:8px;padding:4px 12px;border-top:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.15));position:relative}',
+          '.mopsDockRowText{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;opacity:.85;color:var(--dsw-alias-label-primary)}',
+          '.mopsDockRestore{border:none;background:transparent;color:var(--dsw-alias-link,#8ab4f8);font:inherit;font-size:12px;cursor:pointer;padding:4px 8px;min-height:28px;opacity:1}',
+          '.mopsDockList{max-height:180px;overflow-y:auto;padding-bottom:4px}',
+        ].join('')
+        document.head.appendChild(tag)
+        setStyleInjected(true)
+      }, [styleInjected])
 
       useEffect(() => {
         let alive = true
-        fetch('/api/message-ops/messages?sessionId=' + encodeURIComponent(sessionId))
+        const load = () => fetch('/api/message-ops/messages?sessionId=' + encodeURIComponent(sessionId))
           .then((r) => (r.ok ? r.json() : null))
           .then((data) => {
             if (!alive || !data || !data.ok) return
             const msgs = data.messages || []
-            setShadowedCount(msgs.filter((m) => m.visible === false && m.role !== 'system').length)
-            setRows(msgs.filter((m) => m.marker))
+            // 仅手工回撤/删除产生的标记（排除 compaction checkpoint）
+            const marks = msgs.filter((m) => m.marker && m.sourceKind !== 'compact-checkpoint')
+            setMarkers(marks)
+            // 每标记的当前不可见条数：落在该标记 range 内、当前不可见的 user/assistant 消息
+            const hidden = {}
+            for (const mk of marks) {
+              if (!mk.range) { hidden[mk.seq] = null; continue }
+              hidden[mk.seq] = msgs.filter((m) => m.visible === false && m.role !== 'system'
+                && m.seq >= mk.range.start && m.seq <= mk.range.end).length
+            }
+            setHiddenByMarker(hidden)
           })
           .catch(() => {})
+        load()
         return () => { alive = false }
       }, [sessionId])
 
-      if (!rows || !rows.length) return null   // 无回撤标记 → dock 不渲染
+      if (!markers || !markers.length) return null // 无手工回撤标记 → dock 不渲染
 
       const restoreRow = (row) => {
         if (restoring != null || running) return
@@ -716,51 +750,47 @@ window.__ModuleLoader__.load({
             try { data = await res.json() } catch { /* keep {} */ }
             if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status))
             notifyDone(t('done.restore', { n: String(data.restoredCount != null ? data.restoredCount : '?'), s: String(data.skipped != null ? data.skipped : 0) }))
-            // 刷新 dock 数据（重放后标记行状态变化）
+            setRestoring(null)
+            // 重放后刷新标记与计数
             const fresh = await fetch('/api/message-ops/messages?sessionId=' + encodeURIComponent(sessionId)).then((r) => (r.ok ? r.json() : null)).catch(() => null)
             if (fresh && fresh.ok) {
               const msgs = fresh.messages || []
-              setShadowedCount(msgs.filter((m) => m.visible === false && m.role !== 'system').length)
-              setRows(msgs.filter((m) => m.marker))
+              const marks = msgs.filter((m) => m.marker && m.sourceKind !== 'compact-checkpoint')
+              setMarkers(marks)
+              const hidden = {}
+              for (const mk of marks) {
+                if (!mk.range) { hidden[mk.seq] = null; continue }
+                hidden[mk.seq] = msgs.filter((m) => m.visible === false && m.role !== 'system'
+                  && m.seq >= mk.range.start && m.seq <= mk.range.end).length
+              }
+              setHiddenByMarker(hidden)
             }
           })
           .catch((reason) => {
             notifyDone(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
+            setRestoring(null)
           })
-          .finally(() => setRestoring(null))
       }
 
-      const rowEl = (row) => React.createElement('div', {
-        key: row.seq,
-        style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 10px',
-                 borderTop: '1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.15))' },
-      },
-        React.createElement('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, opacity: 0.85 } },
-          '#' + row.seq + ' ' + (row.role || '') + ' · ' + (row.snippet || '')),
+      const rowEl = (row) => React.createElement('div', { key: row.seq, className: 'mopsDockRow' },
+        React.createElement('span', { className: 'mopsDockRowText' },
+          '#' + row.seq + (hiddenByMarker[row.seq] != null ? ' · ' + t('dock.shadowedN', { n: String(hiddenByMarker[row.seq]) }) : '')
+          + ' · ' + (row.snippet || '')),
         React.createElement('button', {
           type: 'button', 'aria-label': t('dock.restore'), disabled: restoring != null || running,
-          style: { border: 'none', background: 'transparent', color: 'var(--dsw-alias-link,#8ab4f8)',
-                   font: 'inherit', fontSize: 12, cursor: restoring != null || running ? 'default' : 'pointer',
-                   opacity: restoring != null || running ? 0.5 : 1, padding: '4px 8px', minHeight: 28 },
+          className: 'mopsDockRestore',
           onClick: () => restoreRow(row),
         }, restoring === row.seq ? t('dock.restoring') : t('dock.restore')),
       )
 
-      return React.createElement('div', {
-        role: 'region', 'aria-label': t('dock.title', { n: String(shadowedCount) }),
-        style: { border: '1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.25))', borderRadius: 8, margin: '0 0 8px', overflow: 'hidden',
-                 background: 'var(--dsw-alias-bg-elevated,rgba(128,128,128,.06))' },
-      },
-        React.createElement('button', {
-          type: 'button', 'aria-expanded': open,
-          style: { display: 'flex', width: '100%', alignItems: 'center', justifyContent: 'space-between',
-                   border: 'none', background: 'transparent', color: 'inherit',
-                   font: 'inherit', fontSize: 12, padding: '6px 10px', cursor: 'pointer', minHeight: 32 },
-          onClick: () => setOpen((v) => !v),
-        },
-          React.createElement('span', null, t('dock.title', { n: String(shadowedCount) })),
-          React.createElement('span', { style: { opacity: 0.6 } }, open ? '▾' : '▸')),
-        open ? React.createElement('div', { style: { maxHeight: 180, overflowY: 'auto' } }, rows.map(rowEl)) : null,
+      return React.createElement('div', { className: 'mopsDock', role: 'region', 'aria-label': t('dock.title', { n: String(markers.length) }) },
+        React.createElement('div', { className: 'mopsDockBar' },
+          React.createElement('span', { className: 'mopsDockLabel' }, t('dock.title', { n: String(markers.length) })),
+          React.createElement('button', {
+            type: 'button', 'aria-expanded': open, className: 'mopsDockToggle',
+            onClick: () => setOpen((v) => !v),
+          }, open ? '▾' : '▸')),
+        open ? React.createElement('div', { className: 'mopsDockList' }, markers.map(rowEl)) : null,
       )
     }
 
