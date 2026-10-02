@@ -70,8 +70,9 @@ window.__ModuleLoader__.load({
       'busy.restore': '恢复中…',
       'confirm.restore': '恢复',
       'ack.restore': '我已了解：恢复将以新 seq 重放被遮蔽的消息（原日志不变）',
-      'dock.title': '回撤记录 · {n}',
-      'dock.shadowedN': '遮蔽 {n} 条',
+      'dock.title': '已回撤 {n} 条消息',
+      'dock.expand': '展开回撤列表',
+      'dock.collapse': '折叠回撤列表',
       'dock.restore': '恢复',
       'dock.restoring': '恢复中…',
       'menu.ops': '消息操作',
@@ -121,7 +122,9 @@ window.__ModuleLoader__.load({
       'done.delete': 'Deleted; reload to apply',
       'action.reload': 'Reload page',
       'errorPrefix': 'Operation failed: ',
-      'dock.title': 'Revert history · {n}',
+      'dock.title': '{n} messages rolled back',
+      'dock.expand': 'Expand revert list',
+      'dock.collapse': 'Collapse revert list',
       'dock.shadowedN': '{n} shadowed',
       'dock.restore': 'Restore',
       'dock.restoring': 'Restoring…',
@@ -677,6 +680,16 @@ window.__ModuleLoader__.load({
     const INPUT_DOCK_SLOT = 'conversation.input.dock'
     const INPUT_DOCK_ID = 'message-ops-revert-dock'
 
+    // 0.4.2 活跃标记计算：排除 compaction 标记 + 已被恢复（后续 restore notice
+    // 引用其 seq）的标记 —— 对齐 opencode clear 语义：恢复后不再显示为待恢复项。
+    function activeMarkers(msgs) {
+      const restored = new Set()
+      for (const m of msgs || []) {
+        if (m && typeof m.restoresSeq === 'number') restored.add(m.restoresSeq)
+      }
+      return (msgs || []).filter((m) => m.marker && m.sourceKind !== 'compact-checkpoint' && !restored.has(m.seq))
+    }
+
     function RevertDock(props) {
       const { sessionId, useSessions, inputActions } = props
       const t = (props && props.t) || __t
@@ -686,27 +699,34 @@ window.__ModuleLoader__.load({
       const summary = sessions && sessions.byId ? sessions.byId[sessionId] : undefined
       const running = summary ? summary.running === true : false
       const [open, setOpen] = useState(false)
-      const [markers, setMarkers] = useState(null) // [{seq, snippet, range}] 非 compaction 的回撤标记
-      const [hiddenByMarker, setHiddenByMarker] = useState({}) // markerSeq -> 当前不可见条数
+      const [markers, setMarkers] = useState(null) // 活跃回撤标记（已恢复的自动消失）
       const [restoring, setRestoring] = useState(null)
       const [styleInjected, setStyleInjected] = useState(false)
 
-      // 官方 dock 视觉（GoalDock/TodoDock 同款值，一次注入）
+      // opencode SessionRevertDock 视觉（v2 布局，DSH 令牌等价映射）
       useEffect(() => {
         if (styleInjected || typeof document === 'undefined') return
         if (document.getElementById('dsh-message-ops-dock-style')) { setStyleInjected(true); return }
         const tag = document.createElement('style')
         tag.id = 'dsh-message-ops-dock-style'
         tag.textContent = [
-          '.mopsDock{box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance)*2 - var(--dsh-composer-dock-inset)*4);margin:0 auto 8px}',
-          '.mopsDockBar{isolation:isolate;box-sizing:border-box;width:100%;max-width:calc(var(--dsh-composer-card-max-width) - 4 * var(--dsh-composer-dock-inset));border-radius:var(--dsw-radius-md);min-height:36px;box-shadow:var(--dsw-elevation-panel);border:0;align-items:center;gap:10px;margin:0 auto;padding:4px 5px 4px 12px;display:flex;position:relative}',
-          '.mopsDockBar:before{z-index:-1;border-radius:inherit;background:var(--dsw-specific-menu);backdrop-filter:var(--dsw-menu-backdrop-filter);content:"";pointer-events:none;position:absolute;inset:0}',
-          '.mopsDockLabel{color:var(--dsw-alias-label-primary);flex:none;font-size:13px;font-weight:500;line-height:24px}',
-          '.mopsDockToggle{width:28px;height:28px;color:var(--dsw-alias-label-tertiary);cursor:pointer;background:0 0;border:none;border-radius:999px;justify-content:center;align-items:center;padding:0;display:inline-flex;font:inherit}',
-          '.mopsDockRow{display:flex;align-items:center;gap:8px;padding:4px 12px;border-top:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.15));position:relative}',
-          '.mopsDockRowText{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;opacity:.85;color:var(--dsw-alias-label-primary)}',
-          '.mopsDockRestore{border:none;background:transparent;color:var(--dsw-alias-link,#8ab4f8);font:inherit;font-size:12px;cursor:pointer;padding:4px 8px;min-height:28px;opacity:1}',
-          '.mopsDockList{max-height:180px;overflow-y:auto;padding-bottom:4px}',
+          // 容器：rounded-xl + 0.5px 边框 + bg-layer-01（M1 修正令牌）
+          '.mopsRd{width:100%;overflow:hidden;border-radius:var(--dsw-radius-md,12px);border:.5px solid var(--dsw-alias-border-l1,rgba(128,128,128,.25));background:var(--dsw-alias-bg-layer-1,#1e1e20)}',
+          // 头部 42px：图标 + label + 折叠预览 + 旋转 chevron
+          '.mopsRdHead{display:flex;height:42px;align-items:center;gap:8px;padding-left:16px;padding-right:8px;cursor:pointer;user-select:none}',
+          '.mopsRdIcon{display:inline-flex;color:var(--dsw-alias-label-tertiary,#9a9aa0);flex:none}',
+          '.mopsRdLabel{font-size:13px;font-weight:500;line-height:20px;letter-spacing:-.04px;flex:none;cursor:default;color:var(--dsw-alias-label-primary,inherit)}',
+          '.mopsRdLabelCollapsed{color:var(--dsw-alias-label-secondary,#a8a8ae)}',
+          '.mopsRdPreview{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:400;line-height:20px;letter-spacing:-.04px;cursor:default;color:var(--dsw-alias-label-tertiary,#9a9aa0)}',
+          '.mopsRdChevron{margin-left:auto;flex:none;display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;border-radius:999px;background:transparent;color:var(--dsw-alias-label-tertiary,#9a9aa0);cursor:pointer;transition:transform .15s ease}',
+          // 列表：24px 行 + neutral 小按钮（非文字链）
+          '.mopsRdList{display:flex;flex-direction:column;gap:8px;max-height:168px;overflow-y:auto;padding:1px 16px 12px}',
+          '.mopsRdRow{display:flex;height:24px;min-width:0;align-items:center;gap:8px}',
+          '.mopsRdRowText{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:400;line-height:20px;letter-spacing:-.04px;color:var(--dsw-alias-label-secondary,#a8a8ae)}',
+          '.mopsRdRestore{flex:none;font:inherit;font-size:12px;line-height:18px;padding:2px 10px;border-radius:6px;cursor:pointer;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));border:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.2));opacity:1}',
+          '.mopsRdRestore:disabled{opacity:.45;cursor:default}',
+          // 折叠时 18px sacrificial 空间（composer 负 lift 重叠）
+          '.mopsRdSpacer{height:18px}',
         ].join('')
         document.head.appendChild(tag)
         setStyleInjected(true)
@@ -718,25 +738,14 @@ window.__ModuleLoader__.load({
           .then((r) => (r.ok ? r.json() : null))
           .then((data) => {
             if (!alive || !data || !data.ok) return
-            const msgs = data.messages || []
-            // 仅手工回撤/删除产生的标记（排除 compaction checkpoint）
-            const marks = msgs.filter((m) => m.marker && m.sourceKind !== 'compact-checkpoint')
-            setMarkers(marks)
-            // 每标记的当前不可见条数：落在该标记 range 内、当前不可见的 user/assistant 消息
-            const hidden = {}
-            for (const mk of marks) {
-              if (!mk.range) { hidden[mk.seq] = null; continue }
-              hidden[mk.seq] = msgs.filter((m) => m.visible === false && m.role !== 'system'
-                && m.seq >= mk.range.start && m.seq <= mk.range.end).length
-            }
-            setHiddenByMarker(hidden)
+            setMarkers(activeMarkers(data.messages || []))
           })
           .catch(() => {})
         load()
         return () => { alive = false }
       }, [sessionId])
 
-      if (!markers || !markers.length) return null // 无手工回撤标记 → dock 不渲染
+      if (!markers || !markers.length) return null
 
       const restoreRow = (row) => {
         if (restoring != null || running) return
@@ -751,20 +760,8 @@ window.__ModuleLoader__.load({
             if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status))
             notifyDone(t('done.restore', { n: String(data.restoredCount != null ? data.restoredCount : '?'), s: String(data.skipped != null ? data.skipped : 0) }))
             setRestoring(null)
-            // 重放后刷新标记与计数
             const fresh = await fetch('/api/message-ops/messages?sessionId=' + encodeURIComponent(sessionId)).then((r) => (r.ok ? r.json() : null)).catch(() => null)
-            if (fresh && fresh.ok) {
-              const msgs = fresh.messages || []
-              const marks = msgs.filter((m) => m.marker && m.sourceKind !== 'compact-checkpoint')
-              setMarkers(marks)
-              const hidden = {}
-              for (const mk of marks) {
-                if (!mk.range) { hidden[mk.seq] = null; continue }
-                hidden[mk.seq] = msgs.filter((m) => m.visible === false && m.role !== 'system'
-                  && m.seq >= mk.range.start && m.seq <= mk.range.end).length
-              }
-              setHiddenByMarker(hidden)
-            }
+            if (fresh && fresh.ok) setMarkers(activeMarkers(fresh.messages || []))
           })
           .catch((reason) => {
             notifyDone(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
@@ -772,25 +769,42 @@ window.__ModuleLoader__.load({
           })
       }
 
-      const rowEl = (row) => React.createElement('div', { key: row.seq, className: 'mopsDockRow' },
-        React.createElement('span', { className: 'mopsDockRowText' },
-          '#' + row.seq + (hiddenByMarker[row.seq] != null ? ' · ' + t('dock.shadowedN', { n: String(hiddenByMarker[row.seq]) }) : '')
-          + ' · ' + (row.snippet || '')),
+      // items 变化自动折叠（opencode createEffect 同款）
+      useEffect(() => { setOpen(false) }, [markers && markers.length, markers && markers[0] && markers[0].seq])
+
+      const headerKbd = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((v) => !v) } }
+      const label = t('dock.title', { n: String(markers.length) })
+      const preview = markers[0] && markers[0].snippet ? markers[0].snippet : ''
+
+      const rowEl = (row) => React.createElement('div', { key: row.seq, className: 'mopsRdRow' },
+        React.createElement('span', { className: 'mopsRdRowText' }, '#' + row.seq + ' · ' + (row.snippet || '')),
         React.createElement('button', {
-          type: 'button', 'aria-label': t('dock.restore'), disabled: restoring != null || running,
-          className: 'mopsDockRestore',
+          type: 'button', className: 'mopsRdRestore', disabled: restoring != null || running,
           onClick: () => restoreRow(row),
         }, restoring === row.seq ? t('dock.restoring') : t('dock.restore')),
       )
 
-      return React.createElement('div', { className: 'mopsDock', role: 'region', 'aria-label': t('dock.title', { n: String(markers.length) }) },
-        React.createElement('div', { className: 'mopsDockBar' },
-          React.createElement('span', { className: 'mopsDockLabel' }, t('dock.title', { n: String(markers.length) })),
-          React.createElement('button', {
-            type: 'button', 'aria-expanded': open, className: 'mopsDockToggle',
-            onClick: () => setOpen((v) => !v),
-          }, open ? '▾' : '▸')),
-        open ? React.createElement('div', { className: 'mopsDockList' }, markers.map(rowEl)) : null,
+      const chevron = React.createElement('button', {
+        type: 'button', 'aria-label': open ? t('dock.collapse') : t('dock.expand'), 'aria-expanded': open,
+        className: 'mopsRdChevron',
+        onClick: (e) => { e.stopPropagation(); setOpen((v) => !v) },
+      }, React.createElement('svg', { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none',
+        style: { transform: open ? 'rotate(0deg)' : 'rotate(180deg)', transition: 'transform .15s ease' } },
+        React.createElement('path', { d: 'M4 6l4 4 4-4', stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round', strokeLinejoin: 'round' })))
+
+      return React.createElement('div', { className: 'mopsRd', role: 'region', 'aria-label': label },
+        React.createElement('div', {
+          className: 'mopsRdHead', role: 'button', tabIndex: 0,
+          onClick: () => setOpen((v) => !v), onKeyDown: headerKbd,
+        },
+          React.createElement('span', { className: 'mopsRdIcon' },
+            React.createElement('svg', { width: 15, height: 15, viewBox: '0 0 16 16', fill: 'none' },
+              React.createElement('path', { d: 'M2.5 8a5.5 5.5 0 1 0 1.6-3.9', stroke: 'currentColor', strokeWidth: 1.2, strokeLinecap: 'round' }),
+              React.createElement('path', { d: 'M2.2 2.8v3h3', stroke: 'currentColor', strokeWidth: 1.2, strokeLinecap: 'round', strokeLinejoin: 'round' }))),
+          React.createElement('span', { className: 'mopsRdLabel' + (open ? '' : ' mopsRdLabelCollapsed') }, label),
+          open ? null : React.createElement('span', { className: 'mopsRdPreview' }, preview),
+          React.createElement('span', { style: { marginLeft: 'auto', flex: 'none' } }, chevron)),
+        open ? React.createElement('div', { className: 'mopsRdList' }, markers.map(rowEl)) : null,
       )
     }
 

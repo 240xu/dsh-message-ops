@@ -208,3 +208,14 @@ MIT
   （`--dsw-specific-menu` + `--dsw-elevation-panel` + `--dsw-radius-md`）、
   composer 卡片对齐宽度（`--dsh-composer-dock-inset` 系列）、13px/500 label、
   28px 圆形切换钮——与目标/计划 dock 视觉完全一致。
+
+### 0.4.2 · dock 像素级对齐 opencode + 回撤生命周期修正
+
+- **回撤生命周期**（对齐 opencode clear 语义）：restore 的 notice 事件现携带
+  `restoresSeq` 引用被恢复的标记——dock 只显示**活跃**标记，已恢复项自动消失
+  （此前恢复过的标记永远挂在列表里，计数随之虚高）。
+- **像素级对齐 opencode SessionRevertDock**（读其 dev 分支源码逐项落地）：
+  42px 头部（reset 图标 + 13px/500 label + 折叠时第一条预览文本 + 180° 旋转
+  chevron）、rounded-xl + 0.5px 边框 + bg-layer-01 容器、24px 行高 + neutral
+  小按钮（非文字链）、items 变化自动折叠、Enter/Space 键盘切换、18px
+  sacrificial 空间。

@@ -143,9 +143,11 @@ export function applyRestore(session, plan, { flush } = {}) {
   const notice = `[消息恢复] 重放 seq ${plan.startSeq}..${plan.endSeq} 的 ${plan.replayable.length} 条消息` +
     (plan.skipped > 0 ? `（另有 ${plan.skipped} 条不可重放事件已跳过）` : "") +
     `；原区间仍处于遮蔽状态，恢复为重放而非解除遮蔽`;
+  // 0.4.2：notice 事件携带 restoresSeq —— dock 据此把被恢复的标记从「活跃回撤」
+  // 中移除（对齐 opencode clear 语义：恢复后不再显示为待恢复项）。
   const noticeEvent = session.append(
     "system/message",
-    { message: { role: "system", content: [{ type: "text", text: notice }] } },
+    { message: { role: "system", content: [{ type: "text", text: notice }] }, restoresSeq: plan.restoreSeq },
     { surfaceOp: "append" },
   );
   if (noticeEvent && noticeEvent.seq != null) eventSeqs.push(noticeEvent.seq);

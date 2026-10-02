@@ -188,6 +188,9 @@ export function listMessages(events) {
         range: isReplaceMarker && e.surfaceOp.startSeq != null && e.surfaceOp.endSeq != null
           ? { start: e.surfaceOp.startSeq, end: e.surfaceOp.endSeq } : null,
         sourceKind: (e.data && e.data.source && e.data.source.kind) || null,
+        // 0.4.2：恢复标记引用（restore 的 notice 事件带回它所恢复的标记 seq）
+        restoresSeq: (e.type === "system/message" && e.data && typeof e.data.restoresSeq === "number")
+          ? e.data.restoresSeq : null,
         time: e.time ?? null,
         turn: (e.data && e.data.turn) ?? null,
       });
