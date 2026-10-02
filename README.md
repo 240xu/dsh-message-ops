@@ -188,3 +188,13 @@ MIT
   回退路径的 SVG 也改为官方 IconClockOutline/IconTrashOutline 的精确 path 数据
   （1px stroke，与 Regular 变体一致），不再手绘。
 - 字典文案去 emoji（label 仅用于 tooltip/aria，不参与渲染）。
+
+### 0.4.0 · opencode 式回撤深化（composer 回填 + 回撤 dock）
+
+- **Composer 回填**：回滚**用户消息**后，原文经官方 `InputActions.setDraft`
+  自动回填输入框——「编辑重发」零按钮（opencode 招牌交互）。
+- **结构化回撤 dock**：注入官方 `conversation.input.dock` 槽（composer 卡片上方
+  全宽条目）——「已回撤 N 条（可恢复）」折叠面板，展开列出每个回撤/删除标记，
+  逐条「恢复」（restoring 中间态禁用，S11）；无标记时 dock 不渲染。
+- 数据链：messages 端点为 user 消息新增 `fullText` 字段（回填原文）。
+- 0.1.x 宿主两个槽均不存在，inject 自动 no-op。

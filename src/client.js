@@ -70,6 +70,9 @@ window.__ModuleLoader__.load({
       'busy.restore': '恢复中…',
       'confirm.restore': '恢复',
       'ack.restore': '我已了解：恢复将以新 seq 重放被遮蔽的消息（原日志不变）',
+      'dock.title': '已回撤 {n} 条（可恢复）',
+      'dock.restore': '恢复',
+      'dock.restoring': '恢复中…',
       'menu.ops': '消息操作',
     }
 
@@ -117,11 +120,15 @@ window.__ModuleLoader__.load({
       'done.delete': 'Deleted; reload to apply',
       'action.reload': 'Reload page',
       'errorPrefix': 'Operation failed: ',
+      'dock.title': '{n} rolled back (restorable)',
+      'dock.restore': 'Restore',
+      'dock.restoring': 'Restoring…',
       'menu.ops': 'Message ops',
     }
 
     var __locale = null
     var __sessionsSvc = null
+    var __inputActions = null // 0.4.0: 从 session 槽捕获（InputActions.setDraft → composer 回填）
     var __uiWorkspace = null
     // messageId→seq 索引缓存（每会话一次拉取；0.3.0 assistant-actions 槽用）
     var __seqIndexCache = new Map()
@@ -379,6 +386,11 @@ window.__ModuleLoader__.load({
             const okMsg = mode === 'restore'
               ? t('done.restore', { n: String(data.restoredCount != null ? data.restoredCount : '?'), s: String(data.skipped != null ? data.skipped : 0) })
               : t(mode === 'revert' ? 'done.revert' : 'done.delete')
+            // 0.4.0 composer 回填（opencode 式）：回滚用户消息 → 原文回填输入框，「编辑重发」零按钮
+            if (mode === 'revert' && pickedMsg && pickedMsg.role === 'user' && pickedMsg.fullText
+                && __inputActions && typeof __inputActions.setDraft === 'function') {
+              try { __inputActions.setDraft(pickedMsg.fullText) } catch { /* 回填失败不阻断成功反馈 */ }
+            }
             setDoneMsg(okMsg)
             setBusyMsg('')
             setState('done')
@@ -582,7 +594,8 @@ window.__ModuleLoader__.load({
     const CHAT_ACTIONS_ID = 'message-ops-row'
 
     function MsgSlotActions(props) {
-      const { messageId, sessionId, useSessions } = props
+      const { messageId, sessionId, useSessions, inputActions } = props
+      if (inputActions && typeof inputActions.setDraft === 'function') __inputActions = inputActions
       const t = (props && props.t) || __t
       useLocaleRevision()
       const sessions = useSessions ? useSessions((s) => s) : undefined
@@ -653,6 +666,101 @@ window.__ModuleLoader__.load({
       return React.createElement('span', { style: { display: 'inline-flex', gap: 0 } },
         act(React.createElement(IconClock, { size: 16 }), t('slot.revert'), 'revert'),
         act(React.createElement(IconTrash, { size: 16 }), t('slot.delete'), 'delete'),
+      )
+    }
+
+    // --- 0.4.0 回撤 dock：composer 上方「N 条已回撤」结构化面板（opencode 式） ----
+    // 官方槽 conversation.input.dock（scope session，composer 卡片上方全宽条目）。
+    // ownerProps/standardProps 含 sessionId + useSessions + inputActions。
+    const INPUT_DOCK_SLOT = 'conversation.input.dock'
+    const INPUT_DOCK_ID = 'message-ops-revert-dock'
+
+    function RevertDock(props) {
+      const { sessionId, useSessions, inputActions } = props
+      const t = (props && props.t) || __t
+      useLocaleRevision()
+      if (inputActions && typeof inputActions.setDraft === 'function') __inputActions = inputActions
+      const sessions = useSessions ? useSessions((s) => s) : undefined
+      const summary = sessions && sessions.byId ? sessions.byId[sessionId] : undefined
+      const running = summary ? summary.running === true : false
+      const [open, setOpen] = useState(false)
+      const [rows, setRows] = useState(null)   // [{seq, snippet, role}] replace 标记行
+      const [shadowedCount, setShadowedCount] = useState(0)
+      const [restoring, setRestoring] = useState(null)
+
+      useEffect(() => {
+        let alive = true
+        fetch('/api/message-ops/messages?sessionId=' + encodeURIComponent(sessionId))
+          .then((r) => (r.ok ? r.json() : null))
+          .then((data) => {
+            if (!alive || !data || !data.ok) return
+            const msgs = data.messages || []
+            setShadowedCount(msgs.filter((m) => m.visible === false && m.role !== 'system').length)
+            setRows(msgs.filter((m) => m.marker))
+          })
+          .catch(() => {})
+        return () => { alive = false }
+      }, [sessionId])
+
+      if (!rows || !rows.length) return null   // 无回撤标记 → dock 不渲染
+
+      const restoreRow = (row) => {
+        if (restoring != null || running) return
+        setRestoring(row.seq)
+        fetch('/api/message-ops/restore', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sessionId, seq: row.seq }),
+        })
+          .then(async (res) => {
+            let data = {}
+            try { data = await res.json() } catch { /* keep {} */ }
+            if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status))
+            notifyDone(t('done.restore', { n: String(data.restoredCount != null ? data.restoredCount : '?'), s: String(data.skipped != null ? data.skipped : 0) }))
+            // 刷新 dock 数据（重放后标记行状态变化）
+            const fresh = await fetch('/api/message-ops/messages?sessionId=' + encodeURIComponent(sessionId)).then((r) => (r.ok ? r.json() : null)).catch(() => null)
+            if (fresh && fresh.ok) {
+              const msgs = fresh.messages || []
+              setShadowedCount(msgs.filter((m) => m.visible === false && m.role !== 'system').length)
+              setRows(msgs.filter((m) => m.marker))
+            }
+          })
+          .catch((reason) => {
+            notifyDone(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
+          })
+          .finally(() => setRestoring(null))
+      }
+
+      const rowEl = (row) => React.createElement('div', {
+        key: row.seq,
+        style: { display: 'flex', alignItems: 'center', gap: 8, padding: '4px 10px',
+                 borderTop: '1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.15))' },
+      },
+        React.createElement('span', { style: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 12, opacity: 0.85 } },
+          '#' + row.seq + ' ' + (row.role || '') + ' · ' + (row.snippet || '')),
+        React.createElement('button', {
+          type: 'button', 'aria-label': t('dock.restore'), disabled: restoring != null || running,
+          style: { border: 'none', background: 'transparent', color: 'var(--dsw-alias-link,#8ab4f8)',
+                   font: 'inherit', fontSize: 12, cursor: restoring != null || running ? 'default' : 'pointer',
+                   opacity: restoring != null || running ? 0.5 : 1, padding: '4px 8px', minHeight: 28 },
+          onClick: () => restoreRow(row),
+        }, restoring === row.seq ? t('dock.restoring') : t('dock.restore')),
+      )
+
+      return React.createElement('div', {
+        role: 'region', 'aria-label': t('dock.title', { n: String(shadowedCount) }),
+        style: { border: '1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.25))', borderRadius: 8, margin: '0 0 8px', overflow: 'hidden',
+                 background: 'var(--dsw-alias-bg-elevated,rgba(128,128,128,.06))' },
+      },
+        React.createElement('button', {
+          type: 'button', 'aria-expanded': open,
+          style: { display: 'flex', width: '100%', alignItems: 'center', justifyContent: 'space-between',
+                   border: 'none', background: 'transparent', color: 'inherit',
+                   font: 'inherit', fontSize: 12, padding: '6px 10px', cursor: 'pointer', minHeight: 32 },
+          onClick: () => setOpen((v) => !v),
+        },
+          React.createElement('span', null, t('dock.title', { n: String(shadowedCount) })),
+          React.createElement('span', { style: { opacity: 0.6 } }, open ? '▾' : '▸')),
+        open ? React.createElement('div', { style: { maxHeight: 180, overflowY: 'auto' } }, rows.map(rowEl)) : null,
       )
     }
 
@@ -783,6 +891,11 @@ window.__ModuleLoader__.load({
         name: CHAT_ACTIONS_SLOT, id: CHAT_ACTIONS_ID, order: 20,
         ...(__locale ? { locale: NS } : {}),
       }, MsgSlotActions))
+      // 0.4.0：composer 上方回撤 dock（0.1.x 无此槽自动 no-op）
+      ctx.slots.inject(INPUT_DOCK_SLOT, () => ctx.slots.register({
+        name: INPUT_DOCK_SLOT, id: INPUT_DOCK_ID, order: 10,
+        ...(__locale ? { locale: NS } : {}),
+      }, RevertDock))
       ctx.slots.inject(OVERLAY_SLOT, () => ctx.slots.register({
         name: OVERLAY_SLOT, id: DIALOG_ID, order: 101,
         ...(__locale ? { locale: NS } : {}),

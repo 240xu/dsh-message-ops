@@ -182,6 +182,8 @@ export function listMessages(events) {
         id: (msg && msg.id) || e.data.id || null,
         marker: isReplaceMarker,
         snippet: text.replace(/\s+/g, " ").trim().slice(0, 160),
+        // 0.4.0 composer 回填：user 消息携带全文（revert 后 setDraft 原文）
+        fullText: e.type === "user/message" ? text : null,
         time: e.time ?? null,
         turn: (e.data && e.data.turn) ?? null,
       });
