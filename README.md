@@ -243,3 +243,22 @@ MIT
 - 0.4.2 的 dock 重写误删了 `INPUT_DOCK_SLOT/ID` 常量声明——apply() 引用未定义
   标识符导致**整个客户端激活失败**（页面横幅 Failed to load plugins）。
   已恢复常量；新增 vm 冒烟自测路径（见 .e2e/）。
+
+## 0.5.2 · Bug 猎场第一轮修复（P0×1 + P1×3 + P2×6）
+
+- **[P0] activeMarkers 被 0.5.0 误删**（与 INPUT_DOCK 同一 commit，0.5.1 只找回常量）：
+  dock 100% 静默失效（ReferenceError 被 .catch 吞掉）。已恢复函数 + vm 冒烟守卫。
+- **[P1] 工具层未 await async ops**（0.2.1 改 async 后漏同步化）：list/restore 必抛
+  TypeError、export 渲出空 text。switch 全部 await + 回归测试（异步桩）。
+- **[P1] 引用空块**：assistant 消息 fullText 恒 null，回退 `''` 通过 null 检查 →
+  插入空 `> ` 块并报成功。改为按 seq 走新端点 `GET /text` 取单条全文，空串按不可用处理。
+- **[P1] 侧栏菜单卡死**：dispatch 缺 sessionId → 对话框永久「正在读取…」。
+  从 data-row-key 提取 sessionId 一并派发。
+- **[P2] seq 索引缓存投毒**：失败必须 `delete`，否则该会话按钮/dock 到刷新前全失效。
+- **[P2] 索引口径**：同 id 取最早 seq（对齐服务端 buildSeqIndex，不再内联取最大）。
+- **[P2] branch 工具渲染**：读 keptEvents/parentSession（原读不存在的 kept/parentId）。
+- **[P2] dock 标题口径**：改报标记 range 内被遮蔽消息数（原报标记数，严重低报）。
+- **[P2] busy 卡死**：runRevert/restoreRow/对话框 run 全部 `Promise.resolve()` 包裹——
+  同步抛出也落进 finally；restoreRow 补 finally 双保险。
+- **[P2] dock 陈旧**：新增 `dsh-message-ops:changed` 广播，回滚/恢复成功后 dock 自动重拉。
+- **[P3] 删 en 独有死键 dock.shadowedN；GET 端点补 405 方法校验。**

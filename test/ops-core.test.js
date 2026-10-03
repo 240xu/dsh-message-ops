@@ -190,7 +190,7 @@ test('apply：无 webServer、无 tools 时走 inject 等待，不抛错', () =>
   assert.equal(ctx.registrations.length, 0)
 })
 
-test('apply：webServer 存在时注册全部 6 条路由；tools 缺失走 inject 等待', () => {
+test('apply：webServer 存在时注册全部 7 条路由；tools 缺失走 inject 等待', () => {
   const ctx = mockCtx({ webServer: { register: (route) => ctx.registrations.push(route) } })
   assert.doesNotThrow(() => apply(ctx))
   const paths = ctx.registrations.map((r) => r.path).sort()
@@ -201,6 +201,7 @@ test('apply：webServer 存在时注册全部 6 条路由；tools 缺失走 inje
     '/api/message-ops/messages',
     '/api/message-ops/restore',
     '/api/message-ops/revert',
+    '/api/message-ops/text',
   ])
   // tools 缺失 → 容错等待而非 fatal
   assert.ok(ctx.injects.some(([deps]) => deps[0] === 'tools'))
@@ -213,4 +214,40 @@ test('apply：tools 服务存在时直接进入注册路径（包缺失时 catch
   // 动态 import('@deepseek-ai/dsh-tools') 在本测试环境不可解析 → 工具跳过，
   // 但绝不能让插件 apply 抛错；异步分支也不能产生未处理拒绝。
   assert.equal(registered.length, 0)
+})
+
+// ── 0.5.2 回归：工具层必须 await async ops（0.2.1 改 async 后曾漏同步化，
+//    list/restore 抛 TypeError、export 渲出空 text；旧桩是同步的故漏检）──────
+test('工具 execute：async ops 被 await（list/branch/restore/export 全路径）', async () => {
+  let def
+  const defineTool = (d) => { def = d; return d }
+  const asyncOps = {
+    list: async () => ({ session: { id: 'session-abc', parentSession: null }, running: false, total: 1, visibleCount: 1,
+      messages: [{ seq: 10, role: 'user', visible: true, snippet: 'hello' }] }),
+    revert: async () => ({ mode: 'revert', shadowedCount: 2, seq: 10, eventSeq: 99 }),
+    delete: async () => ({ mode: 'delete', shadowedCount: 1, seq: 10, eventSeq: 98 }),
+    branch: async () => ({ newId: 'session-child', keptEvents: 42, parentSession: undefined }),
+    restore: async () => ({ restoredCount: 1, skipped: 0, range: { startSeq: 5, endSeq: 6 }, eventSeqs: [7, 8] }),
+    export: async () => ({ markdown: '# md' }),
+  }
+  createMessageOpsTool({ defineTool, ops: asyncOps, ctx: {} })
+  assert.ok(def, 'tool defined')
+  const outList = await def.execute({ action: 'list', sessionId: 'session-abc' })
+  assert.match(String(outList), /session session-abc/)
+  assert.doesNotMatch(String(outList), /failed:/)
+  const outBranch = await def.execute({ action: 'branch', sessionId: 'session-abc', upToSeq: 10 })
+  // 0.5.2 P2：branch 渲染读 keptEvents + parentSession（注入自入参），不再读不存在的 kept/parentId
+  assert.match(String(outBranch), /kept 42 event/)
+  assert.match(String(outBranch), /parent session-abc/)
+  const outRestore = await def.execute({ action: 'restore', sessionId: 'session-abc', seq: 6 })
+  assert.match(String(outRestore), /replayed 1 message/)
+  const outExport = await def.execute({ action: 'export', sessionId: 'session-abc' })
+  assert.equal(String(outExport), '# md')
+  // 同步抛出的 ops 仍走错误文案路径
+  const errTool = await (async () => {
+    let d2
+    createMessageOpsTool({ defineTool: (x) => { d2 = x }, ops: { list: () => { throw new Error('boom') } }, ctx: {} })
+    return d2.execute({ action: 'list', sessionId: 'session-abc' })
+  })()
+  assert.match(String(errTool), /list failed: boom/)
 })

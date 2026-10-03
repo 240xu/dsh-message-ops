@@ -26,6 +26,9 @@ window.__ModuleLoader__.load({
     const INPUT_DOCK_ID = 'message-ops-revert-dock'
     const DIALOG_ID = 'message-ops-dialog'
     const EVENT = 'dsh-message-ops:open'
+    // 0.5.2（P2）：回滚/恢复成功后广播 → RevertDock 重拉标记（否则 dock 只在切会话时刷新）
+    const CHANGED_EVENT = 'dsh-message-ops:changed'
+    const emitChanged = () => { try { window.dispatchEvent(new CustomEvent(CHANGED_EVENT)) } catch { /* noop */ } }
     const NS = 'dsh-message-ops'
 
     const zhDict = {
@@ -386,11 +389,12 @@ window.__ModuleLoader__.load({
         }
         const path = mode === 'restore' ? 'restore' : mode
         const body = { sessionId: target.sessionId, seq: picked }
-        fetch('/api/message-ops/' + path, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(body),
-        })
+        Promise.resolve()
+          .then(() => fetch('/api/message-ops/' + path, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body),
+          }))
           .then(async (res) => {
             let data = {}
             try { data = await res.json() } catch { /* keep {} */ }
@@ -410,6 +414,7 @@ window.__ModuleLoader__.load({
             setBusyMsg('')
             setState('done')
             notifyDone(okMsg)
+            emitChanged()
           })
           .catch((reason) => {
             setBusyMsg('')
@@ -641,12 +646,14 @@ window.__ModuleLoader__.load({
         else if (cached) resolve(cached)
         else {
           const p = fetch('/api/message-ops/messages?sessionId=' + encodeURIComponent(sessionId))
-            .then((r) => (r.ok ? r.json() : { messages: [] }))
+            .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
             .then((data) => {
               const index = new Map()
               const full = new Map()
               for (const m of (data && data.messages) || []) {
-                if (m && m.id != null) index.set(String(m.id), m.seq)
+                // 0.5.2（P2）：同 id 取**最早** seq——与服务端 buildSeqIndex 口径一致
+                // （重试链取最早可见节点；此前内联 set 覆盖=取最大，双实现分裂）
+                if (m && m.id != null && !index.has(String(m.id))) index.set(String(m.id), m.seq)
                 if (m && m.id != null && m.fullText) full.set(String(m.id), m.fullText)
               }
               __seqIndexCache.set(sessionId, index)
@@ -654,7 +661,9 @@ window.__ModuleLoader__.load({
               return index
             })
           __seqIndexCache.set(sessionId, p)
-          p.then(resolve).catch(() => {})
+          // 0.5.2（P2）：失败必须清缓存——否则 rejected promise 被永久缓存，
+          // 该会话按钮/dock 到刷新页面为止全部失效
+          p.then(resolve).catch(() => { __seqIndexCache.delete(sessionId) })
         }
         return () => { alive = false }
       }, [messageId, sessionId])
@@ -689,16 +698,20 @@ window.__ModuleLoader__.load({
       const runRevert = () => {
         if (busy || seq == null || running) return
         setBusy('revert')
-        fetch('/api/message-ops/revert', {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sessionId, seq }),
-        })
+        // 0.5.2（P2）：Promise.resolve 包裹——fetch/stringify 同步抛出也转为
+        // rejection 落进 finally，busy 永不卡死
+        Promise.resolve()
+          .then(() => fetch('/api/message-ops/revert', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionId, seq }),
+          }))
           .then(async (res) => {
             let data = {}
             try { data = await res.json() } catch { /* keep {} */ }
             if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status))
             notifyDone(t('done.revert'))
             revealSession()
+            emitChanged()
           })
           .catch((reason) => {
             notifyDone(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
@@ -714,11 +727,18 @@ window.__ModuleLoader__.load({
             return
           }
           const span = inputActions.captureInsertion()
-          const text = fullText != null ? fullText : (summary && summary.title ? '' : null)
-          if (text == null) { notifyDone(t('quote.unavailable'), 'warn'); return }
-          const quoted = text.split('\n').map((l) => '> ' + l).join('\n') + '\n\n'
-          const ok = inputActions.insertText(quoted, span)
-          notifyDone(ok ? t('quote.done') : t('quote.unavailable'), ok ? 'ok' : 'warn')
+          const insertQuote = (text) => {
+            if (text == null || text === '') { notifyDone(t('quote.unavailable'), 'warn'); return }
+            const quoted = text.split('\n').map((l) => '> ' + l).join('\n') + '\n\n'
+            const ok = inputActions.insertText(quoted, span)
+            notifyDone(ok ? t('quote.done') : t('quote.unavailable'), ok ? 'ok' : 'warn')
+          }
+          // assistant 消息 fullText 恒 null（列表不携带）→ 按 seq 向服务端取单条全文
+          if (fullText != null && fullText !== '') { insertQuote(fullText); return }
+          fetch('/api/message-ops/text?sessionId=' + encodeURIComponent(sessionId) + '&seq=' + encodeURIComponent(seq))
+            .then((r) => (r.ok ? r.json() : null))
+            .then((d) => insertQuote(d && d.ok && typeof d.text === 'string' ? d.text : null))
+            .catch(() => insertQuote(null))
         } catch (e) {
           notifyDone(t('errorPrefix') + (e && e.message ? e.message : String(e)), 'error')
         }
@@ -740,6 +760,16 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 0.4.2 引入（恢复的标记自动离开活跃列表 = opencode clear 语义）。
+    // 0.5.0 脚本化编辑曾误删本函数 → dock 100% 静默失效（P0，0.5.2 恢复）。
+    function activeMarkers(msgs) {
+      const restored = new Set()
+      for (const m of msgs || []) {
+        if (m && typeof m.restoresSeq === 'number') restored.add(m.restoresSeq)
+      }
+      return (msgs || []).filter((m) => m.marker && m.sourceKind !== 'compact-checkpoint' && !restored.has(m.seq))
+    }
+
     function RevertDock(props) {
       const { sessionId, useSessions, inputActions } = props
       const t = (props && props.t) || __t
@@ -750,6 +780,7 @@ window.__ModuleLoader__.load({
       const running = summary ? summary.running === true : false
       const [open, setOpen] = useState(false)
       const [markers, setMarkers] = useState(null) // 活跃回撤标记（已恢复的自动消失）
+      const [shadowCount, setShadowCount] = useState(0) // 标记 range 内被遮蔽消息数（标题口径）
       const [restoring, setRestoring] = useState(null)
       const [styleInjected, setStyleInjected] = useState(false)
 
@@ -784,15 +815,28 @@ window.__ModuleLoader__.load({
 
       useEffect(() => {
         let alive = true
+        const onChange = () => load()
+        window.addEventListener(CHANGED_EVENT, onChange)
         const load = () => fetch('/api/message-ops/messages?sessionId=' + encodeURIComponent(sessionId))
           .then((r) => (r.ok ? r.json() : null))
           .then((data) => {
             if (!alive || !data || !data.ok) return
-            setMarkers(activeMarkers(data.messages || []))
+            const msgs = data.messages || []
+            setMarkers(activeMarkers(msgs))
+            // 0.5.2（P2）：标题口径 = 标记 range 内 visible=false 的去重 seq 数
+            const seen = new Set()
+            for (const mk of activeMarkers(msgs)) {
+              const start = mk.range && typeof mk.range.start === 'number' ? mk.range.start : mk.seq
+              const end = mk.range && typeof mk.range.end === 'number' ? mk.range.end : start
+              for (const m of msgs) {
+                if (m && m.visible === false && typeof m.seq === 'number' && m.seq >= start && m.seq <= end) seen.add(m.seq)
+              }
+            }
+            setShadowCount(seen.size)
           })
           .catch(() => {})
         load()
-        return () => { alive = false }
+        return () => { alive = false; window.removeEventListener(CHANGED_EVENT, onChange) }
       }, [sessionId])
 
       // items 变化自动折叠（opencode createEffect 同款；必须在早退之前——Hooks 规则）
@@ -802,10 +846,11 @@ window.__ModuleLoader__.load({
       const restoreRow = (row) => {
         if (restoring != null || running) return
         setRestoring(row.seq)
-        fetch('/api/message-ops/restore', {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sessionId, seq: row.seq }),
-        })
+        Promise.resolve()
+          .then(() => fetch('/api/message-ops/restore', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionId, seq: row.seq }),
+          }))
           .then(async (res) => {
             let data = {}
             try { data = await res.json() } catch { /* keep {} */ }
@@ -821,13 +866,15 @@ window.__ModuleLoader__.load({
           })
           .catch((reason) => {
             notifyDone(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
-            setRestoring(null)
           })
+          .finally(() => setRestoring(null))
       }
 
 
       const headerKbd = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((v) => !v) } }
-      const label = t('dock.title', { n: String(markers.length) })
+      // 0.5.2（P2）：标题报「被遮蔽消息数」而非标记数——一个 revert 可遮蔽数百条，
+      // 用标记数会严重低报（0.4.2 文案引入的错口径）；无 range 数据时回退标记数
+      const label = t('dock.title', { n: String(shadowCount || markers.length) })
       const preview = markers[0] && markers[0].snippet ? markers[0].snippet : ''
 
       const rowEl = (row) => React.createElement('div', { key: row.seq, className: 'mopsRdRow' },
@@ -899,7 +946,11 @@ window.__ModuleLoader__.load({
         var titleEl = row.querySelector('[class*=title]')
         var title = titleEl ? String(titleEl.innerText || '').trim() : ''
         if (!title) return
-        window.dispatchEvent(new CustomEvent(EVENT, { detail: { title: title } }))
+        // 0.5.2（P1）：必须带 sessionId——否则对话框加载 effect 早退，永久卡「正在读取…」
+        var sid = ''
+        var rk = row.getAttribute && row.getAttribute('data-row-key')
+        if (rk && rk.indexOf('session:') === 0) sid = rk.slice(8)
+        window.dispatchEvent(new CustomEvent(EVENT, { detail: { title: title, sessionId: sid || undefined } }))
       })
       var sep = document.createElement('div')
       sep.style.cssText = 'height:1px;margin:4px 8px;background:var(--dsw-alias-border-l1,rgba(128,128,128,.2))'

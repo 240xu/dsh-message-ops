@@ -20,7 +20,7 @@
  * @module dsh-message-ops
  */
 
-import { isSessionId, sessionIdVariants, findSessionDirs, readSessionFile, readSessionFileAsync, listMessages, computeShadowed } from "./session-file.js";
+import { isSessionId, sessionIdVariants, findSessionDirs, readSessionFile, readSessionFileAsync, listMessages, computeShadowed, messageText } from "./session-file.js";
 import { applyBranch } from "./branch.js";
 import {
   OpsError, planRevert, planDelete, planRestore, applyRestore, applySurfaceReplace, exportMarkdown,
@@ -250,14 +250,19 @@ export function createMessageOpsTool({ defineTool, ops, ctx }) {
       const sessionId = String(args.sessionId || "").trim();
       try {
         let result;
+        // 0.5.2（P1）：ops 自 0.2.1 起为 async——不 await 会把 Promise 直接送进 renderResult，
+        // list/restore 必抛 TypeError、export 渲出空 text（测试桩曾是同步的故漏检）。
         switch (action) {
-          case "list": result = ops.list(ctx, sessionId); break;
-          case "revert": result = ops.revert(ctx, sessionId, args.seq); break;
-          case "delete": result = ops.delete(ctx, sessionId, args.seq); break;
-          case "branch": result = ops.branch(ctx, sessionId, args.upToSeq); break;
-          case "restore": result = ops.restore(ctx, sessionId, args.seq); break;
-          case "export": result = ops.export(ctx, sessionId, args.seq); break;
+          case "list": result = await ops.list(ctx, sessionId); break;
+          case "revert": result = await ops.revert(ctx, sessionId, args.seq); break;
+          case "delete": result = await ops.delete(ctx, sessionId, args.seq); break;
+          case "branch": result = await ops.branch(ctx, sessionId, args.upToSeq); break;
+          case "restore": result = await ops.restore(ctx, sessionId, args.seq); break;
+          case "export": result = await ops.export(ctx, sessionId, args.seq); break;
           default: throw new OpsError(`unknown action: ${action}`, 400);
+        }
+        if (action === "branch" && result && typeof result === "object" && result.parentSession == null) {
+          result.parentSession = sessionId; // renderResult 需要原始会话 id（branch 返回值不含/可为 undefined）
         }
         return renderResult(action, result);
       } catch (e) {
@@ -284,7 +289,7 @@ function renderResult(action, r) {
     case "delete":
       return `${r.mode} ok: shadowed ${r.shadowedCount} node(s) from seq ${r.seq}; marker event seq ${r.eventSeq}`;
     case "branch":
-      return `branch ok: new session ${r.newId} (parent ${r.parentId ?? "n/a"}), kept ${r.kept ?? "?"} event(s)`;
+      return `branch ok: new session ${r.newId} (parent ${r.parentSession ?? "n/a"}), kept ${r.keptEvents ?? "?"} event(s)`;
     case "restore":
       return `restore ok: replayed ${r.restoredCount} message(s) from range ${r.range.startSeq}..${r.range.endSeq} (${r.skipped} skipped); appended event seqs ${r.eventSeqs.join(", ")}`;
     case "export":
@@ -333,6 +338,7 @@ export function apply(ctx) {
       kind: "exact",
       path: "/api/message-ops/messages",
       handler: async (req, res) => {
+        if (req.method !== "GET") return sendJson(res, 405, { ok: false, error: "method not allowed" });
         if (!fence(req, res)) return;
         try {
           const url = new URL(req.url, "http://localhost");
@@ -342,6 +348,31 @@ export function apply(ctx) {
         }
       },
     }), "dsh-message-ops: messages route");
+
+    // --- GET /api/message-ops/text：单条消息全文（0.5.2 引用按钮按需取） ----------
+    // assistant 消息的 fullText 不在 messages 列表里（载荷控制），quote 点击时单取。
+    targetCtx.effect(() => host.register({
+      kind: "exact",
+      path: "/api/message-ops/text",
+      handler: async (req, res) => {
+        if (req.method !== "GET") return sendJson(res, 405, { ok: false, error: "method not allowed" });
+        if (!fence(req, res)) return;
+        try {
+          const url = new URL(req.url, "http://localhost");
+          const sessionId = url.searchParams.get("sessionId") || "";
+          const seq = Number.parseInt(url.searchParams.get("seq") || "", 10);
+          if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
+          if (!Number.isSafeInteger(seq) || seq < 0) throw new OpsError("invalid seq", 400);
+          const { logPath } = pickSessionDir(sessionId);
+          const { events } = await readSessionFileAsync(logPath);
+          const ev = events.find((e) => e && e.seq === seq);
+          if (!ev) throw new OpsError("seq not found", 404);
+          return sendJson(res, 200, { ok: true, seq, text: messageText(ev) });
+        } catch (err) {
+          return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
+        }
+      },
+    }), "dsh-message-ops: text route");
 
     // --- POST revert / delete：live-session surface replace ------------------
     const commitHandler = (mode) => async (req, res) => {
