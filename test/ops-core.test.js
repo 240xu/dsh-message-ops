@@ -251,3 +251,33 @@ test('工具 execute：async ops 被 await（list/branch/restore/export 全路�
   })()
   assert.match(String(errTool), /list failed: boom/)
 })
+
+// ── 0.5.4 P0 回归：system/message 必须带正 turn/step（0.2.0 v4 准入收紧，
+//    缺字段 → 持久层 encodeEventBatch 未捕获 → **整个 dsh 进程 exit=1**）────
+test('applySurfaceReplace/applyRestore 附带正整数 turn/step（v4 准入）', async () => {
+  const { applySurfaceReplace, applyRestore, deriveTurnStep } = await import('../src/ops-core.js');
+  const appended = [];
+  const fakeSession = { append: (type, data, opts) => { appended.push({ type, data, opts }); return { seq: 999 }; } };
+  // 1) deriveTurnStep：尾部回溯 / 兜底
+  assert.deepEqual(deriveTurnStep([{ data: { turn: 7, step: 3 } }]), { turn: 7, step: 3 });
+  assert.deepEqual(deriveTurnStep([{ data: {} }, { data: { turn: 2, step: 5 } }]), { turn: 2, step: 5 });
+  assert.deepEqual(deriveTurnStep([]), { turn: 1, step: 1 });
+  assert.deepEqual(deriveTurnStep(undefined), { turn: 1, step: 1 });
+  // 2) revert/delete 通知
+  applySurfaceReplace(fakeSession, 10, 20, [10], '[消息回滚] x', { turn: 9, step: 4 });
+  assert.equal(appended[0].type, 'system/message');
+  assert.ok(appended[0].data.turn > 0 && Number.isInteger(appended[0].data.turn), 'data.turn 正整数');
+  assert.ok(appended[0].data.step > 0 && Number.isInteger(appended[0].data.step), 'data.step 正整数');
+  // 无坐标参数时兜底 1/1（调用方漏传不致崩）
+  applySurfaceReplace(fakeSession, 10, 20, [10], 'x2');
+  assert.ok(appended[1].data.turn >= 1 && appended[1].data.step >= 1);
+  // 3) restore 通知（plan.turnStep）
+  applyRestore(fakeSession, {
+    restoreSeq: 5, startSeq: 1, endSeq: 3, skipped: 0, turnStep: { turn: 12, step: 6 },
+    replayable: [{ type: 'user/message', role: 'user', text: 'hi' }],
+  });
+  const notice = appended[2];
+  assert.equal(notice.type, 'system/message');
+  assert.equal(notice.data.turn, 12);
+  assert.equal(notice.data.step, 6);
+});

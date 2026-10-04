@@ -22,7 +22,7 @@
 
 import { isSessionId, sessionIdVariants, findSessionDirs, readSessionFile, readSessionFileAsync, listMessages, computeShadowed, messageText } from "./session-file.js";
 import { applyBranch } from "./branch.js";
-import {
+import { deriveTurnStep,
   OpsError, planRevert, planDelete, planRestore, applyRestore, applySurfaceReplace, exportMarkdown,
   isTrustedApiRequest, isJsonContentType,
 } from "./ops-core.js";
@@ -94,33 +94,36 @@ function resolveSession(ctx, sessionId) {
 }
 
 /** 是否有 live agent 正占用该会话。 */
+let __runningSource = null; // 诊断：最近一次 isRunning 的判定来源
 function isRunning(ctx, sessionId) {
-  // 0.5.3（实机 P0 级误报）：原实现查 agents 注册表——会话**在视图中打开**即有
-  // 条目 → 打开即报 running → 回撤/删除/分支全部被 409 锁死（正是你要修的
-  // 「按钮没有用」的又一层）。改为读 list snapshot 的 host-asserted running
-  // （官方侧栏 spinner / 官方分支按钮同源：sessions.list.getSnapshot().byId[].running）。
+  // 0.5.4（实机三层根因第 3 层的最终修）：与宿主**官方同源**——
+  // dsh-api-session-controller/lib/index.js ApiSessionList.summaryFor():
+  //   running: this.ctx.agents.get(session.id)?.status === "running"
+  // 原实现把「agents 注册表有条目」直接当 running —— 会话仅在视图中打开
+  // 就有条目 → 打开即 409 锁死所有变更操作。必须再比对 status。
   try {
-    const sessions = ctx.get("sessions");
-    const snap = sessions && sessions.list && typeof sessions.list.getSnapshot === "function"
-      ? sessions.list.getSnapshot() : null;
-    if (snap && snap.byId) {
-      for (const variant of sessionIdVariants(sessionId)) {
-        const row = snap.byId[variant];
-        if (row && typeof row.running === "boolean") return row.running;
-      }
-      return false; // snapshot 覆盖范围内的会话：以 host 断言为准
+    const agents = ctx.get("agents");
+    if (!agents || typeof agents.get !== "function") {
+      __runningSource = "no-agents-service";
+      return false;
     }
-  } catch { /* fall through to registry */ }
-  // 老宿主回退：agents 注册表（仅当 list snapshot 不可用时）
-  const agents = ctx.get("agents");
-  if (!agents || typeof agents.get !== "function") return false;
-  try {
     for (const variant of sessionIdVariants(sessionId)) {
-      if (agents.get(variant)) return true;
+      const agent = agents.get(variant);
+      if (agent && agent.status === "running") {
+        __runningSource = "agent-status-running";
+        return true;
+      }
+      if (agent) __runningSource = "agent-status:" + String(agent.status);
     }
-  } catch { /* registry absent: treat as idle */ }
-  return false;
+    if (!__runningSource) __runningSource = "no-agent-entry";
+    return false;
+  } catch (e) {
+    __runningSource = "threw:" + String(e && e.message).slice(0, 50);
+    return false;
+  }
 }
+
+
 
 function flushSessions(ctx, session) {
   const sessions = ctx.get("sessions");
@@ -160,23 +163,30 @@ async function opsList(targetCtx, sessionId) {
     ok: true,
     session: { id: header.id, createdAt: header.createdAt, parentSession: header.parentSession ?? null },
     running: isRunning(targetCtx, sessionId),
+    runningSource: __runningSource,
     total: messages.length,
     visibleCount,
     messages,
   };
 }
 
-function opsCommit(targetCtx, mode, sessionId, seq) {
+async function opsCommit(targetCtx, mode, sessionId, seq) {
   if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
   if (!Number.isSafeInteger(seq) || seq < 0) throw new OpsError("invalid seq", 400);
   if (isRunning(targetCtx, sessionId)) throw new OpsError("session is running; stop it first", 409);
   const session = resolveSession(targetCtx, sessionId);
   if (session === undefined) throw new OpsError("session not found in registry (is it loaded?)", 404);
+  // 0.5.4（P0）：v4 准入要求 system/message 带正 turn/step——缺字段时持久层
+  // encodeEventBatch 的 SessionFormatError 未捕获会**打死整个 dsh 进程**。
+  // 从磁盘日志尾部派生坐标后传给 append。
+  const { logPath } = pickSessionDir(sessionId);
+  const { events } = await readSessionFileAsync(logPath);
+  const turnStep = deriveTurnStep(events);
   const plan = mode === "delete" ? planDelete(session.surface, seq) : planRevert(session.surface, seq);
   const notice = mode === "delete"
     ? `[消息删除] 已遮蔽 seq ${seq}`
     : `[消息回滚] 已回滚到 seq ${seq}（含）之后的 ${plan.shadowedSeqs.length} 个节点`;
-  const event = applySurfaceReplace(session, plan.startSeq, plan.endSeq, plan.shadowedSeqs, notice);
+  const event = applySurfaceReplace(session, plan.startSeq, plan.endSeq, plan.shadowedSeqs, notice, turnStep);
   flushSessions(targetCtx, session);
   return {
     ok: true, mode, seq,
@@ -349,6 +359,15 @@ function registerToolTolerantly(ctx) {
 // ---------------------------------------------------------------------------
 
 export function apply(ctx) {
+  // 诊断（0.5.4 调试）：会话状态服务解析情况
+  try {
+    const names = ["sessions", "agents", "sessionController", "sessionList", "session-manager"];
+    const parts = names.map((n) => { const v = ctx.get(n); return n + "=" + (v == null ? String(v) : typeof v); });
+    const ses = ctx.get("sessions");
+    const hasList = ses && ses.list != null;
+    const hasSnap = hasList && typeof ses.list.getSnapshot === "function";
+    console.log("[message-ops] session services: " + parts.join(" ") + " | sessions.list=" + hasList + " getSnapshot=" + hasSnap + (ses ? " keys=" + Object.keys(ses).slice(0, 12).join("|") : ""));
+  } catch (e) { console.log("[message-ops] probe failed: " + e); }
   function registerHttp(host, targetCtx) {
     // --- GET /api/message-ops/messages：消息列表（只读） ---------------------
     targetCtx.effect(() => host.register({
@@ -399,7 +418,7 @@ export function apply(ctx) {
       if (body === undefined) return;
       if (!body || typeof body !== "object") return sendJson(res, 400, { ok: false, error: "invalid json" });
       try {
-        return sendJson(res, 200, opsCommit(targetCtx, mode, body.sessionId, body.seq));
+        return sendJson(res, 200, await opsCommit(targetCtx, mode, body.sessionId, body.seq));
       } catch (err) {
         return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
       }

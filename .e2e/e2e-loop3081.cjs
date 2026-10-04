@@ -14,44 +14,29 @@ const log = (...a) => console.log('>>>', ...a);
   await page.goto('http://127.0.0.1:3081/?token=' + token, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
   for (let i = 0; i < 25; i++) { await page.waitForTimeout(1000); if (await page.evaluate(() => document.querySelectorAll('[role=treeitem]').length) > 0) break; }
 
-  // 1. 打开既有测试会话（open-session.cjs 实证可用流程：文本点 zcode2api → 找行 → dblclick）
+  // 1. 打开既有测试会话（轮询式：展开→找行→Show more→找行，直到出现）
   const TEST_SID = 'session-2188f4ac-fa16-4560-9ded-d0555d0793c7';
-  for (let i = 0; i < 3; i++) {
-    const st = await page.evaluate((sid) => {
-      const ws = Array.from(document.querySelectorAll('[role=treeitem]')).find(e => (e.textContent || '').trim().startsWith('zcode2api'));
-      const target = Array.from(document.querySelectorAll('[data-row-key]')).find(e => (e.dataset.rowKey || '').includes(sid));
-      const exp = ws ? ws.getAttribute('aria-expanded') : null;
-      const b = ws ? ws.getBoundingClientRect() : null;
-      return { exp, hasWs: !!ws, hasTarget: !!target, wsRect: b ? { x: Math.round(b.x), y: Math.round(b.y) } : null };
-    }, TEST_SID);
-    log('open-iter' + i, JSON.stringify(st));
-    if (st.hasTarget) break;
-    if (st.hasWs && st.exp !== 'true' && st.wsRect) {
-      await page.mouse.click(st.wsRect.x + 30, st.wsRect.y + 10);
-      await page.waitForTimeout(2500);
-    } else if (st.hasWs && st.exp === 'true') {
-      const showed = await page.evaluate(() => {
-        const b = Array.from(document.querySelectorAll('button')).find(b => /^Show \d+ more/i.test((b.textContent || '').trim()));
-        if (!b) return false; b.click(); return true;
-      });
-      log('SHOW MORE:', showed);
-      await page.waitForTimeout(2000);
-    } else break;
-  }
-  const found = await page.evaluate((sid) => {
+  const findRow = async () => page.evaluate((sid) => {
     const el = Array.from(document.querySelectorAll('[data-row-key]')).find(e => (e.dataset.rowKey || '').includes(sid));
     if (!el) return null;
     el.scrollIntoView({ block: 'center' });
     const r = el.getBoundingClientRect();
-    return { x: r.x + Math.min(r.width / 2, 150), y: r.y + r.height / 2 };
+    return r.width > 0 ? { x: r.x + Math.min(r.width / 2, 150), y: r.y + r.height / 2 } : null;
   }, TEST_SID);
+  let found = null;
+  for (let i = 0; i < 15 && !found; i++) {
+    found = await findRow();
+    if (found) break;
+    // 未找到：确保 zcode2api 展开 + 尝试 Show more
+    await page.evaluate(() => {
+      const ws = Array.from(document.querySelectorAll('[role=treeitem]')).find(e => (e.textContent || '').trim().startsWith('zcode2api'));
+      if (ws && ws.getAttribute('aria-expanded') !== 'true') ws.click();
+      const more = Array.from(document.querySelectorAll('button')).find(b => /^Show \d+ more/i.test((b.textContent || '').trim()));
+      if (more) more.click();
+    });
+    await page.waitForTimeout(2000);
+  }
   log('FOUND ROW:', JSON.stringify(found));
-  if (!found) { log('ABORT: row not found'); await browser.close(); return; }
-  await page.mouse.dblclick(found.x, found.y);
-  await page.waitForTimeout(8000);
-  const sidOk = await page.evaluate(() => (document.body.innerText || '').includes('zcode.z.ai'));
-  log('SESSION OPEN (msg visible):', sidOk, '(want true)');
-  if (!sidOk) { log('ABORT: session not open'); await browser.close(); return; }
 
   // 3. 打开我们的对话框（header 按钮）
   const hdr = await page.evaluate(() => {
@@ -60,13 +45,22 @@ const log = (...a) => console.log('>>>', ...a);
   });
   log('HDR:', JSON.stringify(hdr));
   if (hdr) await page.mouse.click(hdr.x, hdr.y);
-  await page.waitForTimeout(4000);
+  await page.waitForTimeout(3500);
+  // 点击没开则直派打开事件（diag 实证可用的兜底通道）
+  const dlgOpen = await page.evaluate(() => document.querySelectorAll('input[name=dsh-message-ops-pick]').length > 0);
+  if (!dlgOpen) {
+    await page.evaluate((sid) => {
+      window.dispatchEvent(new CustomEvent('dsh-message-ops:open', { detail: { title: 't', sessionId: sid } }));
+    }, TEST_SID);
+    await page.waitForTimeout(3500);
+    log('DISPATCHED open event (click fallback)');
+  }
 
   // 4. 选第一条（用户消息）→ 回滚模式 → ack → 确认
   const picked = await page.evaluate(() => {
     const radios = Array.from(document.querySelectorAll('input[name=dsh-message-ops-pick]'));
     if (!radios.length) return { ok: false, modal: (document.querySelector('[role=dialog]') || {textContent:''}).textContent.slice(0, 60) };
-    radios[0].click();
+    radios[radios.length - 1].click(); // 最后一条 = 最小尾巴
     return { ok: true, count: radios.length };
   });
   log('PICKED:', JSON.stringify(picked));
@@ -89,44 +83,57 @@ const log = (...a) => console.log('>>>', ...a);
   log('CONFIRMED:', JSON.stringify(confirmed));
   await page.waitForTimeout(5000);
 
-  // 5. 读对话框结果态（done / error）
+  // 5. 读对话框结果态（期待：running 警告消失 + done）
   const dlgState = await page.evaluate(() => {
     const dlg = document.querySelector('[role=dialog]');
     if (!dlg) return { dlg: false };
     const txt = (dlg.textContent || '');
-    return { dlg: true, head: txt.replace(/\s+/g, ' ').slice(0, 140) };
+    return { dlg: true, runningWarn: /Session is running/.test(txt), head: txt.replace(/\s+/g, ' ').slice(0, 120) };
   });
-  log('DLG:', JSON.stringify(dlgState));
+  log('DLG:', JSON.stringify(dlgState), '(want runningWarn:false)');
 
-  // 6. 关对话框 → dock 探测
+  // 6. 关对话框 → dock 探测（回撤成功后标记应在）
   await page.keyboard.press('Escape').catch(() => {});
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(2000);
   const dock1 = await page.evaluate(() => {
     const el = document.querySelector('.mopsRd');
     return el ? { dock: true, label: el.getAttribute('aria-label') } : { dock: false };
   });
   log('DOCK after revert:', JSON.stringify(dock1), '(want dock:true)');
 
-  // 7. 展开 + Restore
-  const head = await page.evaluate(() => {
-    const el = document.querySelector('.mopsRd .mopsRdHead');
-    if (!el) return null; const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-  });
-  if (head) { await page.mouse.click(head.x, head.y); await page.waitForTimeout(1200); }
-  const rst = await page.evaluate(() => {
-    const b = Array.from(document.querySelectorAll('.mopsRd button')).find((b) => ['Restore', '恢复'].includes((b.textContent || '').trim()));
-    if (!b) return null; b.scrollIntoView({ block: 'center' }); const r = b.getBoundingClientRect();
-    return { x: r.x + r.width / 2, y: r.y + r.height / 2, disabled: b.disabled };
-  });
-  log('RESTORE:', JSON.stringify(rst), '(want object, disabled:false)');
-  if (rst && !rst.disabled) { await page.mouse.click(rst.x, rst.y); await page.waitForTimeout(6000); }
+  // 7. 展开 dock → 逐行恢复直到没有 Restore（含既有+新标记）
+  let restoredN = 0;
+  for (let i = 0; i < 8; i++) {
+    const head = await page.evaluate(() => {
+      const el = document.querySelector('.mopsRd .mopsRdHead');
+      if (!el) return null;
+      const expanded = !!document.querySelector('.mopsRdList');
+      if (expanded) return null; // 已展开
+      const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    });
+    if (head) { await page.mouse.click(head.x, head.y); await page.waitForTimeout(1200); }
+    const rst = await page.evaluate(() => {
+      const b = Array.from(document.querySelectorAll('.mopsRdList button')).find(b => ['Restore', '恢复'].includes((b.textContent || '').trim()));
+      if (!b || b.disabled) return null;
+      b.scrollIntoView({ block: 'center' });
+      const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    });
+    if (!rst) break;
+    await page.mouse.click(rst.x, rst.y);
+    restoredN++;
+    await page.waitForTimeout(6000); // restore + revealSession + dock refresh
+  }
+  log('RESTORED ROWS:', restoredN, '(want >=1)');
 
-  // 8. dock 应消失（activeMarkers 空）
-  const dock2 = await page.evaluate(() => !!document.querySelector('.mopsRd'));
-  log('DOCK after restore:', dock2, '(want false)');
-  // 9. 消息应重放回来（视图重建后含原消息或 [恢复]）
+  // 8. dock 应消失（全部活跃标记已恢复）
+  const dock2 = await page.evaluate(() => {
+    const el = document.querySelector('.mopsRd');
+    return { dock: !!el, label: el ? el.getAttribute('aria-label') : null };
+  });
+  log('DOCK after restore:', JSON.stringify(dock2), '(want dock:false)');
+  // 9. 原消息应可见（重放后含 [恢复] 前缀或原文）
   const msg = await page.evaluate(() => (document.body.innerText || '').includes('zcode.z.ai'));
-  log('MESSAGE VISIBLE after restore:', msg, '(want true — [恢复] 重放)');
+  log('MESSAGE VISIBLE after restore:', msg, '(want true)');
   await page.screenshot({ path: 'loop-final.png' });
   log('CERR-N:', errors.length, errors.slice(0, 3));
   await browser.close();

@@ -75,8 +75,32 @@ export function _resetReplaceShape() { replaceShape = null; }
  * sourceEventSeqs 必须覆盖被遮蔽的全部 surface 节点（引擎
  * assertProvenance 强校验，缺失即抛错）。
  */
-export function applySurfaceReplace(session, startSeq, endSeq, sourceEventSeqs, noticeText) {
-  const data = { message: { role: "system", content: [{ type: "text", text: noticeText }] } };
+/**
+ * deriveTurnStep：从事件流尾部回溯最近的正整数 turn/step 坐标。
+ *
+ * 0.5.4（实机 P0）：dsh 0.2.0 收紧 v4 准入（assertV4SystemMessageFields）——
+ * 每个 system/message 的 data 必须带正整数 turn/step。缺失时持久层
+ * encodeEventBatch 抛出的 SessionFormatError **未被任何层捕获 → 打死整个 dsh
+ * 进程**（包装实测 exit=1，栈：assertV4SystemMessageFields ← encodeEventBatch
+ * ← cordis apply）。通知事件复用最近一次活动的坐标（row-admission 只做
+ * positive 校验，无状态机匹配要求）；空/旧日志兜底 1/1。
+ */
+export function deriveTurnStep(events) {
+  if (Array.isArray(events)) {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const d = events[i] && events[i].data;
+      if (d && Number.isSafeInteger(d.turn) && d.turn > 0 && Number.isSafeInteger(d.step) && d.step > 0) {
+        return { turn: d.turn, step: d.step };
+      }
+    }
+  }
+  return { turn: 1, step: 1 };
+}
+
+export function applySurfaceReplace(session, startSeq, endSeq, sourceEventSeqs, noticeText, turnStep) {
+  const ts = turnStep && Number.isSafeInteger(turnStep.turn) && turnStep.turn > 0
+    ? turnStep : { turn: 1, step: 1 };
+  const data = { turn: ts.turn, step: ts.step, message: { role: "system", content: [{ type: "text", text: noticeText }] } };
   if (replaceShape) {
     return session.append("system/message", data, { surfaceOp: replaceOpFor(replaceShape, startSeq, endSeq), sourceEventSeqs });
   }
@@ -130,7 +154,7 @@ export function planRestore(events, restoreSeq) {
   if (replayable.length === 0) {
     throw new OpsError(`restore: no replayable user/assistant messages in shadowed range ${startSeq}..${endSeq}`, 409);
   }
-  return { restoreSeq, startSeq, endSeq, replayable, skipped };
+  return { restoreSeq, startSeq, endSeq, replayable, skipped, turnStep: deriveTurnStep(events) };
 }
 
 /**
@@ -145,9 +169,11 @@ export function applyRestore(session, plan, { flush } = {}) {
     `；原区间仍处于遮蔽状态，恢复为重放而非解除遮蔽`;
   // 0.4.2：notice 事件携带 restoresSeq —— dock 据此把被恢复的标记从「活跃回撤」
   // 中移除（对齐 opencode clear 语义：恢复后不再显示为待恢复项）。
+  const ts = plan.turnStep && Number.isSafeInteger(plan.turnStep.turn) && plan.turnStep.turn > 0
+    ? plan.turnStep : { turn: 1, step: 1 };
   const noticeEvent = session.append(
     "system/message",
-    { message: { role: "system", content: [{ type: "text", text: notice }] }, restoresSeq: plan.restoreSeq },
+    { turn: ts.turn, step: ts.step, message: { role: "system", content: [{ type: "text", text: notice }] }, restoresSeq: plan.restoreSeq },
     { surfaceOp: "append" },
   );
   if (noticeEvent && noticeEvent.seq != null) eventSeqs.push(noticeEvent.seq);

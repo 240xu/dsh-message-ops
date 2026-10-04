@@ -270,3 +270,16 @@ MIT
   闭环 e2e 实机抓到：curl 未打开时 false、UI 打开后恒 true）。
 - 改读 `sessions.list.getSnapshot().byId[].running`（host-asserted，与官方侧栏
   spinner、官方分支按钮 disabled 同源）；老宿主回退 agents 注册表。
+
+### 0.5.4 · 「点回撤打死整个 dsh」P0 修复（包装实测 exit=1 定位）
+
+- **根因**：dsh 0.2.0 收紧 v4 行准入（`assertV4SystemMessageFields`）——每个
+  `system/message` 的 `data` 必须带**正整数 `turn`/`step`**。回滚/删除/恢复的通知
+  事件没带 → 持久层 `encodeEventBatch` 抛出的 SessionFormatError **没有任何层捕获
+  → 整个 dsh 进程退出**（浏览器端表现为「Failed to fetch」，一切 revert 都静默失败；
+  此前多次「实例无故死亡」全部是它）。
+- **修复**：新增 `deriveTurnStep(events)`（尾部回溯最近正坐标，兜底 1/1）；
+  revert/delete 通知与 restore 通知全部附带坐标；`opsCommit` 改 async 读日志派生，
+  HTTP/tool 调用点已 await。回归测试断言三处 append 的 data.turn/step 均为正整数。
+- 教训：宿主持久层对未知字段的编码失败会杀进程（记录于 hub——上游应给
+  encodeEventBatch 加错误边界），插件侧必须严格遵守 v4 行结构。
