@@ -300,3 +300,17 @@ MIT
 - 改为：planRestore 对空可重放返回空计划；applyRestore 追加**停用 notice**
   （含 restoresSeq → dock 移除该行）+ 如实文案「区间无可重放内容」。
   非标记/越界/非法 seq 仍按原语义 404/409/400。
+
+### 0.5.7 · 第四层根因：store-miss 会话的磁盘追加路径
+
+- **实机链**：lazy-view 让会话只在磁盘渲染、不进对象层（视图开着 dock 已渲染，
+  但 `sessions.get(id)` 双变体 miss、`list()` 里只有别的会话）→ 变更操作 404。
+  官方服务端**没有** retain/using 面（那是浏览器侧 ClientSessions 的）。
+- **修复**：store-miss 时改为**直接向日志追加 zstd 帧**（等价持久层
+  `appendLines`：encode → open('a') → write+sync+按 size 回滚），事件字段逐项
+  镜像引擎金标准（根键序 `type/seq/time/data/sourceEventSeqs/surfaceOp`；
+  restore notice `restoresSeq` + `surfaceOp:"append"`；重放无 id）。
+  磁盘会话的视图/搜索/dock 全部按帧重读 → 追加即可见；成功后客户端
+  openSession 强制重建视图（磁盘追加无 live 投影事件）。
+- live 会话（对象层在册）仍走引擎路径；两条路径共用 turn/step/id 派生与
+  空区间停用语义。新回归测试断言可见节点/计划语义/字段镜像（44/44）。

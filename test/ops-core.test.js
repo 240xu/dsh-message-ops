@@ -308,3 +308,54 @@ test('planRestore 空可重放区间返回空计划；applyRestore 发停用 not
   assert.match(appended[0].data.message.content[0].text, /无可重放/);
   assert.ok(appended[0].data.turn > 0 && appended[0].data.message.id, 'v4 准入字段齐');
 });
+
+// ── 0.5.7 磁盘路径回归：字段镜像引擎金标准 + 计划语义一致 ──────────────────
+test('磁盘计划/构建器：可见节点剔除遮蔽、marker 字段逐项镜像金标准', async () => {
+  const core = await import('../src/ops-core.js');
+  // 事件流：user10 → assistant11 → step/end12（非节点）→ 既有标记 13 遮蔽 11
+  const events = [
+    { type: 'user/message', seq: 10, data: { message: { role: 'user', content: [] } } },
+    { type: 'assistant/message', seq: 11, data: { message: { role: 'assistant', content: [] } } },
+    { type: 'step/end', seq: 12, data: {} },
+    { type: 'system/message', seq: 13, data: { turn: 1, step: 1, message: {} },
+      surfaceOp: { op: 'replace', startSeq: 11, endSeq: 11 }, sourceEventSeqs: [11] },
+    { type: 'user/message', seq: 14, data: { message: { role: 'user', content: [] } } },
+  ];
+  // 可见节点 = [10, 14]（11 已遮蔽；12 非 message；13 是标记本身也是 system 可见）
+  const nodes = core.diskVisibleNodes(events);
+  assert.deepEqual(nodes, [10, 13, 14], '剔除遮蔽 + 只取 message 类: ' + JSON.stringify(nodes));
+  // revert at 14 → 遮蔽 [14]（末尾）
+  const plan = core.planRevertFromEvents(events, 14);
+  assert.deepEqual(plan.shadowedSeqs, [14]);
+  assert.equal(plan.endSeq, 14);
+  // revert at 10 → 遮蔽 [10, 13, 14]
+  const plan2 = core.planRevertFromEvents(events, 10);
+  assert.deepEqual(plan2.shadowedSeqs, [10, 13, 14]);
+  // 不可见 seq → 409
+  assert.throws(() => core.planRevertFromEvents(events, 11), (e) => e.status === 409);
+  // nextSeq
+  assert.equal(core.nextSeqFrom(events), 15);
+  // marker 构建器字段镜像（对照引擎金标准形状）
+  const ev = core.buildMarkerEvent({
+    seq: 15, time: 1791105740958, turnStep: { turn: 9, step: 6 }, text: 'x',
+    startSeq: 14, endSeq: 14, shadowedSeqs: [14],
+  });
+  assert.deepEqual(Object.keys(ev), ['type', 'seq', 'time', 'data', 'sourceEventSeqs', 'surfaceOp'], '根键序镜像');
+  assert.equal(ev.type, 'system/message');
+  assert.equal(ev.data.turn, 9);
+  assert.equal(ev.data.step, 6);
+  assert.ok(ev.data.message.id.length > 0);
+  assert.equal(ev.data.message.role, 'system');
+  assert.deepEqual(ev.data.message.content[0], { type: 'text', text: 'x' });
+  assert.deepEqual(ev.sourceEventSeqs, [14]);
+  assert.deepEqual(ev.surfaceOp, { op: 'replace', startSeq: 14, endSeq: 14 });
+  assert.equal(Object.keys(ev.surfaceOp).length, 3, 'replace op 恰好 3 键（引擎 isReplaceOp）');
+  // restore notice + replay 镜像
+  const nt = core.buildRestoreNoticeEvent({ seq: 16, time: 2, turnStep: { turn: 9, step: 6 }, text: 'n', restoreSeq: 13 });
+  assert.equal(nt.surfaceOp, 'append');
+  assert.equal(nt.data.restoresSeq, 13);
+  const rp = core.buildReplayEvent({ seq: 17, time: 3, item: { type: 'user/message', role: 'user', text: 'hi' } });
+  assert.equal(rp.surfaceOp, 'append');
+  assert.deepEqual(rp.data.message, { role: 'user', content: [{ type: 'text', text: '[恢复] hi' }] });
+  assert.ok(!('id' in rp.data.message), '重放镜像引擎：不带 id');
+});

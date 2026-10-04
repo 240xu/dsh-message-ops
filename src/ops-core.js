@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto";
  * @module dsh-message-ops/ops-core
  */
 
-import { readReplaceOp, messageText } from "./session-file.js";
+import { readReplaceOp, messageText, computeShadowed } from "./session-file.js";
 
 // messageText 的单点实现在 session-file.js（listMessages 同用）；此处转出保持
 // 既有导入面兼容（ops-core 的 messageText/exportMarkdown 调用方不受影响）。
@@ -164,14 +164,19 @@ export function planRestore(events, restoreSeq) {
  * 引擎不支持取消遮蔽（SurfaceOp 无该变体），故实现为重放：
  * 每条消息以原类型 append、文本加 [恢复] 前缀；先 append 一条 system 说明。
  */
-export function applyRestore(session, plan, { flush } = {}) {
-  const eventSeqs = [];
-  const notice = plan.replayable.length === 0
+/** 恢复说明文案（live append 与磁盘路径共用；空可重放 = 停用语义）。 */
+export function restoreNoticeText(plan) {
+  return plan.replayable.length === 0
     ? `[消息恢复] seq ${plan.startSeq}..${plan.endSeq} 区间无可重放的 user/assistant 消息（` +
       `内容为 tool/system 事件或空文本）——该回撤标记就此停用，区间保持遮蔽`
     : `[消息恢复] 重放 seq ${plan.startSeq}..${plan.endSeq} 的 ${plan.replayable.length} 条消息` +
       (plan.skipped > 0 ? `（另有 ${plan.skipped} 条不可重放事件已跳过）` : "") +
       `；原区间仍处于遮蔽状态，恢复为重放而非解除遮蔽`;
+}
+
+export function applyRestore(session, plan, { flush } = {}) {
+  const eventSeqs = [];
+  const notice = restoreNoticeText(plan);
   // 0.4.2：notice 事件携带 restoresSeq —— dock 据此把被恢复的标记从「活跃回撤」
   // 中移除（对齐 opencode clear 语义：恢复后不再显示为待恢复项）。
   const ts = plan.turnStep && Number.isSafeInteger(plan.turnStep.turn) && plan.turnStep.turn > 0
@@ -326,4 +331,99 @@ export function buildSeqIndex(messages) {
     if (prev === undefined || m.seq < prev) map.set(m.id, m.seq);
   }
   return map;
+}
+
+// ---------------------------------------------------------------------------
+// 0.5.7 · 磁盘路径（lazy-view 会话不进对象层时的回退）
+// ---------------------------------------------------------------------------
+// 实机第四层根因：视图打开 ≠ 对象层有会话（lazy-view 只读盘渲染）。官方服务端
+// 没有 retain/using 面，故 store-miss 时改为**直接向日志追加 zstd 帧**——与
+// 持久层 JsonlSessionPersistence.appendLines 等价（encode → open('a') →
+// write+sync+失败回滚），事件字段逐项镜像引擎写出的金标准（见 README0.5.7）。
+// 磁盘会话的视图本来就按帧重读，追加即可见；live 会话仍走引擎路径。
+
+/** 事件类型是否为 surface 节点（message 类；step/end、turn/end 等结构性事件不是）。 */
+export function isSurfaceMessageType(type) {
+  return type === "user/message" || type === "assistant/message"
+    || type === "system/message" || type === "developer/message";
+}
+
+/** 磁盘可见节点：按事件流推导的 message 类 seq（剔除既有遮蔽）。 */
+export function diskVisibleNodes(events) {
+  const shadowed = computeShadowed(events);
+  const nodes = [];
+  for (const e of events) {
+    if (!e || !Number.isSafeInteger(e.seq)) continue;
+    if (shadowed.has(e.seq)) continue;
+    if (isSurfaceMessageType(e.type)) nodes.push(e.seq);
+  }
+  return nodes;
+}
+
+/** 磁盘版 planRevert：target 必须可见，遮蔽 target 之后（含）全部可见节点。 */
+export function planRevertFromEvents(events, targetSeq) {
+  const nodes = diskVisibleNodes(events);
+  const startIdx = nodes.indexOf(targetSeq);
+  if (startIdx === -1) throw new OpsError(`surface replace: start seq ${targetSeq} not found in surface`, 409);
+  const shadowedSeqs = nodes.slice(startIdx);
+  if (shadowedSeqs.length === 0) throw new OpsError("nothing to revert", 409);
+  return { startSeq: targetSeq, endSeq: shadowedSeqs[shadowedSeqs.length - 1], shadowedSeqs };
+}
+
+/** 磁盘版 planDelete：单条可见遮蔽。 */
+export function planDeleteFromEvents(events, seq) {
+  if (!diskVisibleNodes(events).includes(seq)) {
+    throw new OpsError(`seq ${seq} not visible on current surface`, 409);
+  }
+  return { startSeq: seq, endSeq: seq, shadowedSeqs: [seq] };
+}
+
+/** 下一个可用 seq（全量事件 max+1；结构性事件也占 seq）。 */
+export function nextSeqFrom(events) {
+  let max = -1;
+  for (const e of events) if (e && Number.isSafeInteger(e.seq) && e.seq > max) max = e.seq;
+  return max + 1;
+}
+
+/** 磁盘回撤/删除标记事件（字段镜像引擎金标准：type/seq/time/data/sourceEventSeqs/surfaceOp）。 */
+export function buildMarkerEvent({ seq, time, turnStep, text, startSeq, endSeq, shadowedSeqs }) {
+  return {
+    type: "system/message",
+    seq,
+    time,
+    data: {
+      turn: turnStep.turn,
+      step: turnStep.step,
+      message: { id: randomUUID(), role: "system", content: [{ type: "text", text }] },
+    },
+    sourceEventSeqs: [...shadowedSeqs],
+    surfaceOp: { op: "replace", startSeq, endSeq },
+  };
+}
+
+/** 磁盘恢复说明事件（restoresSeq → dock 移除该行；surfaceOp 恒 "append"）。 */
+export function buildRestoreNoticeEvent({ seq, time, turnStep, text, restoreSeq }) {
+  return {
+    type: "system/message",
+    seq,
+    time,
+    data: {
+      turn: turnStep.turn,
+      step: turnStep.step,
+      message: { id: randomUUID(), role: "system", content: [{ type: "text", text }] },
+      restoresSeq: restoreSeq,
+    },
+    surfaceOp: "append",
+  };
+}
+
+/** 磁盘重放事件（镜像引擎：无 id、[恢复] 前缀、surfaceOp "append"）。 */
+export function buildReplayEvent({ seq, time, item }) {
+  return {
+    type: item.type,
+    seq,
+    time,
+    data: { message: { role: item.role, content: [{ type: "text", text: `[恢复] ${item.text}` }] } },
+    surfaceOp: "append",
+  };
 }

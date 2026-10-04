@@ -20,9 +20,11 @@
  * @module dsh-message-ops
  */
 
+import { zstdCompressSync } from "node:zlib";
+import { open as openFile, truncate as truncateFile, stat as statFile } from "node:fs/promises";
 import { isSessionId, sessionIdVariants, findSessionDirs, readSessionFile, readSessionFileAsync, listMessages, computeShadowed, messageText } from "./session-file.js";
 import { applyBranch } from "./branch.js";
-import { deriveTurnStep,
+import { restoreNoticeText, planRevertFromEvents, planDeleteFromEvents, nextSeqFrom, buildMarkerEvent, buildRestoreNoticeEvent, buildReplayEvent, deriveTurnStep,
   OpsError, planRevert, planDelete, planRestore, applyRestore, applySurfaceReplace, exportMarkdown,
   isTrustedApiRequest, isJsonContentType,
 } from "./ops-core.js";
@@ -83,17 +85,89 @@ async function readFencedBody(req, res) {
 }
 
 /** 从 sessions 注册表解析（两种 id 拼写都试）。 */
+let __resolveSource = null; // 诊断：最近一次 resolveSession 的失败原因
 function resolveSession(ctx, sessionId) {
-  const sessions = ctx.get("sessions");
-  if (!sessions || typeof sessions.get !== "function") return undefined;
-  for (const variant of sessionIdVariants(sessionId)) {
-    const s = sessions.get(variant);
-    if (s !== undefined) return s;
+  // 宿主自己的取法是 `this.ctx.sessions.get(id)`（api-session-controller 同款）；
+  // 实测 `ctx.get("sessions")` 在 inject 子 fiber 下解析到的注册表**查不到视图已
+  // 加载的会话**（dock 已渲染但 get 双变体 miss —— agents.get 同 ctx 却命中），
+  // 故属性优先、ctx.get 兜底，两处都试全变体。
+  const candidates = [];
+  try { if (ctx && ctx.sessions) candidates.push(["prop", ctx.sessions]); } catch { /* no proxy */ }
+  try { const svc = ctx.get("sessions"); if (svc) candidates.push(["get", svc]); } catch { /* absent */ }
+  if (candidates.length === 0) { __resolveSource = "no-sessions-service"; return undefined; }
+  const variants = sessionIdVariants(sessionId);
+  const tried = [];
+  for (const [src, svc] of candidates) {
+    if (typeof svc.get !== "function") { tried.push(src + ":no-get"); continue; }
+    for (const variant of variants) {
+      const s = svc.get(variant);
+      if (s !== undefined) { __resolveSource = "hit via " + src + ".get " + String(variant).slice(0, 24); return s; }
+    }
+    // get 键错位兜底：list() 扫描（集群 face 的 list() 返回 live 实例数组，
+    // 实测 get 双变体 miss 时 list 里可能有 —— 按 id/sessionId 匹配）
+    if (typeof svc.list === "function") {
+      try {
+        const arr = svc.list();
+        if (Array.isArray(arr)) {
+          const hit = arr.find((x) => x && (variants.includes(x.id) || variants.includes(x.sessionId)));
+          if (hit) { __resolveSource = "hit via " + src + ".list() n=" + arr.length; return hit; }
+          tried.push(src + ":list-n=" + arr.length + " ids=" + arr.slice(0, 3).map((x) => String(x && (x.id || x.sessionId) || "?").slice(0, 18)).join("|"));
+        } else {
+          tried.push(src + ":list-" + typeof arr);
+        }
+      } catch (e) { tried.push(src + ":list-threw " + String(e && e.message).slice(0, 30)); }
+      continue;
+    }
+    tried.push(src + ":miss");
   }
+  __resolveSource = tried.join(",") + " tried=" + variants.length + " first=" + String(variants[0]).slice(0, 30);
   return undefined;
 }
 
 /** 是否有 live agent 正占用该会话。 */
+/**
+ * acquireSession：拿到 live SessionFace（带 .surface/.append）并在用完后释放。
+ *
+ * 0.5.6（实机第四层根因）：lazy-view 让会话**只在磁盘渲染、不进对象层**——
+ * 视图开着（dock 已渲染）但 sessions.get(id) 双变体全 miss、list() 里只有别的
+ * 会话 → 所有变更操作 404「not found in registry」。官方越界获取通道是
+ * retain(target, {source}) → await ready → binding.session（ISessions 契约）；
+ * 引用在 mutation 完成后 release（final reference 触发 teardown，须先 flush）。
+ */
+async function acquireSession(ctx, sessionId) {
+  const direct = resolveSession(ctx, sessionId);
+  if (direct !== undefined) return { session: direct, release() {} };
+  const owners = [];
+  // reflect 层：api-session-controller 把 ISessions（ClientSessions，带 retain）经
+  // `rootCtx.reflect.provide("sessions", this)` 挂在根上；普通 ctx.get 取到的是
+  // 近端同名对象层（get/list 有、retain 无）——必须走 reflect.get 才是契约面。
+  try { if (ctx && ctx.reflect && typeof ctx.reflect.get === "function") owners.push(["reflect", ctx.reflect.get("sessions", false)]); } catch { /* not provided */ }
+  try { if (ctx && ctx.sessions) owners.push(["prop", ctx.sessions]); } catch { /* getter threw */ }
+  try { const svc = ctx.get("sessions"); if (svc) owners.push(["get", svc]); } catch { /* absent */ }
+  const holders = owners.filter(([, o]) => o && typeof o.retain === "function");
+  if (holders.length === 0) {
+    const why = owners.length === 0
+      ? "no-owner (prop-absent && get-absent)"
+      : owners.map(([src, o]) => src + ":no-retain(" + (o == null ? "null" : typeof o) + ")").join(",");
+    __resolveSource = (__resolveSource || "") + " | ISessions:" + why;
+    return null;
+  }
+  const isess = holders[0][1];
+  let ref = null;
+  try {
+    ref = isess.retain(sessionId, { source: "controllerOperation" });
+    const binding = await ref.ready;
+    const face = binding && binding.session;
+    if (!face) { __resolveSource = "retain-ready-no-session-face"; try { ref.release(); } catch { /* */ } return null; }
+    __resolveSource = "acquired via ISessions.retain";
+    return { session: face, release: () => { try { ref.release(); } catch { /* already released */ } } };
+  } catch (e) {
+    __resolveSource = "retain-failed: " + String(e && e.message).slice(0, 80);
+    if (ref) { try { ref.release(); } catch { /* */ } }
+    return null;
+  }
+}
+
 let __runningSource = null; // 诊断：最近一次 isRunning 的判定来源
 function isRunning(ctx, sessionId) {
   // 0.5.4（实机三层根因第 3 层的最终修）：与宿主**官方同源**——
@@ -102,18 +176,20 @@ function isRunning(ctx, sessionId) {
   // 原实现把「agents 注册表有条目」直接当 running —— 会话仅在视图中打开
   // 就有条目 → 打开即 409 锁死所有变更操作。必须再比对 status。
   try {
-    const agents = ctx.get("agents");
-    if (!agents || typeof agents.get !== "function") {
-      __runningSource = "no-agents-service";
-      return false;
-    }
-    for (const variant of sessionIdVariants(sessionId)) {
-      const agent = agents.get(variant);
-      if (agent && agent.status === "running") {
-        __runningSource = "agent-status-running";
-        return true;
+    const candidates = [];
+    try { if (ctx && ctx.agents) candidates.push(ctx.agents); } catch { /* no proxy */ }
+    try { const svc = ctx.get("agents"); if (svc) candidates.push(svc); } catch { /* absent */ }
+    if (candidates.length === 0) { __runningSource = "no-agents-service"; return false; }
+    for (const svc of candidates) {
+      if (typeof svc.get !== "function") continue;
+      for (const variant of sessionIdVariants(sessionId)) {
+        const agent = svc.get(variant);
+        if (agent && agent.status === "running") {
+          __runningSource = "agent-status-running";
+          return true;
+        }
+        if (agent) __runningSource = "agent-status:" + String(agent.status);
       }
-      if (agent) __runningSource = "agent-status:" + String(agent.status);
     }
     if (!__runningSource) __runningSource = "no-agent-entry";
     return false;
@@ -124,6 +200,37 @@ function isRunning(ctx, sessionId) {
 }
 
 
+
+/**
+ * diskAppend：把新事件作为一个 zstd 帧追加到会话日志（等价持久层 appendLines：
+ * encode → open('a') → write+sync，失败按持久层同款按 size 回滚）。
+ * 仅用于 store-miss 的 lazy-view 会话——无并发生命周期游标可竞争。
+ */
+async function diskAppend(logPath, newEvents) {
+  if (!Array.isArray(newEvents) || newEvents.length === 0) throw new OpsError("diskAppend: empty batch", 400);
+  const jsonl = newEvents.map((e) => JSON.stringify(e)).join("\n") + "\n";
+  const frame = zstdCompressSync(Buffer.from(jsonl, "utf8"));
+  const handle = await openFile(logPath, "a");
+  let closed = false;
+  const closeHandle = async () => { if (closed) return; closed = true; await handle.close(); };
+  try {
+    const { size: before } = await statFile(logPath);
+    try {
+      await handle.writeFile(frame);
+      await handle.sync();
+    } catch (error) {
+      try {
+        await closeHandle();
+        await truncateFile(logPath, before);
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], `failed to roll back append to "${logPath}"`);
+      }
+      throw error;
+    }
+  } finally {
+    await closeHandle();
+  }
+}
 
 function flushSessions(ctx, session) {
   const sessions = ctx.get("sessions");
@@ -174,24 +281,45 @@ async function opsCommit(targetCtx, mode, sessionId, seq) {
   if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
   if (!Number.isSafeInteger(seq) || seq < 0) throw new OpsError("invalid seq", 400);
   if (isRunning(targetCtx, sessionId)) throw new OpsError("session is running; stop it first", 409);
-  const session = resolveSession(targetCtx, sessionId);
-  if (session === undefined) throw new OpsError("session not found in registry (is it loaded?)", 404);
-  // 0.5.4（P0）：v4 准入要求 system/message 带正 turn/step——缺字段时持久层
-  // encodeEventBatch 的 SessionFormatError 未捕获会**打死整个 dsh 进程**。
-  // 从磁盘日志尾部派生坐标后传给 append。
   const { logPath } = pickSessionDir(sessionId);
   const { events } = await readSessionFileAsync(logPath);
   const turnStep = deriveTurnStep(events);
-  const plan = mode === "delete" ? planDelete(session.surface, seq) : planRevert(session.surface, seq);
   const notice = mode === "delete"
     ? `[消息删除] 已遮蔽 seq ${seq}`
+    : null; // revert 文案含 shadowed 数量，规划后拼
+  const acq = await acquireSession(targetCtx, sessionId);
+  if (acq !== null && acq.session !== undefined) {
+    try {
+      const session = acq.session;
+      // 0.5.4（P0）：v4 准入要求 system/message 带正 turn/step——缺字段时持久层
+      // encodeEventBatch 的 SessionFormatError 未捕获会**打死整个 dsh 进程**。
+      const plan = mode === "delete" ? planDelete(session.surface, seq) : planRevert(session.surface, seq);
+      const text = mode === "delete" ? notice
+        : `[消息回滚] 已回滚到 seq ${seq}（含）之后的 ${plan.shadowedSeqs.length} 个节点`;
+      const event = applySurfaceReplace(session, plan.startSeq, plan.endSeq, plan.shadowedSeqs, text, turnStep);
+      flushSessions(targetCtx, session);
+      return {
+        ok: true, mode, seq,
+        shadowedCount: plan.shadowedSeqs.length,
+        eventSeq: event && event.seq != null ? event.seq : null,
+      };
+    } finally {
+      acq.release();
+    }
+  }
+  // store-miss（lazy-view 只读盘会话）→ 磁盘路径：镜像引擎字段直接追加 zstd 帧
+  const plan = mode === "delete" ? planDeleteFromEvents(events, seq) : planRevertFromEvents(events, seq);
+  const text = mode === "delete" ? notice
     : `[消息回滚] 已回滚到 seq ${seq}（含）之后的 ${plan.shadowedSeqs.length} 个节点`;
-  const event = applySurfaceReplace(session, plan.startSeq, plan.endSeq, plan.shadowedSeqs, notice, turnStep);
-  flushSessions(targetCtx, session);
+  const marker = buildMarkerEvent({
+    seq: nextSeqFrom(events), time: Date.now(), turnStep, text,
+    startSeq: plan.startSeq, endSeq: plan.endSeq, shadowedSeqs: plan.shadowedSeqs,
+  });
+  await diskAppend(logPath, [marker]);
   return {
-    ok: true, mode, seq,
+    ok: true, mode, seq, disk: true,
     shadowedCount: plan.shadowedSeqs.length,
-    eventSeq: event && event.seq != null ? event.seq : null,
+    eventSeq: marker.seq,
   };
 }
 
@@ -209,15 +337,38 @@ async function opsRestore(targetCtx, sessionId, restoreSeq) {
   if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
   if (!Number.isSafeInteger(restoreSeq) || restoreSeq < 0) throw new OpsError("invalid seq", 400);
   if (isRunning(targetCtx, sessionId)) throw new OpsError("session is running; stop it first", 409);
-  const session = resolveSession(targetCtx, sessionId);
-  if (session === undefined) throw new OpsError("session not found in registry (is it loaded?)", 404);
   const { logPath } = pickSessionDir(sessionId);
   const { events } = await readSessionFileAsync(logPath);
   const plan = planRestore(events, restoreSeq);
-  const result = applyRestore(session, plan, {
-    flush: () => { flushSessions(targetCtx, session); },
-  });
-  return { ok: true, ...result, range: { startSeq: plan.startSeq, endSeq: plan.endSeq } };
+  const acq = await acquireSession(targetCtx, sessionId);
+  if (acq !== null && acq.session !== undefined) {
+    try {
+      const result = applyRestore(acq.session, plan, {
+        flush: () => { flushSessions(targetCtx, acq.session); },
+      });
+      return { ok: true, ...result, range: { startSeq: plan.startSeq, endSeq: plan.endSeq } };
+    } finally {
+      acq.release();
+    }
+  }
+  // store-miss → 磁盘路径：说明事件 + 重放事件批量追加（一个帧）
+  let cursor = nextSeqFrom(events);
+  const now = Date.now();
+  const batch = [buildRestoreNoticeEvent({
+    seq: cursor++, time: now, turnStep: plan.turnStep,
+    text: restoreNoticeText(plan), restoreSeq: plan.restoreSeq,
+  })];
+  for (const item of plan.replayable) {
+    batch.push(buildReplayEvent({ seq: cursor++, time: ++now, item }));
+  }
+  await diskAppend(logPath, batch);
+  return {
+    ok: true, disk: true,
+    restoredCount: plan.replayable.length,
+    skipped: plan.skipped,
+    eventSeqs: batch.map((e) => e.seq),
+    range: { startSeq: plan.startSeq, endSeq: plan.endSeq },
+  };
 }
 
 async function opsExport(targetCtx, sessionId, seq) {

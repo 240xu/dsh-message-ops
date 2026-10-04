@@ -42,6 +42,13 @@ const log = (...a) => console.log('>>>', ...a);
   await page.waitForTimeout(6000);
   await page.keyboard.press('Escape'); // rename
   await page.waitForTimeout(800);
+  // 视图身份：目标会话有 N 个标记 → 打开成功则 .mopsRd 必渲染
+  const dockOpen = await page.evaluate(() => {
+    const el = document.querySelector('.mopsRd');
+    const active = Array.from(document.querySelectorAll('[data-row-key]')).find(e => e.getAttribute('aria-selected') === 'true' || e.classList.contains('active') || e.getAttribute('data-active') === 'true');
+    return { dock: !!el, activeKey: active ? active.dataset.rowKey.slice(0, 40) : null };
+  });
+  log('VIEW CHECK:', JSON.stringify(dockOpen), '(want dock:true)');
   // 页内 POST（与对话框同通道）：先取 running 与最后 assistant seq
   const res1 = await page.evaluate(async (sid) => {
     const r = await fetch('/api/message-ops/messages?sessionId=' + encodeURIComponent(sid));
@@ -52,7 +59,7 @@ const log = (...a) => console.log('>>>', ...a);
   }, TEST_SID);
   log('STATE:', JSON.stringify(res1));
   // 用已知标记事件 seq 发 restore（1029 = 上次 revert 创建的 marker）
-  const MARKER_SEQ = 581;
+  const MARKER_SEQ = 1030;
   const res2 = await page.evaluate(async ({ sid, seq }) => {
     try {
       const r = await fetch('/api/message-ops/restore', {

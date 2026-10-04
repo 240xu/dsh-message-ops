@@ -10,7 +10,12 @@ const log = (...a) => console.log('>>>', ...a);
   const browser = await pw.chromium.launch({ headless: true, executablePath: '/data/data/com.termux/files/home/.cache/ms-playwright/chromium_headless_shell-1234/chrome-linux/headless_shell', args: ['--no-sandbox', '--disable-dev-shm-usage'] });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   const netLog = [];
-  page.on('response', (r) => { if (r.url().includes('/api/message-ops/') && !r.url().includes('/messages')) netLog.push(r.status() + ' ' + r.url().split('/api/message-ops/')[1].split('?')[0]); });
+  page.on('response', async (r) => {
+    if (r.url().includes('/api/message-ops/') && !r.url().includes('/messages')) {
+      let body = ''; try { body = (await r.text()).slice(0, 140); } catch { /* body gone */ }
+      netLog.push(r.status() + ' ' + r.url().split('/api/message-ops/')[1].split('?')[0] + ' :: ' + body);
+    }
+  });
   const cerrFull = [];
   page.on('console', (m) => { if (m.type() === 'error') cerrFull.push(m.text().slice(0, 160)); });
   const errors = [];
@@ -53,6 +58,13 @@ const log = (...a) => console.log('>>>', ...a);
     return hasComposer || sendBtn;
   });
   log('VIEW OPEN (composer):', viewOk, '(want true)');
+  // 权威身份校验：打开的会话行须处于 active 态且是目标会话
+  const viewSid = await page.evaluate((sid) => {
+    const active = document.querySelector('[data-row-key][aria-current="true"], [data-row-key].active, [data-row-key][data-active="true"]');
+    const activeKey = active ? active.dataset.rowKey : null;
+    return { activeKey: activeKey ? activeKey.slice(0, 40) : null, want: sid.slice(0, 40) };
+  }, TEST_SID);
+  log('VIEW SID:', JSON.stringify(viewSid));
   if (!viewOk) { log('ABORT: conversation view not open'); await browser.close(); return; }
 
   // 3. 打开我们的对话框（header 按钮）

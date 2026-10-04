@@ -415,6 +415,11 @@ window.__ModuleLoader__.load({
             setState('done')
             notifyDone(okMsg)
             emitChanged()
+            // 0.5.7：store-miss 的磁盘追加没有 live 投影事件 —— 成功后强制
+            // 重建视图（与 restoreRow 同款 openSession 模式），遮蔽即刻可见。
+            try {
+              if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(target.sessionId)
+            } catch { /* 视图重建失败不阻断成功反馈 */ }
           })
           .catch((reason) => {
             setBusyMsg('')
