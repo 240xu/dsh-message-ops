@@ -95,6 +95,23 @@ function resolveSession(ctx, sessionId) {
 
 /** 是否有 live agent 正占用该会话。 */
 function isRunning(ctx, sessionId) {
+  // 0.5.3（实机 P0 级误报）：原实现查 agents 注册表——会话**在视图中打开**即有
+  // 条目 → 打开即报 running → 回撤/删除/分支全部被 409 锁死（正是你要修的
+  // 「按钮没有用」的又一层）。改为读 list snapshot 的 host-asserted running
+  // （官方侧栏 spinner / 官方分支按钮同源：sessions.list.getSnapshot().byId[].running）。
+  try {
+    const sessions = ctx.get("sessions");
+    const snap = sessions && sessions.list && typeof sessions.list.getSnapshot === "function"
+      ? sessions.list.getSnapshot() : null;
+    if (snap && snap.byId) {
+      for (const variant of sessionIdVariants(sessionId)) {
+        const row = snap.byId[variant];
+        if (row && typeof row.running === "boolean") return row.running;
+      }
+      return false; // snapshot 覆盖范围内的会话：以 host 断言为准
+    }
+  } catch { /* fall through to registry */ }
+  // 老宿主回退：agents 注册表（仅当 list snapshot 不可用时）
   const agents = ctx.get("agents");
   if (!agents || typeof agents.get !== "function") return false;
   try {

@@ -262,3 +262,11 @@ MIT
   同步抛出也落进 finally；restoreRow 补 finally 双保险。
 - **[P2] dock 陈旧**：新增 `dsh-message-ops:changed` 广播，回滚/恢复成功后 dock 自动重拉。
 - **[P3] 删 en 独有死键 dock.shadowedN；GET 端点补 405 方法校验。**
+
+### 0.5.3 · 「打开即 Running」误报修复（实机 P0 级）
+
+- isRunning 原查 agents 注册表——会话**在视图中打开**即有条目 → 打开即报
+  running → 回撤/删除/分支全部 409 锁死（「按钮没有用」的又一层根因，Playwright
+  闭环 e2e 实机抓到：curl 未打开时 false、UI 打开后恒 true）。
+- 改读 `sessions.list.getSnapshot().byId[].running`（host-asserted，与官方侧栏
+  spinner、官方分支按钮 disabled 同源）；老宿主回退 agents 注册表。
