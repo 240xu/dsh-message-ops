@@ -353,13 +353,14 @@ async function opsRestore(targetCtx, sessionId, restoreSeq) {
   }
   // store-miss → 磁盘路径：说明事件 + 重放事件批量追加（一个帧）
   let cursor = nextSeqFrom(events);
-  const now = Date.now();
+  const baseTime = Date.now();
   const batch = [buildRestoreNoticeEvent({
-    seq: cursor++, time: now, turnStep: plan.turnStep,
+    seq: cursor++, time: baseTime, turnStep: plan.turnStep,
     text: restoreNoticeText(plan), restoreSeq: plan.restoreSeq,
   })];
+  let offset = 0;
   for (const item of plan.replayable) {
-    batch.push(buildReplayEvent({ seq: cursor++, time: ++now, item }));
+    batch.push(buildReplayEvent({ seq: cursor++, time: baseTime + (++offset), item }));
   }
   await diskAppend(logPath, batch);
   return {
