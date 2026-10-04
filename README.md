@@ -283,3 +283,11 @@ MIT
   HTTP/tool 调用点已 await。回归测试断言三处 append 的 data.turn/step 均为正整数。
 - 教训：宿主持久层对未知字段的编码失败会杀进程（记录于 hub——上游应给
   encodeEventBatch 加错误边界），插件侧必须严格遵守 v4 行结构。
+
+### 0.5.5 · v4 准入第 3 关：`message.id` 非空字符串
+
+- 0.5.4 补 turn/step 后实机复测仍崩：`assertV4SystemMessageFields` 继续要求
+  `message.id` 为非空 string（`string(x, name, nonempty=true)`）。两处 notice
+  append 的 message.id 现用 `randomUUID()`；回归测试断言三段（turn/step/id）。
+- 行准入全貌（本轮实测三连击）：① `data.turn/step` 正整数 → ② `message.id`
+  非空字符串 → ③ role=system + content 数组 + block 文本串。

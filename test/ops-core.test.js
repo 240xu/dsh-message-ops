@@ -268,6 +268,7 @@ test('applySurfaceReplace/applyRestore 附带正整数 turn/step（v4 准入）'
   assert.equal(appended[0].type, 'system/message');
   assert.ok(appended[0].data.turn > 0 && Number.isInteger(appended[0].data.turn), 'data.turn 正整数');
   assert.ok(appended[0].data.step > 0 && Number.isInteger(appended[0].data.step), 'data.step 正整数');
+  assert.ok(typeof appended[0].data.message.id === 'string' && appended[0].data.message.id.length > 0, 'message.id 非空字符串（v4 准入第 3 关）');
   // 无坐标参数时兜底 1/1（调用方漏传不致崩）
   applySurfaceReplace(fakeSession, 10, 20, [10], 'x2');
   assert.ok(appended[1].data.turn >= 1 && appended[1].data.step >= 1);

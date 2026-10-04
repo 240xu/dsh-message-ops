@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 /**
  * dsh-message-ops — 可复用操作核心（纯逻辑，无 HTTP、无 dsh-tools 依赖）。
  *
@@ -100,7 +101,7 @@ export function deriveTurnStep(events) {
 export function applySurfaceReplace(session, startSeq, endSeq, sourceEventSeqs, noticeText, turnStep) {
   const ts = turnStep && Number.isSafeInteger(turnStep.turn) && turnStep.turn > 0
     ? turnStep : { turn: 1, step: 1 };
-  const data = { turn: ts.turn, step: ts.step, message: { role: "system", content: [{ type: "text", text: noticeText }] } };
+  const data = { turn: ts.turn, step: ts.step, message: { id: randomUUID(), role: "system", content: [{ type: "text", text: noticeText }] } };
   if (replaceShape) {
     return session.append("system/message", data, { surfaceOp: replaceOpFor(replaceShape, startSeq, endSeq), sourceEventSeqs });
   }
@@ -173,7 +174,7 @@ export function applyRestore(session, plan, { flush } = {}) {
     ? plan.turnStep : { turn: 1, step: 1 };
   const noticeEvent = session.append(
     "system/message",
-    { turn: ts.turn, step: ts.step, message: { role: "system", content: [{ type: "text", text: notice }] }, restoresSeq: plan.restoreSeq },
+    { turn: ts.turn, step: ts.step, message: { id: randomUUID(), role: "system", content: [{ type: "text", text: notice }] }, restoresSeq: plan.restoreSeq },
     { surfaceOp: "append" },
   );
   if (noticeEvent && noticeEvent.seq != null) eventSeqs.push(noticeEvent.seq);
