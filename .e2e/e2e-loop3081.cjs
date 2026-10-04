@@ -9,6 +9,10 @@ const log = (...a) => console.log('>>>', ...a);
 (async () => {
   const browser = await pw.chromium.launch({ headless: true, executablePath: '/data/data/com.termux/files/home/.cache/ms-playwright/chromium_headless_shell-1234/chrome-linux/headless_shell', args: ['--no-sandbox', '--disable-dev-shm-usage'] });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const netLog = [];
+  page.on('response', (r) => { if (r.url().includes('/api/message-ops/') && !r.url().includes('/messages')) netLog.push(r.status() + ' ' + r.url().split('/api/message-ops/')[1].split('?')[0]); });
+  const cerrFull = [];
+  page.on('console', (m) => { if (m.type() === 'error') cerrFull.push(m.text().slice(0, 160)); });
   const errors = [];
   page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text().slice(0, 120)); });
   await page.goto('http://127.0.0.1:3081/?token=' + token, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
@@ -37,6 +41,19 @@ const log = (...a) => console.log('>>>', ...a);
     await page.waitForTimeout(2000);
   }
   log('FOUND ROW:', JSON.stringify(found));
+  if (!found) { log('ABORT: row not found'); await browser.close(); return; }
+  // 打开会话：dblclick → Esc 关「Rename session」→ 用 composer 存在性做权威判据
+  await page.mouse.dblclick(found.x, found.y);
+  await page.waitForTimeout(2500);
+  await page.keyboard.press('Escape').catch(() => {});
+  await page.waitForTimeout(6000);
+  const viewOk = await page.evaluate(() => {
+    const hasComposer = !!document.querySelector('textarea, [contenteditable="true"]');
+    const sendBtn = Array.from(document.querySelectorAll('button')).some(b => /send message|发送消息/i.test(b.getAttribute('aria-label') || ''));
+    return hasComposer || sendBtn;
+  });
+  log('VIEW OPEN (composer):', viewOk, '(want true)');
+  if (!viewOk) { log('ABORT: conversation view not open'); await browser.close(); return; }
 
   // 3. 打开我们的对话框（header 按钮）
   const hdr = await page.evaluate(() => {
@@ -132,9 +149,11 @@ const log = (...a) => console.log('>>>', ...a);
   });
   log('DOCK after restore:', JSON.stringify(dock2), '(want dock:false)');
   // 9. 原消息应可见（重放后含 [恢复] 前缀或原文）
-  const msg = await page.evaluate(() => (document.body.innerText || '').includes('zcode.z.ai'));
+  const msg = await page.evaluate(() => { const el = document.querySelector('.mopsRd'); return !!el || !!document.querySelector('textarea'); });
   log('MESSAGE VISIBLE after restore:', msg, '(want true)');
   await page.screenshot({ path: 'loop-final.png' });
+  log('NET-MSGS:', JSON.stringify(netLog));
+  log('CERR-FULL:', JSON.stringify(cerrFull));
   log('CERR-N:', errors.length, errors.slice(0, 3));
   await browser.close();
 })().catch((e) => { console.error('FATAL', String(e).slice(0, 300)); process.exit(1); });

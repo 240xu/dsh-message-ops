@@ -89,17 +89,19 @@ test('planRestore：兼容 start/end 拼写（dsh-src 较新引擎形状）', ()
   assert.equal(plan.replayable[0].text, 'a')
 })
 
-test('planRestore：非标记事件 / 越界 seq / 无可重放消息 均拒绝', () => {
+test('planRestore：非标记事件 / 越界 seq 拒绝；空可重放区间改为接受（0.5.6 停用语义）', () => {
   const events = sampleEvents()
   assert.throws(() => planRestore(events, 99), (e) => e instanceof OpsError && e.status === 404)
   assert.throws(() => planRestore(events, 0), (e) => e instanceof OpsError && e.status === 409) // 普通消息非标记
   assert.throws(() => planRestore(events, -1), (e) => e instanceof OpsError && e.status === 400)
-  // 区间内只有 tool 事件 → 无可重放
+  // 0.5.6：区间内只有 tool 事件 → 不再 409，返回空可重放计划（停用语义）
   const onlyTool = [
     { type: 'tool/call', seq: 0, data: { name: 'bash' } },
     { type: 'system/message', seq: 1, surfaceOp: { op: 'replace', startSeq: 0, endSeq: 0 }, sourceEventSeqs: [0] },
   ]
-  assert.throws(() => planRestore(onlyTool, 1), (e) => e instanceof OpsError && e.status === 409)
+  const plan = planRestore(onlyTool, 1)
+  assert.equal(plan.replayable.length, 0, '空可重放 = 接受为停用计划')
+  assert.equal(plan.startSeq, 0)
 })
 
 test('applyRestore：重放 append 带 [恢复] 前缀 + system 说明，flush 被调用', () => {
@@ -281,4 +283,28 @@ test('applySurfaceReplace/applyRestore 附带正整数 turn/step（v4 准入）'
   assert.equal(notice.type, 'system/message');
   assert.equal(notice.data.turn, 12);
   assert.equal(notice.data.step, 6);
+});
+
+// 0.5.6 回归：空可重放区间 → 优雅停用而非 409（dock 死按钮修复）
+test('planRestore 空可重放区间返回空计划；applyRestore 发停用 notice', async () => {
+  const { planRestore, applyRestore } = await import('../src/ops-core.js');
+  // 事件流：startSeq..endSeq 内只有一条 tool 事件（非 user/assistant）
+  const events = [
+    { seq: 1, type: 'system/message', data: { turn: 1, step: 1, message: {} } },
+    { seq: 8, type: 'tool/result', data: { message: {} } },
+    { seq: 9, type: 'system/message', data: { turn: 1, step: 2, message: {} },
+      surfaceOp: { op: 'replace', startSeq: 8, endSeq: 8 } },
+  ];
+  const plan = planRestore(events, 9);
+  assert.equal(plan.replayable.length, 0, '无可重放');
+  assert.equal(plan.startSeq, 8);
+  const appended = [];
+  const fakeSession = { append: (type, data, opts) => { appended.push({ type, data, opts }); return { seq: 42 }; } };
+  const out = applyRestore(fakeSession, plan);
+  assert.equal(out.restoredCount, 0);
+  // notice 停用 + restoresSeq 指向标记（dock 由此移除该行）
+  assert.equal(appended.length, 1, '只发 notice');
+  assert.equal(appended[0].data.restoresSeq, 9);
+  assert.match(appended[0].data.message.content[0].text, /无可重放/);
+  assert.ok(appended[0].data.turn > 0 && appended[0].data.message.id, 'v4 准入字段齐');
 });

@@ -291,3 +291,12 @@ MIT
   append 的 message.id 现用 `randomUUID()`；回归测试断言三段（turn/step/id）。
 - 行准入全貌（本轮实测三连击）：① `data.turn/step` 正整数 → ② `message.id`
   非空字符串 → ③ role=system + content 数组 + block 文本串。
+
+### 0.5.6 · dock 死按钮修复：空可重放区间改优雅停用
+
+- 实机闭环：dock 上标记若遮蔽区间只含 tool/system 事件（或遮蔽了另一个标记），
+  恢复请求恒 409「no replayable user/assistant messages」——按钮永久死、dock
+  计数永远清不掉（Playwright 8 连 409 复现）。
+- 改为：planRestore 对空可重放返回空计划；applyRestore 追加**停用 notice**
+  （含 restoresSeq → dock 移除该行）+ 如实文案「区间无可重放内容」。
+  非标记/越界/非法 seq 仍按原语义 404/409/400。

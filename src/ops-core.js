@@ -152,9 +152,10 @@ export function planRestore(events, restoreSeq) {
       skipped++; // tool/call 等不可安全重放的事件：跳过并在结果里计数
     }
   }
-  if (replayable.length === 0) {
-    throw new OpsError(`restore: no replayable user/assistant messages in shadowed range ${startSeq}..${endSeq}`, 409);
-  }
+  // 0.5.6：区间无可重放消息（如只遮蔽了 tool/system 事件）不再 409 ——
+  // dock 会为这类标记常驻显示恢复按钮，409 死按钮 = 永远清不掉（实测 8 连 409）。
+  // 改为返回空计划：applyRestore 仍追加说明 notice（含 restoresSeq）→ 标记停用、
+  // dock 计数递减；语义如实：0 条重放 + 文案说明区间无 user/assistant 内容。
   return { restoreSeq, startSeq, endSeq, replayable, skipped, turnStep: deriveTurnStep(events) };
 }
 
@@ -165,9 +166,12 @@ export function planRestore(events, restoreSeq) {
  */
 export function applyRestore(session, plan, { flush } = {}) {
   const eventSeqs = [];
-  const notice = `[消息恢复] 重放 seq ${plan.startSeq}..${plan.endSeq} 的 ${plan.replayable.length} 条消息` +
-    (plan.skipped > 0 ? `（另有 ${plan.skipped} 条不可重放事件已跳过）` : "") +
-    `；原区间仍处于遮蔽状态，恢复为重放而非解除遮蔽`;
+  const notice = plan.replayable.length === 0
+    ? `[消息恢复] seq ${plan.startSeq}..${plan.endSeq} 区间无可重放的 user/assistant 消息（` +
+      `内容为 tool/system 事件或空文本）——该回撤标记就此停用，区间保持遮蔽`
+    : `[消息恢复] 重放 seq ${plan.startSeq}..${plan.endSeq} 的 ${plan.replayable.length} 条消息` +
+      (plan.skipped > 0 ? `（另有 ${plan.skipped} 条不可重放事件已跳过）` : "") +
+      `；原区间仍处于遮蔽状态，恢复为重放而非解除遮蔽`;
   // 0.4.2：notice 事件携带 restoresSeq —— dock 据此把被恢复的标记从「活跃回撤」
   // 中移除（对齐 opencode clear 语义：恢复后不再显示为待恢复项）。
   const ts = plan.turnStep && Number.isSafeInteger(plan.turnStep.turn) && plan.turnStep.turn > 0
