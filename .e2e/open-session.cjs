@@ -40,7 +40,7 @@ const log = (...a) => console.log('>>>', ...a);
   if (!found) { await browser.close(); process.exit(2); }
   await page.mouse.dblclick(found.x, found.y);
   await page.waitForTimeout(8000);
-  const open = await page.evaluate(() => (document.body.innerText || '').includes('zcode.z.ai'));
+  const open = await page.evaluate(() => ((document.body.innerText || '').includes('[恢复]') || (document.body.innerText || '').includes('恢复] 4 路')) && (!!document.querySelector('textarea, [contenteditable="true"]')));
   log('OPEN:', open, '(want true)');
   await browser.close();
   process.exit(open ? 0 : 3);

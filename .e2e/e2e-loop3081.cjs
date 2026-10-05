@@ -23,35 +23,84 @@ const log = (...a) => console.log('>>>', ...a);
   await page.goto('http://127.0.0.1:3081/?token=' + token, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
   for (let i = 0; i < 25; i++) { await page.waitForTimeout(1000); if (await page.evaluate(() => document.querySelectorAll('[role=treeitem]').length) > 0) break; }
 
-  // 1. 打开既有测试会话（轮询式：展开→找行→Show more→找行，直到出现）
+  // 1. 打开既有测试会话 —— devkit 会话切换浮层（输入检索 + Enter，绕开侧栏分页）
   const TEST_SID = 'session-2188f4ac-fa16-4560-9ded-d0555d0793c7';
-  const findRow = async () => page.evaluate((sid) => {
+  const hasDevkit = await page.evaluate(() => !!(window.__dshDevkit && typeof window.__dshDevkit.openSessions === 'function'));
+  log('devkit switcher:', hasDevkit);
+  if (hasDevkit) {
+    await page.evaluate(() => window.__dshDevkit.openSessions());
+    await page.waitForTimeout(1500);
+    // 浮层输入框（input 列表布局）：填短 id → Enter 提交首个命中
+    await page.evaluate((sid) => {
+      const inputs = Array.from(document.querySelectorAll('input'));
+      const inp = inputs.find((i) => i.offsetParent !== null && !i.disabled);
+      if (!inp) return;
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(inp, sid.slice(8, 20));
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      inp.focus();
+    }, TEST_SID);
+    await page.waitForTimeout(1200);
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(6000);
+    await page.keyboard.press('Escape').catch(() => {}); // 关浮层
+    await page.waitForTimeout(800);
+  }
+  let found = await page.evaluate((sid) => {
+    const active = document.querySelector('[data-row-key][aria-current="true"], [data-row-key][data-active="true"], [data-row-key].active');
+    const isActiveTarget = !!(active && (active.dataset.rowKey || '').includes(sid));
+    const el = Array.from(document.querySelectorAll('[data-row-key]')).find(e => (e.dataset.rowKey || '').includes(sid));
+    return el ? { present: true, activeTarget: isActiveTarget } : { present: false, activeTarget: false };
+  }, TEST_SID);
+  if (!found.present || !found.activeTarget) {
+    // 兜底：原侧栏轮询（展开 + Show more）
+    for (let i = 0; i < 12 && !(found.present && found.activeTarget); i++) {
+      found = await page.evaluate((sid) => {
+        const active = document.querySelector('[data-row-key][aria-current="true"], [data-row-key][data-active="true"], [data-row-key].active');
+        const isActiveTarget = !!(active && (active.dataset.rowKey || '').includes(sid));
+        const el = Array.from(document.querySelectorAll('[data-row-key]')).find(e => (e.dataset.rowKey || '').includes(sid));
+        if (el) { el.scrollIntoView({ block: 'center' }); }
+        return el ? { present: true, activeTarget: isActiveTarget } : { present: false, activeTarget: false };
+      }, TEST_SID);
+      if (found.present && found.activeTarget) break;
+      await page.evaluate(() => {
+        const ws = Array.from(document.querySelectorAll('[role=treeitem]')).find(e => (e.textContent || '').trim().startsWith('zcode2api'));
+        if (ws && ws.getAttribute('aria-expanded') !== 'true') ws.click();
+        const more = Array.from(document.querySelectorAll('button')).find(b => /^Show \d+ more/i.test((b.textContent || '').trim()));
+        if (more) more.click();
+      });
+      await page.waitForTimeout(2000);
+      if (found.present && !found.activeTarget) {
+        // 行在但没激活 → dblclick 激活
+        const pt = await page.evaluate((sid) => {
+          const el = Array.from(document.querySelectorAll('[data-row-key]')).find(e => (e.dataset.rowKey || '').includes(sid));
+          if (!el) return null; const r = el.getBoundingClientRect();
+          return r.width > 0 ? { x: r.x + Math.min(r.width / 2, 150), y: r.y + r.height / 2 } : null;
+        }, TEST_SID);
+        if (pt) { await page.mouse.dblclick(pt.x, pt.y); await page.waitForTimeout(4000); }
+      }
+    }
+  }
+  const target = await page.evaluate((sid) => {
     const el = Array.from(document.querySelectorAll('[data-row-key]')).find(e => (e.dataset.rowKey || '').includes(sid));
     if (!el) return null;
     el.scrollIntoView({ block: 'center' });
     const r = el.getBoundingClientRect();
     return r.width > 0 ? { x: r.x + Math.min(r.width / 2, 150), y: r.y + r.height / 2 } : null;
   }, TEST_SID);
-  let found = null;
-  for (let i = 0; i < 15 && !found; i++) {
-    found = await findRow();
-    if (found) break;
-    // 未找到：确保 zcode2api 展开 + 尝试 Show more
-    await page.evaluate(() => {
-      const ws = Array.from(document.querySelectorAll('[role=treeitem]')).find(e => (e.textContent || '').trim().startsWith('zcode2api'));
-      if (ws && ws.getAttribute('aria-expanded') !== 'true') ws.click();
-      const more = Array.from(document.querySelectorAll('button')).find(b => /^Show \d+ more/i.test((b.textContent || '').trim()));
-      if (more) more.click();
-    });
-    await page.waitForTimeout(2000);
+  log('FOUND ROW:', JSON.stringify(target));
+  if (target) {
+    // 确保已打开：dblclick + Esc 关 rename
+    const viewAlready = await page.evaluate(() => !!document.querySelector('textarea, [contenteditable="true"]'));
+    if (!viewAlready) {
+      await page.mouse.dblclick(target.x, target.y);
+      await page.waitForTimeout(2500);
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(5000);
+    }
   }
-  log('FOUND ROW:', JSON.stringify(found));
-  if (!found) { log('ABORT: row not found'); await browser.close(); return; }
-  // 打开会话：dblclick → Esc 关「Rename session」→ 用 composer 存在性做权威判据
-  await page.mouse.dblclick(found.x, found.y);
-  await page.waitForTimeout(2500);
-  await page.keyboard.press('Escape').catch(() => {});
-  await page.waitForTimeout(6000);
+  if (!target) { log('ABORT: row not found'); await browser.close(); return; }
+  await page.waitForTimeout(3000);
   const viewOk = await page.evaluate(() => {
     const hasComposer = !!document.querySelector('textarea, [contenteditable="true"]');
     const sendBtn = Array.from(document.querySelectorAll('button')).some(b => /send message|发送消息/i.test(b.getAttribute('aria-label') || ''));
