@@ -130,7 +130,7 @@ window.__ModuleLoader__.load({
       'done.delete': 'Deleted; reload to apply',
       'action.reload': 'Reload page',
       'errorPrefix': 'Operation failed: ',
-      'dock.title': '{n} messages rolled back',
+      'dock.title': '{n} rolled back messages',
       'dock.expand': 'Expand revert list',
       'dock.collapse': 'Collapse revert list',
       'dock.shadowedN': '{n} shadowed',
@@ -146,6 +146,7 @@ window.__ModuleLoader__.load({
     var __sessionsSvc = null
     var __inputActions = null // 0.4.0: 从 session 槽捕获（InputActions.setDraft → composer 回填）
     var __uiWorkspace = null
+    var __currentSessionId = null   // 0.6.0：会话视图会话 id（RevertDock/MsgSlotActions 刷新）
     // messageId→seq 索引缓存（每会话一次拉取；0.3.0 assistant-actions 槽用）
     var __seqIndexCache = new Map()
     // messageId→全文缓存（0.5.0 消息引用用）
@@ -430,7 +431,9 @@ window.__ModuleLoader__.load({
 
       if (!target) return null
 
-      const visible = messages.filter((m) => m.visible !== false)
+      // 0.6.0：system prompt 行不可作为回滚/删除/分支目标（引擎拒之以 node0 守卫，
+      // 但不该给用户一个必然500的选项）——列表直接排除 role=system。
+      const visible = messages.filter((m) => m.visible !== false && m.role !== 'system')
       const shownBase = visible.slice(-MAX_RENDER)
       const hiddenCount = visible.length - shownBase.length
       // 分批渲染（评审 M1）：只渲染 renderLimit 条，更早的留给「显示更多」
@@ -481,7 +484,8 @@ window.__ModuleLoader__.load({
           ),
           pickedMsg ? React.createElement('div', { key: 'ops' },
             // restore 仅对 revert/delete 落定的 replace 标记行提供（重放语义）
-            ['revert', 'delete', 'branch'].concat(pickedMsg.marker ? ['restore'] : []).map((m, i) => React.createElement('div', { key: m, style: { marginTop: i === 0 ? 8 : 4 } },
+            // 0.6.0（用户定调）：恢复不进对话框——唯一入口是输入框上方贴条；
+            ['revert', 'delete', 'branch'].map((m, i) => React.createElement('div', { key: m, style: { marginTop: i === 0 ? 8 : 4 } },
               React.createElement('label', { style: optStyle },
                 React.createElement('input', {
                   type: 'radio', name: 'dsh-message-ops-mode', checked: mode === m,
@@ -777,6 +781,7 @@ window.__ModuleLoader__.load({
 
     function RevertDock(props) {
       const { sessionId, useSessions, inputActions } = props
+      if (sessionId) __currentSessionId = sessionId
       const t = (props && props.t) || __t
       useLocaleRevision()
       if (inputActions && typeof inputActions.setDraft === 'function') __inputActions = inputActions
@@ -797,9 +802,12 @@ window.__ModuleLoader__.load({
         tag.id = 'dsh-message-ops-dock-style'
         tag.textContent = [
           // 容器：rounded-xl + 0.5px 边框 + bg-layer-01（M1 修正令牌）
-          '.mopsRd{width:100%;overflow:hidden;border-radius:var(--dsw-radius-md,12px);border:.5px solid var(--dsw-alias-border-l1,rgba(128,128,128,.25));background:var(--dsw-alias-bg-layer-1,#1e1e20)}',
+          // 0.6.0 贴条（对齐 opencode）：宽度锁到输入卡片同源变量（uV2eYG_card 同款
+          // max-width），居中；margin-bottom:-5px 把 composerStack 的6px gap 压成
+          // **1px 视觉贴合**（实测基线 gap14→目标1）。
+          '.mopsRd{width:100%;max-width:var(--dsh-composer-card-max-width);margin-inline:auto;margin-bottom:-5px;overflow:hidden;border-radius:var(--dsw-radius-md,12px);border:.5px solid var(--dsw-alias-border-l1,rgba(128,128,128,.25));background:var(--dsw-alias-bg-layer-1,#1e1e20)}',
           // 头部 42px：图标 + label + 折叠预览 + 旋转 chevron
-          '.mopsRdHead{display:flex;height:42px;align-items:center;gap:8px;padding-left:16px;padding-right:8px;cursor:pointer;user-select:none}',
+          '.mopsRdHead{display:flex;height:40px;align-items:center;gap:8px;padding-left:16px;padding-right:8px;cursor:pointer;user-select:none}',
           '.mopsRdIcon{display:inline-flex;color:var(--dsw-alias-label-tertiary,#9a9aa0);flex:none}',
           '.mopsRdLabel{font-size:13px;font-weight:500;line-height:20px;letter-spacing:-.04px;flex:none;cursor:default;color:var(--dsw-alias-label-primary,inherit)}',
           '.mopsRdLabelCollapsed{color:var(--dsw-alias-label-secondary,#a8a8ae)}',
@@ -811,8 +819,6 @@ window.__ModuleLoader__.load({
           '.mopsRdRowText{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:400;line-height:20px;letter-spacing:-.04px;color:var(--dsw-alias-label-secondary,#a8a8ae)}',
           '.mopsRdRestore{flex:none;font:inherit;font-size:12px;line-height:18px;padding:2px 10px;border-radius:6px;cursor:pointer;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));border:1px solid var(--dsw-alias-border-l1,rgba(128,128,128,.2));opacity:1}',
           '.mopsRdRestore:disabled{opacity:.45;cursor:default}',
-          // 折叠时 18px sacrificial 空间（composer 负 lift 重叠）
-          '.mopsRdSpacer{height:18px}',
         ].join('')
         document.head.appendChild(tag)
         setStyleInjected(true)
@@ -922,6 +928,131 @@ window.__ModuleLoader__.load({
         if (String(rows[i].className || '').indexOf('menuOpen') >= 0) return rows[i]
       }
       return null
+    }
+
+    // --- 0.6.0 用户消息 hover「回滚」按钮（DOM 注入）-------------------------------
+    // 官方只提供 assistant-actions 槽；回滚的正确对象是**用户自己的消息**（opencode 同款：
+    // 悬停我的消息 → 即时回滚「这条及其之后」）。注入点用官方属性 [data-chat-flow-kind="user"]。
+    // 防错锁（用户批准的设计）：DOM 块 ↔ API 可见 user 行按序配对 + 文本归一化前缀互验，
+    // 点击时再复验一次；对不上就拒绝执行（宁可不回滚，不回滚错消息）。
+    function installUserRevertInjector() {
+      if (window.__MOPS_USER_REVERT_INSTALLED) return
+      window.__MOPS_USER_REVERT_INSTALLED = true
+      var rowsCache = { sid: null, rows: null, at: 0 }
+      var norm = (x) => String(x || '').replace(/\s+/g, '')
+      var fetchRows = (sid) => {
+        if (rowsCache.sid === sid && rowsCache.rows && Date.now() - rowsCache.at < 8000) return Promise.resolve(rowsCache.rows)
+        return fetch('/api/message-ops/messages?sessionId=' + encodeURIComponent(sid))
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d) => {
+            const rows = ((d && d.messages) || [])
+              .filter((m) => m && m.role === 'user' && m.visible !== false)
+              .map((m) => ({ seq: m.seq, sn: norm(m.snippet) }))
+            rowsCache = { sid: sid, rows: rows, at: Date.now() }
+            return rows
+          })
+          .catch(() => rowsCache.sid === sid ? rowsCache.rows : null)
+      }
+      // 把当前 DOM 的 user 块按序配对到 seq（互验失败的块不打标 → 按钮禁用回滚）
+      var assignSeqs = (sid, rows) => {
+        if (!rows) return
+        const blocks = Array.from(document.querySelectorAll('[data-chat-flow-kind="user"]'))
+        let ri = 0
+        for (const b of blocks) {
+          b.removeAttribute('data-mops-seq')
+          const head = norm((b.innerText || '').slice(0, 240))
+          let hit = -1
+          for (let j = ri; j < rows.length; j++) {
+            if (rows[j].sn && head && (head.startsWith(rows[j].sn.slice(0, 48)) || rows[j].sn.startsWith(head.slice(0, 48)))) { hit = j; break }
+          }
+          if (hit >= 0) { b.setAttribute('data-mops-seq', String(rows[hit].seq)); ri = hit + 1 }
+        }
+      }
+      var ensureAssign = (sid) => fetchRows(sid).then((rows) => assignSeqs(sid, rows))
+      // 单击回滚（带复验）
+      var runUserRevert = (btn, block) => {
+        const sid = __currentSessionId
+        if (!sid) return
+        const seq = Number(block.getAttribute('data-mops-seq'))
+        const head = norm((block.innerText || '').slice(0, 240))
+        fetchRows(sid).then((rows) => {
+          const row = rows && rows.find((r) => r.seq === seq)
+          if (!row || !head || !(head.startsWith(row.sn.slice(0, 48)) || row.sn.startsWith(head.slice(0, 48)))) {
+            ensureAssign(sid)
+            notifyDone(__t('errorPrefix') + 'revert target verification failed', 'error')
+            return
+          }
+          btn.disabled = true
+          Promise.resolve()
+            .then(() => fetch('/api/message-ops/revert', {
+              method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ sessionId: sid, seq: row.seq }),
+            }))
+            .then(async (res) => {
+              let data = {}
+              try { data = await res.json() } catch { /* keep {} */ }
+              if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status))
+              notifyDone(__t('done.revert'))
+              try { window.dispatchEvent(new Event(CHANGED_EVENT)) } catch { /* non-browser */ }
+              try {
+                if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(sid)
+              } catch { /* 视图重建失败不阻断 */ }
+            })
+            .catch((reason) => {
+              notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
+            })
+            .finally(() => { btn.disabled = false })
+        })
+      }
+      var ensureBtn = (block) => {
+        let btn = block.querySelector('.mopsUserRevert')
+        if (btn) return btn
+        btn = document.createElement('button')
+        btn.type = 'button'
+        btn.className = 'mopsUserRevert'
+        btn.title = __t('slot.revert')
+        btn.setAttribute('aria-label', __t('slot.revert'))
+        btn.innerHTML = '<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9" stroke="currentColor" stroke-width="1.2"/><path d="M2.2 2.8v3h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+        btn.addEventListener('click', (e) => {
+          e.preventDefault(); e.stopPropagation()
+          if (btn.disabled) return
+          runUserRevert(btn, block)
+        })
+        block.appendChild(btn)
+        return btn
+      }
+      document.addEventListener('mouseover', (e) => {
+        try {
+          if (!e || !e.target || !e.target.closest) return
+          const block = e.target.closest('[data-chat-flow-kind="user"]')
+          if (!block) return
+          const sid = __currentSessionId
+          if (!sid) return
+          ensureBtn(block)
+          if (!block.hasAttribute('data-mops-seq')) { ensureAssign(sid) }
+        } catch { /* 注入失败不影响会话 */ }
+      }, { passive: true })
+      // 会话切换/回滚落定后：清标（下一次 hover 重新配对）
+      window.addEventListener(CHANGED_EVENT, () => {
+        try {
+          document.querySelectorAll('[data-mops-seq]').forEach((b) => b.removeAttribute('data-mops-seq'))
+        } catch { /* noop */ }
+      })
+      // 注入按钮样式（贴合官方 ghost 按钮）
+      try {
+        if (!document.getElementById('dsh-message-ops-user-revert-style')) {
+          const tag = document.createElement('style')
+          tag.id = 'dsh-message-ops-user-revert-style'
+          tag.textContent = [
+            '[data-chat-flow-kind="user"]{position:relative}',
+            '.mopsUserRevert{position:absolute;top:2px;right:2px;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;border:none;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary,#9a9aa0);opacity:0;cursor:pointer;padding:0;z-index:3;transition:opacity .12s ease}',
+            '[data-chat-flow-kind="user"]:hover>.mopsUserRevert,[data-chat-flow-kind="user"]:focus-within>.mopsUserRevert,.mopsUserRevert:focus-visible{opacity:.8}',
+            '.mopsUserRevert:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12))}',
+            '.mopsUserRevert:disabled{opacity:.4;cursor:default}',
+          ].join('')
+          document.head.appendChild(tag)
+        }
+      } catch { /* style 注入失败不影响功能 */ }
     }
 
     function ensureSidebarOpsItem() {
@@ -1055,6 +1186,7 @@ window.__ModuleLoader__.load({
         ...(__locale ? { locale: NS } : {}),
       }, OpsDialog))
       installSidebarOps()
+      installUserRevertInjector()
     }
 
     return { apply, inject: ['slots'] }

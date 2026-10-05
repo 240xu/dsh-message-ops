@@ -1,0 +1,58 @@
+>>> SID: session-e43323f8-7404-4bd2-a178-9909abd5e550
+>>> sent: GAMMA dialog-only 
+>>> idle: gamma
+>>> DIALOG PROBE: {"btns":[{"t":"","dis":false},{"t":"Close","dis":false},{"t":"Close","dis":true}],"acks":[],"modeLabels":["Revert: remove this mess","Delete only this message","Branch into a new sessio"],"picked":1}
+>>> dialog pick: true | mode: mode-set | ack: true | confirm: Revert
+>>> NET: [{"u":"/api/message-ops/revert","s":200,"b":"{\"ok\":true,\"mode\":\"revert\",\"seq\":8,\"shadowedCount\":4,\"eventSeq\":19}"}] | TOAST: ["Stopped"]
+>>> bar: 4 rolled back messages | feedErrs pre-restore: []
+>>> EXP: {"x":1222,"y":772}
+>>> LIST STATE: {"list":true,"rows":1,"restoreBtns":1,"ariaExp":"true"} | jsExp: clicked
+>>> DOCK DUMP: {
+ "barRect": [
+  468,
+  714,
+  776,
+  79,
+  793
+ ],
+ "headRect": [
+  469,
+  715,
+  774,
+  40,
+  755
+ ],
+ "expRect": [
+  1208,
+  721,
+  28,
+  28,
+  749
+ ],
+ "cardRect": [
+  469,
+  794,
+  774,
+  98,
+  892
+ ],
+ "gap": 1,
+ "aria": "4 rolled back messages",
+ "cls": "mopsRd",
+ "btns": [
+  {
+   "t": "",
+   "a": "Collapse revert list",
+   "dis": false
+  },
+  {
+   "t": "Restore",
+   "a": "",
+   "dis": false
+  }
+ ],
+ "html": "<div class=\"mopsRd\" role=\"region\" aria-label=\"4 rolled back messages\"><div class=\"mopsRdHead\" role=\"button\" tabindex=\"0\"><span class=\"mopsRdIcon\"><svg width=\"15\" height=\"15\" viewBox=\"0 0 16 16\" fill=\"none\"><path d=\"M2.5 8a5.5 5.5 0 1 0 1.6-3.9\" stroke=\"currentColor\" stroke-width=\"1.2\" stroke-linecap=\"round\"></path><path d=\"M2.2 2.8v3h3\" stroke=\"currentColor\" stroke-width=\"1.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></svg></span><span class=\"mopsRdLabel\">4 rolled back messages</span><span style=\"margin-left: auto; flex: 0 0 auto;\"><button type=\"button\" aria-label=\"Collapse revert list\" aria-expanded=\"true\" class=\"mopsRdChevron\"><svg width=\"14\" height=\"14\" viewBox=\"0 0 16 16\" fi"
+}
+>>> RST PT: {"x":1195,"y":768}
+>>> jsRestore: clicked
+>>> RESTORE: {"bar":false,"gammaBack":true,"hasPrefix":false} | feedErrs AFTER: ["[session-controller] event feed subscriber failed: TypeError: Cannot read properties of undefined (reading 'kind')\n    at Object.start (http://127.0.0","[session-controller] event feed subscriber failed: TypeError: Cannot read properties of undefined (reading 'kind')\n    at Object.start (http://127.0.0","[session-controller] event feed subscriber failed: TypeError: Cannot read properties of undefined (reading 'kind')\n    at Object.start (http://127.0.0","[session-controller] event feed subscriber failed: TypeError: Cannot read properties of undefined (reading 'kind')\n    at Object.start (http://127.0.0"]

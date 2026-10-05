@@ -1,0 +1,65 @@
+>>> SESSION: ses_ef43e58f2ffenWm55kbKMnyCi6
+>>> SEND ERR 500 {"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_25be5fa4"}}
+>>> send M1: 500
+>>> SEND ERR 500 {"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_253a6122"}}
+>>> send M2: 500
+>>> SEND ERR 500 {"name":"UnknownError","data":{"message":"Unexpected server error. Check server logs for details.","ref":"err_58db8d02"}}
+>>> send M3: 500
+>>> BASELINE: [
+ {
+  "i": 0,
+  "txt": "Say OK one. Do not use tools.",
+  "keys": [
+   "info",
+   "parts"
+  ]
+ },
+ {
+  "i": 1,
+  "txt": "Say OK two. Do not use tools.",
+  "keys": [
+   "info",
+   "parts"
+  ]
+ },
+ {
+  "i": 2,
+  "txt": "Say OK three. Do not use tools.",
+  "keys": [
+   "info",
+   "parts"
+  ]
+ }
+]
+>>> BASE KEYS: ["0","1","2"]
+>>> M2 PT: {"x":640,"y":224}
+>>> REVERT BTN: {"x":1054,"y":162}
+>>> AFTER (API): [
+ {
+  "i": 0,
+  "txt": "Say OK one. Do not use tools.",
+  "keys": [
+   "info",
+   "parts"
+  ]
+ },
+ {
+  "i": 1,
+  "txt": "Say OK two. Do not use tools.",
+  "keys": [
+   "info",
+   "parts"
+  ]
+ },
+ {
+  "i": 2,
+  "txt": "Say OK three. Do not use tools.",
+  "keys": [
+   "info",
+   "parts"
+  ]
+ }
+]
+>>> BAR: 3 rolled back messages
+>>> DIFF: {"s":200,"b":[]}
+>>> SID ses_ef43e58f2ffenWm55kbKMnyCi6

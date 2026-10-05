@@ -1,0 +1,80 @@
+>>> CREATE SESSION: 200 {"id":"ses_ef44b7394ffevE5EPLNJOoK6U0","slug":"nimble-sailor","projectID":"global","directory":"/data/data/com.termux/files/home","path":"data/data/com.termux/files/home","cost":0,"tokens":{"input":0,"output":0,"reasonin
+>>> route try http://127.0.0.1:4096/session/ses_ef44b7394ffevE5EPLNJOoK6U0 composer: false
+>>> CERR: Failed to load resource: the server responded with a status of 500 (Internal Server Error)
+>>> CERR: Failed to load resource: the server responded with a status of 500 (Internal Server Error)
+>>> CERR: Failed to finish bootstrap instance Error: Unexpected server error. Check server logs for details.
+    at g1e (http://127.0.0.1:4096/assets/
+>>> CERR: Failed to load resource: the server responded with a status of 500 (Internal Server Error)
+>>> CERR: Failed to load resource: the server responded with a status of 500 (Internal Server Error)
+>>> CERR: Failed to finish bootstrap instance Error: Unexpected server error. Check server logs for details.
+    at g1e (http://127.0.0.1:4096/assets/
+>>> route try http://127.0.0.1:4096/global/session/ses_ef44b7394ffevE5EPLNJOoK6U0 composer: true
+>>> message sent
+>>> poll 0 status 200 roles ["user","assistant"]
+>>> assistant replied
+>>> DOM: {
+ "dataRole": [],
+ "candidates": [
+  "DIV.min-w-0 w-full max-w-full md:max-w-200 2xl:max-w-[1000px] md",
+  "DIV.min-w-0 w-full max-w-full md:max-w-200 2xl:max-w-[1000px] md"
+ ],
+ "bodyHead": "H\nOK research.\nOK research.\nReply with exactly: OK research.\nBuild · SenseNova 6.8 Flash Lite\n · \n10:55 AM\n\nOK research.\n\nBuild · SenseNova 6.8 Flash Lite · 4s\nAsk anything, / for commands, @ for context...\nBuild\nSenseNova 6.8 Flash Lite\nDefault"
+}
+>>> HOVER TARGET: {"x":720,"y":77,"cls":"sticky top-0 z-30 bg-[linear-gradient(to_bottom,var(--v2-bac"}
+>>> VISIBLE ACTIONS AFTER HOVER: [
+ {
+  "t": "Jump to latest",
+  "x": 707,
+  "y": 726,
+  "cls": "pointer-events-auto flex items-center ju"
+ },
+ {
+  "t": "Revert message",
+  "x": 1042,
+  "y": 150,
+  "cls": ""
+ },
+ {
+  "t": "Copy message",
+  "x": 1076,
+  "y": 150,
+  "cls": ""
+ },
+ {
+  "t": "Copy response",
+  "x": 340,
+  "y": 224,
+  "cls": ""
+ },
+ {
+  "t": "Add images and files",
+  "x": 340,
+  "y": 843,
+  "cls": ""
+ },
+ {
+  "t": "Choose agent",
+  "x": 372,
+  "y": 843,
+  "cls": "max-w-[220px] justify-start ![font-weigh"
+ },
+ {
+  "t": "SenseNova 6.8 Flash Lite",
+  "x": 444,
+  "y": 843,
+  "cls": "animate-in fade-in min-w-0 max-w-[220px]"
+ },
+ {
+  "t": "Choose model variant",
+  "x": 664,
+  "y": 843,
+  "cls": "max-w-[220px] justify-start ![font-weigh"
+ },
+ {
+  "t": "Send",
+  "x": 1072,
+  "y": 843,
+  "cls": "size-7 rounded-md p-[6px] text-v2-icon-i"
+ }
+]
+>>> SESSION: ses_ef44b7394ffevE5EPLNJOoK6U0

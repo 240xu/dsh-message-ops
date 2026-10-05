@@ -104,7 +104,7 @@ test('planRestore：非标记事件 / 越界 seq 拒绝；空可重放区间改�
   assert.equal(plan.startSeq, 0)
 })
 
-test('applyRestore：重放 append 带 [恢复] 前缀 + system 说明，flush 被调用', () => {
+test('applyRestore：重放 append 干净文本（0.6.0 无前缀）+ system 说明，flush 被调用', () => {
   const appended = []
   let seq = 10
   const session = {
@@ -124,8 +124,8 @@ test('applyRestore：重放 append 带 [恢复] 前缀 + system 说明，flush �
   assert.equal(appended[0].type, 'system/message')
   assert.match(appended[0].data.message.content[0].text, /\[消息恢复\] 重放 seq 3\.\.4 的 2 条消息/)
   assert.equal(appended[1].type, 'user/message')
-  assert.equal(appended[1].data.message.content[0].text, '[恢复] 第二问')
-  assert.equal(appended[2].data.message.content[0].text, '[恢复] 第二答')
+  assert.equal(appended[1].data.message.content[0].text, '第二问', '0.6.0 对齐 opencode：无前缀')
+  assert.equal(appended[2].data.message.content[0].text, '第二答')
   for (const a of appended) assert.equal(a.opts.surfaceOp, 'append')
 })
 
@@ -356,6 +356,6 @@ test('磁盘计划/构建器：可见节点剔除遮蔽、marker 字段逐项镜
   assert.equal(nt.data.restoresSeq, 13);
   const rp = core.buildReplayEvent({ seq: 17, time: 3, item: { type: 'user/message', role: 'user', text: 'hi' } });
   assert.equal(rp.surfaceOp, 'append');
-  assert.deepEqual(rp.data.message, { role: 'user', content: [{ type: 'text', text: '[恢复] hi' }] });
+  assert.deepEqual(rp.data.message, { role: 'user', content: [{ type: 'text', text: 'hi' }] }); // 0.6.0 无前缀
   assert.ok(!('id' in rp.data.message), '重放镜像引擎：不带 id');
 });

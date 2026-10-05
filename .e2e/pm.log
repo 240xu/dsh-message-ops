@@ -1,0 +1,158 @@
+>>> USER MSG CANDIDATES: [
+ {
+  "cls": "YDXeBa_sessionRow YDXeBa_selected",
+  "y": 489,
+  "h": 32,
+  "w": 256,
+  "txt": "https://zcode.z.ai/cn#all-downloads，",
+  "depth": 16,
+  "btns": [
+   "Session actions for https://zc",
+   "Archive session",
+   "Pin session"
+  ],
+  "dataAttrs": "rowKey,dshResponsivePart",
+  "childCls": [
+   "YDXeBa_slot",
+   "YDXeBa_title",
+   "YDXeBa_time",
+   "YDXeBa_rowActions"
+  ]
+ },
+ {
+  "cls": "pI_x6G_centerCol",
+  "y": 0,
+  "h": 900,
+  "w": 1160,
+  "txt": "https://zcode.z.ai/cn#all-downloads， 11 subagents Agent Team Standard ",
+  "depth": 5,
+  "btns": [
+   "11 subagents",
+   "Agent Team",
+   "Delete session",
+   "Message ops (revert / delete /",
+   "More actions",
+   "Expand bottom panel",
+   "Open right sidebar",
+   "Chat",
+   "Trajectory",
+   "Load and jump to turn 1"
+  ],
+  "dataAttrs": "dshSurface,pane,dshCenterCol",
+  "childCls": [
+   ""
+  ]
+ },
+ {
+  "cls": "",
+  "y": 0,
+  "h": 0,
+  "w": 0,
+  "txt": "https://zcode.z.ai/cn#all-downloads， 11 subagents Agent Team Standard ",
+  "depth": 6,
+  "btns": [
+   "11 subagents",
+   "Agent Team",
+   "Delete session",
+   "Message ops (revert / delete /",
+   "More actions",
+   "Expand bottom panel",
+   "Open right sidebar",
+   "Chat",
+   "Trajectory",
+   "Load and jump to turn 1"
+  ],
+  "dataAttrs": "slot",
+  "childCls": [
+   ""
+  ]
+ },
+ {
+  "cls": "",
+  "y": 0,
+  "h": 0,
+  "w": 0,
+  "txt": "https://zcode.z.ai/cn#all-downloads， 11 subagents Agent Team Standard ",
+  "depth": 7,
+  "btns": [
+   "11 subagents",
+   "Agent Team",
+   "Delete session",
+   "Message ops (revert / delete /",
+   "More actions",
+   "Expand bottom panel",
+   "Open right sidebar",
+   "Chat",
+   "Trajectory",
+   "Load and jump to turn 1"
+  ],
+  "dataAttrs": "slot",
+  "childCls": [
+   "wSkVaW_root"
+  ]
+ },
+ {
+  "cls": "wSkVaW_root",
+  "y": 0,
+  "h": 900,
+  "w": 1160,
+  "txt": "https://zcode.z.ai/cn#all-downloads， 11 subagents Agent Team Standard ",
+  "depth": 8,
+  "btns": [
+   "11 subagents",
+   "Agent Team",
+   "Delete session",
+   "Message ops (revert / delete /",
+   "More actions",
+   "Expand bottom panel",
+   "Open right sidebar",
+   "Chat",
+   "Trajectory",
+   "Load and jump to turn 1"
+  ],
+  "dataAttrs": "phase",
+  "childCls": [
+   "",
+   "wSkVaW_body"
+  ]
+ },
+ {
+  "cls": "",
+  "y": 0,
+  "h": 0,
+  "w": 0,
+  "txt": "https://zcode.z.ai/cn#all-downloads， 11 subagents Agent Team Standard ",
+  "depth": 9,
+  "btns": [
+   "11 subagents",
+   "Agent Team",
+   "Delete session",
+   "Message ops (revert / delete /",
+   "More actions",
+   "Expand bottom panel",
+   "Open right sidebar",
+   "Chat",
+   "Trajectory"
+  ],
+  "dataAttrs": "slot",
+  "childCls
+>>> OUR SLOT CHAIN: {
+ "found": false
+}
+>>> COMPOSER GEO: {
+ "ta": {
+  "y": 780,
+  "x": 469,
+  "w": 770
+ },
+ "dockWrap": {
+  "y": 0,
+  "h": 0,
+  "x": 0,
+  "w": 0
+ },
+ "gap": 780,
+ "parentCls": "wSkVaW_composerStack",
+ "parentGap": "6px",
+ "dockChildren": "<div class=\"mopsRd\" role=\"region\" aria-label=\"5 messages rolled back\"><div class=\"mopsRdHead\" role=\"button\" tabindex=\"0\"><span class=\"mopsRdIcon\"><svg"
+}

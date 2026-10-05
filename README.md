@@ -314,3 +314,33 @@ MIT
   openSession 强制重建视图（磁盘追加无 live 投影事件）。
 - live 会话（对象层在册）仍走引擎路径；两条路径共用 turn/step/id 派生与
   空区间停用语义。新回归测试断言可见节点/计划语义/字段镜像（44/44）。
+
+## 0.6.0 · opencode 对齐：回滚长在「我的消息」上 + 贴条化恢复 UI
+
+用户定调「回滚信息怎么可能回滚的是 AI 的信息」——此前唯一一键入口挂在官方
+`conversation.chat.assistant-actions` 槽（只渲染在助手消息上），方向整个反了。
+Playwright 实测 opencode web（127.0.0.1:4096）后四项改造：
+
+1. **用户消息 hover 注入「回滚」按钮**（核心）：官方无用户消息动作槽 →
+   受控 DOM 注入，靶点用官方 `[data-chat-flow-kind="user"]` 属性。点击即回滚
+   「这条及其之后」（范围语义与 opencode 实测一致，未动）。**防错锁**：DOM 块 ↔
+   API 可见 user 行按序配对 + 文本归一化前缀互验，点击时复验一次，对不上拒绝
+   执行（宁可不回滚，不回滚错消息）。
+2. **恢复条贴合输入框**（opencode 实测规格：条→输入框 1px、同宽同列、折叠 42px）：
+   `.mopsRd` 锁 `max-width:var(--dsh-composer-card-max-width)`（与 `uV2eYG_card`
+   同源变量）+ `margin-inline:auto` + `margin-bottom:-5px` 把宿主 composerStack 的
+   6px gap 压成 **1px**；实测 bar rect [468,751,776,42]、card top 794/前轮 772 →
+   **gap=1、dx=-1、dw=2**；展开时列表向上涨（底边钉住，1px 不丢）。删 18px
+   spacer hack。EN 文案改 `{n} rolled back messages`（opencode 语序）。
+3. **对话框删「恢复」模式**：恢复唯一入口 = 贴条逐行按钮；对话框只留
+   回滚/删除/分支（实测 modeCount=3、无恢复项）。顺手防呆：pick 列表排除
+   `role=system`（引擎 node0 守卫本就 500 拒绝——不该给用户一个必然失败的选项）。
+4. **恢复去 `[恢复]` 前缀**：重放干净文本（opencode 实测恢复无任何标记）；
+   机制说明保留在 system notice。引擎 append-only 无法真正反遮蔽，重放语义不变。
+- 附带修复：注入器成功/失败回调误用组件级 `t()`（模块作用域未定义 → ReferenceError
+  吃掉刷新链：回滚 200 而贴条不出现）→ 改模块级 `__t`。
+- 验证：单测 44/44；Playwright 全环（发消息 → hover 回滚 200 → 贴条 gap=1 →
+  展开 → 恢复 → 条清空 + 消息回 + 无前缀）两条路径（注入器 / 对话框）各一遍。
+- 已知观察：宿主 `dsh-client-ui-open-in-app` 的 event feed 订阅在**无 id 重放事件**
+  （引擎原生 compaction 重放同形）上抛 `operation.kind` 读取错误——客户端已捕获、
+  功能无损，属宿主脆读，不在本插件范围。

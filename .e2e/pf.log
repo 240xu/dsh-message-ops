@@ -1,0 +1,188 @@
+>>> LIST: {
+ "rect": [
+  8,
+  281,
+  272,
+  449
+ ],
+ "head": "qv8 zcode2api 我的松下qv 8那台家用机器正在 1d 历史加载失败：stored session \"ses 2h 清点我的两台香港服务器一家 6h hi 1d 排查HK主服务器CPU占用过高 1d 清点我的两台香港服务器一家 (1) 1d https://zcode.z.ai/cn#all-downloads， Show less mimo2api Z code 普通日常任务 dsh面板聚合 聚合用量，侧边栏，还有github 10min dsh session报错修复记录 4d 会话历史加载失败的报",
+ "kids": 1,
+ "kidCls": [
+  "bhn1Oq_treeBody bhn1Oq_wide"
+ ]
+}
+>>> COMPOSER CHAIN: [
+ {
+  "tag": "DIV",
+  "cls": "uV2eYG_input",
+  "rect": [
+   469,
+   780,
+   770,
+   36
+  ],
+  "w": "770.391px",
+  "maxW": "none",
+  "pad": "4px 8px 0px 14px",
+  "margin": "0px",
+  "align": "auto",
+  "disp": "block"
+ },
+ {
+  "tag": "DIV",
+  "cls": "uV2eYG_grow",
+  "rect": [
+   469,
+   780,
+   770,
+   36
+  ],
+  "w": "770.391px",
+  "maxW": "none",
+  "pad": "0px",
+  "margin": "0px",
+  "align": "auto",
+  "disp": "block"
+ },
+ {
+  "tag": "DIV",
+  "cls": "uV2eYG_scroll",
+  "rect": [
+   469,
+   780,
+   770,
+   36
+  ],
+  "w": "770.391px",
+  "maxW": "none",
+  "pad": "0px",
+  "margin": "0px 4px 0px 0px",
+  "align": "auto",
+  "disp": "block"
+ },
+ {
+  "tag": "DIV",
+  "cls": "uV2eYG_card",
+  "rect": [
+   469,
+   772,
+   774,
+   98
+  ],
+  "w": "774.391px",
+  "maxW": "774.4px",
+  "pad": "8px 0px 0px",
+  "margin": "0px",
+  "align": "auto",
+  "disp": "flex"
+ },
+ {
+  "tag": "DIV",
+  "cls": "uV2eYG_root",
+  "rect": [
+   280,
+   772,
+   1153,
+   128
+  ],
+  "w": "1121px",
+  "maxW": "none",
+  "pad": "0px 16px 4px",
+  "margin": "0px",
+  "align": "auto",
+  "disp": "flex"
+ },
+ {
+  "tag": "DIV",
+  "cls": "",
+  "rect": [
+   0,
+   0,
+   0,
+   0
+  ],
+  "w": "auto",
+  "maxW": "none",
+  "pad": "0px",
+  "margin": "0px",
+  "align": "auto",
+  "disp": "contents"
+ }
+]
+>>> DOCK CHAIN: [
+ {
+  "tag": "DIV",
+  "cls": "mopsRd",
+  "rect": [
+   280,
+   722,
+   1155,
+   44
+  ],
+  "disp": "block",
+  "mb": "0px",
+  "mt": "0px",
+  "gap": "normal",
+  "flexDir": "row"
+ },
+ {
+  "tag": "DIV",
+  "cls": "",
+  "rect": [
+   0,
+   0,
+   0,
+   0
+  ],
+  "disp": "contents",
+  "mb": "0px",
+  "mt": "0px",
+  "gap": "normal",
+  "flexDir": "row"
+ },
+ {
+  "tag": "DIV",
+  "cls": "wSkVaW_composerStack",
+  "rect": [
+   280,
+   722,
+   1153,
+   178
+  ],
+  "disp": "flex",
+  "mb": "0px",
+  "mt": "0px",
+  "gap": "6px",
+  "flexDir": "column"
+ },
+ {
+  "tag": "DIV",
+  "cls": "",
+  "rect": [
+   0,
+   0,
+   0,
+   0
+  ],
+  "disp": "contents",
+  "mb": "0px",
+  "mt": "0px",
+  "gap": "normal",
+  "flexDir": "row"
+ },
+ {
+  "tag": "DIV",
+  "cls": "",
+  "rect": [
+   0,
+   0,
+   0,
+   0
+  ],
+  "disp": "contents",
+  "mb": "0px",
+  "mt": "0px",
+  "gap": "normal",
+  "flexDir": "row"
+ }
+]

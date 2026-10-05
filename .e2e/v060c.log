@@ -1,0 +1,14 @@
+>>> SID: session-1f28a842-c6e5-4f7a-90b3-7a884931af80 {"running":false,"src":"agent-status:idle","n":0}
+>>> sent: ALPHA first message  true
+>>> idle: after-alpha after 2 x2s, msgs 5
+>>> sent: BETA revert target m true
+>>> idle: after-beta after 2 x2s, msgs 6
+>>> BTN: {"x":1212,"y":255,"seq":"23"}
+>>> AFTER REVERT: {"bar":null,"cardRect":[469,772,774],"gap":null,"dx":null,"dw":null,"betaVisible":true} | want bar:yes gap:1 betaVisible:false
+>>> TOAST: ["Stopped","Stopped"]
+>>> NET: [{"url":"/api/message-ops/revert","status":200,"body":"{\"ok\":true,\"mode\":\"revert\",\"seq\":23,\"shadowedCount\":1,\"eventSeq\":27}"}]
+>>> EXPAND: null
+>>> RESTORE PT: null
+>>> AFTER RESTORE: {"bar":false,"betaBack":true,"hasPrefix":false} | want bar:false betaBack:true hasPrefix:false
+>>> API FIN: {"running":false,"src":"agent-status:idle","n":7}
+>>> CERR: ["Failed to load resource: the server responded with a status of 404 (Not Found)"]

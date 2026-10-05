@@ -1,0 +1,28 @@
+>>> sent: true FIRST u-geometry test  ( 0 -> 1 )
+>>> sent: true SECOND u-revert target ( 1 -> 2 )
+>>> sent: true THIRD u-tail message ( 2 -> 3 )
+>>> V0 pre-send state: {"userBlocks":3,"flow":9}
+>>> V2 target pt: {"x":805.296875,"y":269}
+>>> V2 BTN: {"x":1212,"y":255,"seq":"23","op":"0.8","aria":"Revert to here"} | want exists, seq>0
+>>> V2 click opacity(before): 0.8
+>>> V2 POST-REVERT: {
+ "bar": null,
+ "card": {
+  "x": 469,
+  "y": 772,
+  "w": 774,
+  "h": 98,
+  "b": 870
+ },
+ "gap": null,
+ "dx": null,
+ "dw": null,
+ "secondStillVisible": true,
+ "flowNow": 9
+}
+>>> V4 expand pt: null
+>>> V4 restore pt: null
+>>> V4 POST-RESTORE: {"bar":false,"secondBack":true,"hasPrefix":false} | want bar:false secondBack:true hasPrefix:false
+>>> current session: session-be18e936-33a1-4a6b-be16-9b60f309ceba
+>>> V3 DIALOG: {"dlg":true,"picks":6,"pending":true} {"modeCount":3,"labels":["Revert: remove t","Delete only this","Branch into a ne"],"hasRestore":false} | want modeCount:3 hasRestore:false
+>>> CERR: ["Failed to load resource: the server responded with a status of 404 (Not Found)","Failed to load resource: the server responded with a status of 404 (Not Found)"]

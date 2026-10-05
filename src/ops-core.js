@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
  *     （dsh-src 仓库较新副本已改名为 start/end；本插件面向安装的运行时，
  *     写入用 startSeq/endSeq，读取端两种拼写都兼容以便前向迁移）。
  *   - 因此「回滚恢复」只能实现为「重放」（replay）：把被遮蔽区间的
- *     user/assistant 消息文本重新 append 为新事件（文本加 [恢复] 前缀），
+ *     user/assistant 消息文本重新 append 为新事件（0.6.0：干净文本无前缀，对齐 opencode），
  *     而不是取消遮蔽。语义差异见 README。
  * @module dsh-message-ops/ops-core
  */
@@ -162,7 +162,7 @@ export function planRestore(events, restoreSeq) {
 /**
  * applyRestore：把 planRestore 的重放计划落定到 live session。
  * 引擎不支持取消遮蔽（SurfaceOp 无该变体），故实现为重放：
- * 每条消息以原类型 append、文本加 [恢复] 前缀；先 append 一条 system 说明。
+ * 0.6.0：每条消息以原类型 append、**干净文本（无前缀，对齐 opencode 干净恢复）**；先 append 一条 system 说明。
  */
 /** 恢复说明文案（live append 与磁盘路径共用；空可重放 = 停用语义）。 */
 export function restoreNoticeText(plan) {
@@ -190,7 +190,7 @@ export function applyRestore(session, plan, { flush } = {}) {
   for (const item of plan.replayable) {
     const event = session.append(
       item.type,
-      { message: { role: item.role, content: [{ type: "text", text: `[恢复] ${item.text}` }] } },
+      { message: { role: item.role, content: [{ type: "text", text: item.text }] } },
       { surfaceOp: "append" },
     );
     if (event && event.seq != null) eventSeqs.push(event.seq);
@@ -417,13 +417,13 @@ export function buildRestoreNoticeEvent({ seq, time, turnStep, text, restoreSeq 
   };
 }
 
-/** 磁盘重放事件（镜像引擎：无 id、[恢复] 前缀、surfaceOp "append"）。 */
+/** 磁盘重放事件（镜像引擎：无 id、干净文本无前缀（0.6.0 对齐 opencode）、surfaceOp "append"）。 */
 export function buildReplayEvent({ seq, time, item }) {
   return {
     type: item.type,
     seq,
     time,
-    data: { message: { role: item.role, content: [{ type: "text", text: `[恢复] ${item.text}` }] } },
+    data: { message: { role: item.role, content: [{ type: "text", text: item.text }] } },
     surfaceOp: "append",
   };
 }

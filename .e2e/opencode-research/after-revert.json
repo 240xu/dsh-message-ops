@@ -1,0 +1,25 @@
+{
+ "dialog": null,
+ "bodyHead": "H\nOK research.\nOK research.\n1 rolled back message\nReply with exactly: OK research.\nReply with exactly: OK research.\nBuild\nSenseNova 6.8 Flash Lite\nDefault",
+ "above": {
+  "depth": 5,
+  "cls": "w-full px-3 pointer-events-auto md:max-w-200 md:mx-auto 2xl:max-w-[1000px]",
+  "snippet": "1 rolled back message\nReply with exactly: OK research.\nReply with exactly: OK research.\nBuild\nSenseNova 6.8 Flash Lite\nDefault"
+ },
+ "btns": [
+  {
+   "t": "1 rolled back messageReply with exactly: OK research.",
+   "x": 333,
+   "y": 732,
+   "w": 774,
+   "h": 42
+  },
+  {
+   "t": "Expand rolled back messages",
+   "x": 1071,
+   "y": 739,
+   "w": 28,
+   "h": 28
+  }
+ ]
+}
