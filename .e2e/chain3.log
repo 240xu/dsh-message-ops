@@ -1,0 +1,7 @@
+>>> SESSION: ses_ef3396881ffejPTc4E4iwbT9WV
+>>> sent: Q1 alpha round | roles n = 0
+>>> sent: Q2 beta round | roles n = 2
+>>> sent: Q3 gamma round | roles n = 4
+>>> BASE roles: ["user","assistant","user","assistant"]
+>>> Q2 target: null found: false
+FATAL TypeError: Cannot read properties of null (reading 'y0')

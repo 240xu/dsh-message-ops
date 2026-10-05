@@ -344,3 +344,29 @@ Playwright 实测 opencode web（127.0.0.1:4096）后四项改造：
 - 已知观察：宿主 `dsh-client-ui-open-in-app` 的 event feed 订阅在**无 id 重放事件**
   （引擎原生 compaction 重放同形）上抛 `operation.kind` 读取错误——客户端已捕获、
   功能无损，属宿主脆读，不在本插件范围。
+
+## 0.7.0 · 用户消息回滚按钮回归「官方动作行」（修布局乱/点不了）
+
+用户实测反馈（0.6.0 的三处真问题，全部根因修复，非症状掩盖）：
+
+1. **按钮压在消息文字上** → 0.6.0 用 `position:absolute; top/right` 覆盖气泡。
+   官方用户消息的动作行是 `.xzv4MW_actions`（height28、消息下方 16px、
+   `hWmORq_actions{margin-top:16px;margin-left:-6px}`，内含 Copy 按钮）。
+   0.7.0 把按钮 **append 进该行**，与 Copy 同级同层（实测 `parentCls=xzv4MW_actions`、
+   与 Copy 中心 y 差 ≤6px、与气泡矩形不相交）。
+2. **触屏点不了** → 0.6.0 用 `opacity:0 + :hover` 显形。改由宿主动作行自身
+   `[data-actions-reveal]` 统一控制（按钮作为其子元素天然继承），并加
+   `@media (hover:none)` 兜底常显。
+3. **点了没反应 / 有时没按钮** → 两个根因：
+   - 锚点不稳：改为从 `.xzv4MW_actions` 反查最近消息容器（回退
+     `[data-chat-flow-kind="user"]`），并用 MutationObserver + 滚动扫描覆盖
+     虚拟列表动态追加（DOM 里没渲染的块本就无从注入）。
+   - **宿主把 `<system-reminder>` / runtime context 也记为 role=user**，
+     按序配对被这些"假用户消息"带偏（配对错位 / seq 打不上）。已过滤。
+   - 打标是异步的：点击时先 `await` 完成配对再执行（早先点在未打标按钮上静默失败）。
+- 沿用并保持：防错锁（文本互验、对不上拒绝执行）、范围语义（含目标到末尾）、
+  贴条 gap=1、恢复干净无前缀、运行中 409 守卫（实测点运行中的会话返回
+  409 "session is running; stop it first"，符合设计）。
+- 验证：单测 44/44；Playwright 失败用例先红后绿（`inOfficialRow && sameRowAsCopy
+  && !overlapsBubble` 全真 + `POST /revert 200` + 贴条出现）；对话框路径全环
+  （回滚→贴条→展开→恢复→条清空+无前缀）复跑通过。

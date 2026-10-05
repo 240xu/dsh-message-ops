@@ -1,0 +1,40 @@
+{
+ "sid": "ses_ef3407f91ffeNOapoX35aRYKA6",
+ "before": [
+  "TA first round question Build · SenseNova 6.8 Flash Lite · 3:47 ",
+  "I'm not sure what \"TA first round question\" refers to. Could you",
+  "TB second round question Build · SenseNova 6.8 Flash Lite · 3:47",
+  "I still don't have an actual question. \"TA first round\" and \"TB ",
+  "TC third round question Build · SenseNova 6.8 Flash Lite · 3:47 ",
+  "No question content provided — just labels (TA/TC/TC). I have no"
+ ],
+ "aBar": {
+  "bar": true,
+  "summary": "4 rolled back messages TA first round question",
+  "rows": [
+   "Expand rolled back messages"
+  ]
+ },
+ "expanded": {
+  "bar": true,
+  "summary": "4 rolled back messages",
+  "rows": [
+   "Collapse rolled back messages"
+  ]
+ },
+ "afterOne": [],
+ "barAfterOne": {
+  "bar": true,
+  "summary": "4 rolled back messages",
+  "rows": [
+   "Collapse rolled back messages"
+  ]
+ },
+ "net": [
+  {
+   "u": "/session/ses_ef3407f91ffeNOapoX35aRYKA6/revert",
+   "s": 200,
+   "b": "{\"id\":\"ses_ef3407f91ffeNOapoX35aRYKA6\",\"slug\":\"hidden-planet\",\"projectID\":\"global\",\"directory\":\"/data/data/com.termux/files/home\",\"path\":\"data/data/com.termux/f"
+  }
+ ]
+}

@@ -1,0 +1,40 @@
+{
+ "sid": "ses_ef334bcfdffe7HyBkzW1v4TLJj",
+ "net": [
+  {
+   "u": "/session/ses_ef334bcfdffe7HyBkzW1v4TLJj/revert",
+   "body": "{\"messageID\":\"msg_10ccc5648001PWEyDldZWbM4oC\"}"
+  }
+ ],
+ "uTexts": [
+  "WA first contentWA first content",
+  "WB second content",
+  "WC third content"
+ ],
+ "rows0": {
+  "h": 42,
+  "text": "4 rolled back messages",
+  "btns": [
+   "Collapse rolled back messages"
+  ]
+ },
+ "rows1": {
+  "h": 42,
+  "text": "4 rolled back messages",
+  "btns": [
+   "Collapse rolled back messages"
+  ]
+ },
+ "visAfter1": [
+  false,
+  false,
+  false
+ ],
+ "dockReload": {
+  "h": 42,
+  "text": "3 rolled back messages WA first contentWA first content",
+  "btns": [
+   "Expand rolled back messages"
+  ]
+ }
+}

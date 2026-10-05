@@ -930,11 +930,12 @@ window.__ModuleLoader__.load({
       return null
     }
 
-    // --- 0.6.0 用户消息 hover「回滚」按钮（DOM 注入）-------------------------------
-    // 官方只提供 assistant-actions 槽；回滚的正确对象是**用户自己的消息**（opencode 同款：
-    // 悬停我的消息 → 即时回滚「这条及其之后」）。注入点用官方属性 [data-chat-flow-kind="user"]。
-    // 防错锁（用户批准的设计）：DOM 块 ↔ API 可见 user 行按序配对 + 文本归一化前缀互验，
-    // 点击时再复验一次；对不上就拒绝执行（宁可不回滚，不回滚错消息）。
+    // --- 0.7.0 用户消息「回滚」按钮（DOM 注入，挂在官方动作行内）-------------------
+    // 0.6.0 的教训（用户实测反馈）：absolute 覆盖在气泡上 = 压住文字、布局乱；
+    // 且 opacity:0 + :hover 在触屏上永远不显形（点不了）。
+    // 官方用户消息的动作行 = .xzv4MW_actions（含 Copy，height28，位于消息下方 16px），
+    // 可见性由宿主 [data-actions-reveal] 控制。0.7.0：把按钮 append 进该行，
+    // 与 Copy 同级同层，可见性天然继承宿主动作行（不再自己玩 hover）。
     function installUserRevertInjector() {
       if (window.__MOPS_USER_REVERT_INSTALLED) return
       window.__MOPS_USER_REVERT_INSTALLED = true
@@ -945,39 +946,68 @@ window.__ModuleLoader__.load({
         return fetch('/api/message-ops/messages?sessionId=' + encodeURIComponent(sid))
           .then((r) => (r.ok ? r.json() : null))
           .then((d) => {
+            // 宿主会把 <system-reminder> / runtime context 等也记为 role=user 的行，
+            // DOM 里并不渲染成"我的消息"块 —— 必须滤掉，否则按序配对会错位（0.7.0 根因）。
+            const injected = (sn) => /^<system-reminder|current\s+runtime\s+context|^<system-Reminder/i.test(sn)
             const rows = ((d && d.messages) || [])
               .filter((m) => m && m.role === 'user' && m.visible !== false)
               .map((m) => ({ seq: m.seq, sn: norm(m.snippet) }))
+              .filter((r) => r.sn && !injected(r.sn))
             rowsCache = { sid: sid, rows: rows, at: Date.now() }
             return rows
           })
           .catch(() => rowsCache.sid === sid ? rowsCache.rows : null)
       }
-      // 把当前 DOM 的 user 块按序配对到 seq（互验失败的块不打标 → 按钮禁用回滚）
+      // 用户消息锚点：优先官方 Sixlwa_userRow（含 .xzv4MW_actions），回退 flow-kind 属性
+      // 锚点 = 每条用户消息自己的容器（一个块只算一次）：
+      // 从官方动作行 .xzv4MW_actions 反查最近的消息容器，最贴近"一条消息"的粒度。
+      var userAnchors = () => {
+        const out = []
+        const seen = new Set()
+        const add = (el) => { if (el && !seen.has(el)) { seen.add(el); out.push(el) } }
+        const rows = Array.from(document.querySelectorAll('[class*="xzv4MW_actions"]'))
+        for (const r of rows) {
+          const block = r.closest('[data-chat-flow-kind="user"]') || r.closest('[class*="Sixlwa_userRow"]') || r.parentElement
+          // 只取用户消息：块文本需能对应到 user 行（排除助理消息的动作行）
+          if (block && /Sixlwa_userRow|Sixlwa_userStack|Sixlwa_bubble/.test(block.innerHTML.slice(0, 4000))) add(block)
+        }
+        // 回退：属性锚点
+        for (const k of document.querySelectorAll('[data-chat-flow-kind="user"]')) add(k)
+        return out
+      }
       var assignSeqs = (sid, rows) => {
         if (!rows) return
-        const blocks = Array.from(document.querySelectorAll('[data-chat-flow-kind="user"]'))
+        const blocks = userAnchors()
         let ri = 0
         for (const b of blocks) {
           b.removeAttribute('data-mops-seq')
           const head = norm((b.innerText || '').slice(0, 240))
           let hit = -1
           for (let j = ri; j < rows.length; j++) {
-            if (rows[j].sn && head && (head.startsWith(rows[j].sn.slice(0, 48)) || rows[j].sn.startsWith(head.slice(0, 48)))) { hit = j; break }
+            const a = (rows[j].sn || '').slice(0, 40)
+            const b = (head || '').slice(0, 40)
+            if (a && b && (head.includes(a) || rows[j].sn.includes(b))) { hit = j; break }
           }
           if (hit >= 0) { b.setAttribute('data-mops-seq', String(rows[hit].seq)); ri = hit + 1 }
         }
       }
       var ensureAssign = (sid) => fetchRows(sid).then((rows) => assignSeqs(sid, rows))
-      // 单击回滚（带复验）
+      // 0.7.0：点击时先**同步完成**配对（打标是异步 fetch 的结果，
+      // 早先点在未打标的按钮上会静默失败 = 用户反馈的"点了没用"）。
       var runUserRevert = (btn, block) => {
         const sid = __currentSessionId
         if (!sid) return
-        const seq = Number(block.getAttribute('data-mops-seq'))
-        const head = norm((block.innerText || '').slice(0, 240))
-        fetchRows(sid).then((rows) => {
+        btn.disabled = true
+        Promise.resolve()
+          .then(() => ensureAssign(sid))
+          .then(() => fetchRows(sid))
+          .then((rows) => {
+          const seq = Number(block.getAttribute('data-mops-seq'))
+          const head = norm((block.innerText || '').slice(0, 240))
           const row = rows && rows.find((r) => r.seq === seq)
-          if (!row || !head || !(head.startsWith(row.sn.slice(0, 48)) || row.sn.startsWith(head.slice(0, 48)))) {
+          const a2 = (row && row.sn || '').slice(0, 40)
+          const b2 = (head || '').slice(0, 40)
+          if (!row || !head || !(head.includes(a2) || row.sn.includes(b2))) {
             ensureAssign(sid)
             notifyDone(__t('errorPrefix') + 'revert target verification failed', 'error')
             return
@@ -1002,10 +1032,17 @@ window.__ModuleLoader__.load({
               notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
             })
             .finally(() => { btn.disabled = false })
-        })
+          })
       }
       var ensureBtn = (block) => {
-        let btn = block.querySelector('.mopsUserRevert')
+        // 官方动作行（含 Copy）：把按钮放到这一行里，与 Copy 同级
+        let host = block.querySelector('[class*="xzv4MW_actions"]')
+        if (!host) {
+          host = document.createElement('div')
+          host.className = 'mopsUserActionsRow'
+          block.appendChild(host)
+        }
+        let btn = host.querySelector('.mopsUserRevert')
         if (btn) return btn
         btn = document.createElement('button')
         btn.type = 'button'
@@ -1018,37 +1055,52 @@ window.__ModuleLoader__.load({
           if (btn.disabled) return
           runUserRevert(btn, block)
         })
-        block.appendChild(btn)
+        host.appendChild(btn)
         return btn
       }
+      var scan = () => {
+        try {
+          const sid = __currentSessionId
+          if (!sid) return
+          const blocks = userAnchors()
+          for (const b of blocks) ensureBtn(b)
+          if (blocks.some((b) => !b.hasAttribute('data-mops-seq'))) ensureAssign(sid)
+        } catch { /* 注入失败不影响会话 */ }
+      }
+      // 触发：hover / 滚动 / DOM 变化 / 变更事件
       document.addEventListener('mouseover', (e) => {
         try {
           if (!e || !e.target || !e.target.closest) return
-          const block = e.target.closest('[data-chat-flow-kind="user"]')
+          if (!__currentSessionId) return
+          const block = e.target.closest('[class*="Sixlwa_userRow"], [data-chat-flow-kind="user"]')
           if (!block) return
-          const sid = __currentSessionId
-          if (!sid) return
           ensureBtn(block)
-          if (!block.hasAttribute('data-mops-seq')) { ensureAssign(sid) }
-        } catch { /* 注入失败不影响会话 */ }
+          if (!block.hasAttribute('data-mops-seq')) ensureAssign(__currentSessionId)
+        } catch { /* noop */ }
       }, { passive: true })
-      // 会话切换/回滚落定后：清标（下一次 hover 重新配对）
+      window.addEventListener('scroll', scan, { passive: true })
+      try {
+        var mo = new MutationObserver(() => { clearTimeout(scan._t); scan._t = setTimeout(scan, 200) })
+        mo.observe(document.body, { childList: true, subtree: true })
+      } catch { /* noop */ }
       window.addEventListener(CHANGED_EVENT, () => {
         try {
           document.querySelectorAll('[data-mops-seq]').forEach((b) => b.removeAttribute('data-mops-seq'))
         } catch { /* noop */ }
       })
-      // 注入按钮样式（贴合官方 ghost 按钮）
+      // 样式：与官方 action 按钮同款（28px、ghost），可见性继承宿主动作行
       try {
         if (!document.getElementById('dsh-message-ops-user-revert-style')) {
           const tag = document.createElement('style')
           tag.id = 'dsh-message-ops-user-revert-style'
           tag.textContent = [
-            '[data-chat-flow-kind="user"]{position:relative}',
-            '.mopsUserRevert{position:absolute;top:2px;right:2px;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;border:none;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary,#9a9aa0);opacity:0;cursor:pointer;padding:0;z-index:3;transition:opacity .12s ease}',
-            '[data-chat-flow-kind="user"]:hover>.mopsUserRevert,[data-chat-flow-kind="user"]:focus-within>.mopsUserRevert,.mopsUserRevert:focus-visible{opacity:.8}',
+            // 不再用 absolute + :hover：按钮作为宿主动作行的子元素，
+            // 由宿主 [data-actions-reveal] 统一控制显隐（触屏也跟着宿主走）。
+            '.mopsUserRevert{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary,#9a9aa0);cursor:pointer;padding:0;flex:none}',
             '.mopsUserRevert:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12))}',
             '.mopsUserRevert:disabled{opacity:.4;cursor:default}',
+            '.mopsUserActionsRow{height:28px;display:flex;align-items:center;gap:8px;margin-left:-6px}',
+            '@media (hover:none){.mopsUserActionsRow{opacity:1}}',
           ].join('')
           document.head.appendChild(tag)
         }

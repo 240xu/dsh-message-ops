@@ -1,0 +1,16 @@
+>>> SESSION: ses_ef334bcfdffe7HyBkzW1v4TLJj
+>>> send retry 1 WA first conte
+>>> sent: WA first content (typed: true )
+>>> sent: WB second content (typed: true )
+>>> sent: WC third content (typed: true )
+>>> API user texts: ["WA first contentWA first content","WB second content","WC third content"]
+>>> wrappers in DOM: 4
+>>> anchor: WA first contentWA pt: {"x":620,"y":133}
+>>> revert btn: {"x":1054,"y":162}
+>>> NET: [{"u":"/session/ses_ef334bcfdffe7HyBkzW1v4TLJj/revert","body":"{\"messageID\":\"msg_10ccc5648001PWEyDldZWbM4oC\"}"}]
+>>> ROWS initial: {"h":42,"text":"4 rolled back messages","btns":["Collapse rolled back messages"]}
+>>> row1 restore: null
+>>> ROWS after row1: {"h":42,"text":"4 rolled back messages","btns":["Collapse rolled back messages"]}
+>>> user texts visible flags: ["WA first con=false","WB second co=false","WC third con=false"]
+>>> DOCK after reload: {"h":42,"text":"3 rolled back messages WA first contentWA first content","btns":["Expand rolled back messages"]}
+>>> SAVED SID: ses_ef334bcfdffe7HyBkzW1v4TLJj
