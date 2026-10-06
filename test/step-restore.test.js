@@ -94,3 +94,19 @@ test("0.8.0 B1：planRestore(excludeSeqs) 排除已重放，杜绝副本刷屏",
   const all = planRestore(events, 20, 23, [11, 12, 13, 14]);
   assert.deepEqual(all.replayable.map((i) => i.seq), [], "全部已重放 → 空计划（只补 notice）");
 });
+
+test("0.8.1 discard：notice 带 discarded → 标记完成，不重放内容", () => {
+  const events = fixtures();
+  const plan = planRestore(events, 20);
+  plan.discard = true;
+  const appended = [];
+  const fake = { append: (type, data) => { const e = { seq: 100 + appended.length, type, data }; appended.push(e); return e } };
+  const r = applyRestore(fake, plan, {});
+  assert.equal(r.restoredCount, 0, "丢弃 → 不重放");
+  assert.equal(appended.length, 1, "只有 notice");
+  assert.equal(appended[0].data.discarded, true);
+  events.push({ seq: 50, type: "system/message", time: 1700000000050, data: { turn: 1, step: 1, message: { id: "m50", role: "system", source: { kind: "system-prompt" }, content: [{ type: "text", text: "n" }] }, restoresSeq: 20, discarded: true }, surfaceOp: "append" });
+  const prog = restoreProgress(events, 20);
+  assert.equal(prog.discarded, true);
+  assert.equal(prog.complete, true, "丢弃 → 完成");
+});

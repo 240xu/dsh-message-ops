@@ -355,7 +355,8 @@ function opsBranch(targetCtx, sessionId, upToSeq) {
 }
 
 // 0.8.0：upToSeq 可选 —— 给定则按轮步进恢复（只重放到该 seq，后续仍遮蔽）。
-async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq) {
+// 0.8.1：opts.discard —— 不重放内容，仅停用标记（清贴条）。
+async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq, discard) {
   if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
   if (!Number.isSafeInteger(restoreSeq) || restoreSeq < 0) throw new OpsError("invalid seq", 400);
   if (upToSeq !== undefined && (!Number.isSafeInteger(upToSeq) || upToSeq < 0)) throw new OpsError("invalid upToSeq", 400);
@@ -366,6 +367,7 @@ async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq) {
   // 否则每轮从区间头重放 → 消息副本成倍出现。
   const progress = restoreProgress(events, restoreSeq);
   const plan = planRestore(events, restoreSeq, upToSeq, progress ? progress.restoredSeqs : null);
+  if (discard) plan.discard = true;
   if (plan.replayable.length === 0 && progress && !progress.complete && progress.pendingSeqs.length > 0) {
     // 请求的 upTo 之前已全部重放过 → 只补一条进度 notice（不重复重放）
     plan.upToSeq = upToSeq != null ? Math.min(upToSeq, plan.endSeq) : plan.endSeq;
@@ -376,7 +378,7 @@ async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq) {
       const result = applyRestore(acq.session, plan, {
         flush: () => { flushSessions(targetCtx, acq.session); },
       });
-      return { ok: true, ...result, upToSeq: plan.upToSeq, restoredSourceSeqs: plan.replayable.map((i) => i.seq), range: { startSeq: plan.startSeq, endSeq: plan.endSeq } };
+      return { ok: true, ...result, discarded: plan.discard === true, upToSeq: plan.upToSeq, restoredSourceSeqs: plan.replayable.map((i) => i.seq), range: { startSeq: plan.startSeq, endSeq: plan.endSeq } };
     } finally {
       acq.release();
     }
@@ -386,11 +388,14 @@ async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq) {
   const baseTime = Date.now();
   const batch = [buildRestoreNoticeEvent({
     seq: cursor++, time: baseTime, turnStep: plan.turnStep,
-    text: restoreNoticeText(plan), restoreSeq: plan.restoreSeq,
-    restoredSourceSeqs: plan.replayable.map((i) => i.seq),
+    text: plan.discard
+      ? `[消息操作] 回撤标记 seq ${plan.restoreSeq} 已停用（丢弃）：区间内容保持遮蔽、未重放；日志原文仍在，可搜索`
+      : restoreNoticeText(plan),
+    restoreSeq: plan.restoreSeq,
+    discard: plan.discard === true,
   })];
   let offset = 0;
-  for (const item of plan.replayable) {
+  for (const item of plan.discard ? [] : plan.replayable) {
     batch.push(buildReplayEvent({ seq: cursor++, time: baseTime + (++offset), item }));
   }
   await diskAppend(logPath, batch);
@@ -647,7 +652,7 @@ export function apply(ctx) {
         if (!body || typeof body !== "object") return sendJson(res, 400, { ok: false, error: "invalid json" });
         try {
           // 0.8.0：body.upToSeq 存在 → 按轮步进恢复（只到该 seq）
-          return sendJson(res, 200, await opsRestore(targetCtx, body.sessionId, body.seq, body.upToSeq != null ? Number(body.upToSeq) : undefined));
+          return sendJson(res, 200, await opsRestore(targetCtx, body.sessionId, body.seq, body.upToSeq != null ? Number(body.upToSeq) : undefined, body.discard === true));
         } catch (err) {
           return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
         }

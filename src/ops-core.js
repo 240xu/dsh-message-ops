@@ -183,18 +183,20 @@ export function restoreNoticeText(plan) {
 
 export function applyRestore(session, plan, { flush } = {}) {
   const eventSeqs = [];
-  const notice = restoreNoticeText(plan);
+  const notice = plan.discard
+    ? `[消息操作] 回撤标记 seq ${plan.restoreSeq} 已停用（丢弃）：区间内容保持遮蔽、未重放；日志原文仍在，可搜索`
+    : restoreNoticeText(plan);
   // 0.4.2：notice 事件携带 restoresSeq —— dock 据此把被恢复的标记从「活跃回撤」
   // 中移除（对齐 opencode clear 语义：恢复后不再显示为待恢复项）。
   const ts = plan.turnStep && Number.isSafeInteger(plan.turnStep.turn) && plan.turnStep.turn > 0
     ? plan.turnStep : { turn: 1, step: 1 };
   const noticeEvent = session.append(
     "system/message",
-    { turn: ts.turn, step: ts.step, message: { id: randomUUID(), role: "system", content: [{ type: "text", text: notice }] }, restoresSeq: plan.restoreSeq, restoredSourceSeqs: plan.replayable.map((i) => i.seq) },
+    { turn: ts.turn, step: ts.step, message: { id: randomUUID(), role: "system", content: [{ type: "text", text: notice }] }, restoresSeq: plan.restoreSeq, restoredSourceSeqs: plan.discard ? [] : plan.replayable.map((i) => i.seq), ...(plan.discard ? { discarded: true } : {}) },
     { surfaceOp: "append" },
   );
   if (noticeEvent && noticeEvent.seq != null) eventSeqs.push(noticeEvent.seq);
-  for (const item of plan.replayable) {
+  for (const item of plan.discard ? [] : plan.replayable) {
     const event = session.append(
       item.type,
       { message: { role: item.role, content: [{ type: "text", text: item.text }] } },
@@ -205,7 +207,7 @@ export function applyRestore(session, plan, { flush } = {}) {
   if (flush) {
     try { flush(); } catch { /* flush 失败不回滚已接受的事件 */ }
   }
-  return { restoredCount: plan.replayable.length, skipped: plan.skipped, eventSeqs };
+  return { restoredCount: plan.discard ? 0 : plan.replayable.length, skipped: plan.skipped, eventSeqs };
 }
 
 /**
@@ -238,7 +240,11 @@ export function restoreProgress(events, markerSeq) {
   const notices = list.filter((e) => e && e.data && e.data.restoresSeq === markerSeq);
   const restored = new Set();
   let legacy = false;
+  let discarded = false;
   for (const n of notices) {
+    // 0.8.1：显式丢弃（不重放内容、仅停用标记）也算完成——
+    // 用户场景"我都没回滚过，清掉测试遗留条"，2709 条重放是另一种污染。
+    if (n.data.discarded === true) { discarded = true; continue; }
     const seqs = n.data && Array.isArray(n.data.restoredSourceSeqs) ? n.data.restoredSourceSeqs : null;
     if (!seqs) { legacy = true; continue; }
     for (const q of seqs) if (Number.isSafeInteger(q)) restored.add(q);
@@ -249,8 +255,9 @@ export function restoreProgress(events, markerSeq) {
     endSeq,
     restoredSeqs: Array.from(restored).sort((a, b) => a - b),
     pendingSeqs: pending,
-    complete: legacy ? true : pending.length === 0,
+    complete: legacy || discarded ? true : pending.length === 0,
     legacy,
+    discarded,
   };
 }
 
@@ -479,7 +486,7 @@ export function buildMarkerEvent({ seq, time, turnStep, text, startSeq, endSeq, 
 }
 
 /** 磁盘恢复说明事件（restoresSeq → dock 移除该行；surfaceOp 恒 "append"）。 */
-export function buildRestoreNoticeEvent({ seq, time, turnStep, text, restoreSeq }) {
+export function buildRestoreNoticeEvent({ seq, time, turnStep, text, restoreSeq, discard }) {
   return {
     type: "system/message",
     seq,
@@ -489,6 +496,7 @@ export function buildRestoreNoticeEvent({ seq, time, turnStep, text, restoreSeq 
       step: turnStep.step,
       message: { id: randomUUID(), role: "system", content: [{ type: "text", text }] },
       restoresSeq: restoreSeq,
+      ...(discard ? { discarded: true } : {}),
     },
     surfaceOp: "append",
   };
