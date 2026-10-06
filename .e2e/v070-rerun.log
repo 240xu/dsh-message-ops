@@ -1,0 +1,48 @@
+>>> SID: null
+>>> sent: ZZ alpha body
+>>> sent: YY beta body
+>>> PROBE: {
+ "btn": {
+  "rect": {
+   "x": 1200,
+   "y": 140,
+   "w": 28,
+   "h": 28,
+   "b": 168,
+   "r": 1228
+  },
+  "opacity": "1",
+  "parentCls": "xzv4MW_actions"
+ },
+ "copyBtn": {
+  "x": 1164,
+  "y": 140,
+  "w": 28,
+  "h": 28,
+  "b": 168,
+  "r": 1192
+ },
+ "actionsRow": {
+  "rect": {
+   "x": 1113,
+   "y": 140,
+   "w": 115,
+   "h": 28,
+   "b": 168,
+   "r": 1228
+  },
+  "opacity": "1",
+  "cls": "xzv4MW_actions"
+ },
+ "bubble": null,
+ "overlapsBubble": false,
+ "sameRowAsCopy": true,
+ "inOfficialRow": true
+}
+>>> ASSERT (inOfficialRow && sameRowAsCopy && !overlapsBubble): true
+>>> idle after 16 x2s
+>>> BTNS BEFORE CLICK: [{"seq":null,"vis":true,"op":"1","txt":"ZZ alpha body 17:19"},{"seq":null,"vis":true,"op":"1","txt":"YY beta body 17:20"}]
+>>> CLICK PT: {"x":1214,"y":301}
+>>> TOAST: ["Stopped","Stopped"]
+>>> NET: [{"s":200,"b":"{\"ok\":true,\"mode\":\"revert\",\"seq\":23,\"shadowedCount\":1,\"eventSeq\":27}"}] | BAR: 1 rolled back messages
+>>> RESULT: GREEN

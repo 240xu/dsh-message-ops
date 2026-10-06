@@ -772,11 +772,11 @@ window.__ModuleLoader__.load({
     // 0.4.2 引入（恢复的标记自动离开活跃列表 = opencode clear 语义）。
     // 0.5.0 脚本化编辑曾误删本函数 → dock 100% 静默失效（P0，0.5.2 恢复）。
     function activeMarkers(msgs) {
-      const restored = new Set()
-      for (const m of msgs || []) {
-        if (m && typeof m.restoresSeq === 'number') restored.add(m.restoresSeq)
-      }
-      return (msgs || []).filter((m) => m.marker && m.sourceKind !== 'compact-checkpoint' && !restored.has(m.seq))
+      // 0.8.0：活跃判定收敛到服务端权威字段 restoreComplete
+      // （按 restoredSourceSeqs 进度算；旧 notice 无该字段 → 服务端视为整段已恢复）。
+      // 旧的"行内 restoresSeq 集合"客户端判定已删除——按轮步进下部分恢复的标记
+      // 也带 restoresSeq，旧逻辑会把它们误杀（实测：第一轮恢复后整条消失）。
+      return (msgs || []).filter((m) => m.marker && m.sourceKind !== 'compact-checkpoint' && m.restoreComplete !== true)
     }
 
     function RevertDock(props) {
@@ -856,11 +856,12 @@ window.__ModuleLoader__.load({
 
       const restoreRow = (row) => {
         if (restoring != null || running) return
-        setRestoring(row.seq)
+        setRestoring(rowKey(row))
         Promise.resolve()
           .then(() => fetch('/api/message-ops/restore', {
             method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ sessionId, seq: row.seq }),
+            // 0.8.0：upToSeq 存在 → 按轮步进恢复（只重放到该 seq）
+            body: JSON.stringify(row.upTo != null ? { sessionId, seq: row.seq, upToSeq: row.upTo } : { sessionId, seq: row.seq }),
           }))
           .then(async (res) => {
             let data = {}
@@ -888,13 +889,26 @@ window.__ModuleLoader__.load({
       const label = t('dock.title', { n: String(shadowCount || markers.length) })
       const preview = markers[0] && markers[0].snippet ? markers[0].snippet : ''
 
-      const rowEl = (row) => React.createElement('div', { key: row.seq, className: 'mopsRdRow' },
+      // 0.8.0：行 = 待恢复"轮"（对齐 opencode 按轮步进）；无可重放轮的标记
+      // 保留旧式整段行（空区间 → 停用 notice 路径）。restoring 键区分同标记多轮。
+      const rowKey = (row) => (row.upTo != null ? row.seq + ':' + row.upTo : String(row.seq))
+      const rowEl = (row) => React.createElement('div', { key: rowKey(row), className: 'mopsRdRow' },
         React.createElement('span', { className: 'mopsRdRowText' }, '#' + row.seq + ' · ' + (row.snippet || '')),
         React.createElement('button', {
           type: 'button', className: 'mopsRdRestore', disabled: restoring != null || running,
           onClick: () => restoreRow(row),
-        }, restoring === row.seq ? t('dock.restoring') : t('dock.restore')),
+        }, restoring === rowKey(row) ? t('dock.restoring') : t('dock.restore')),
       )
+      const dockRows = []
+      for (const mk of markers || []) {
+        if (Array.isArray(mk.pendingTurns) && mk.pendingTurns.length > 0) {
+          for (const t of mk.pendingTurns) {
+            dockRows.push({ seq: mk.seq, upTo: t.upTo, snippet: t.preview + (t.count > 1 ? ' (+' + (t.count - 1) + ')' : '') })
+          }
+        } else {
+          dockRows.push({ seq: mk.seq, snippet: mk.snippet })
+        }
+      }
 
       const chevron = React.createElement('button', {
         type: 'button', 'aria-label': open ? t('dock.collapse') : t('dock.expand'), 'aria-expanded': open,
@@ -916,7 +930,7 @@ window.__ModuleLoader__.load({
           React.createElement('span', { className: 'mopsRdLabel' + (open ? '' : ' mopsRdLabelCollapsed') }, label),
           open ? null : React.createElement('span', { className: 'mopsRdPreview' }, preview),
           React.createElement('span', { style: { marginLeft: 'auto', flex: 'none' } }, chevron)),
-        open ? React.createElement('div', { className: 'mopsRdList' }, markers.map(rowEl)) : null,
+        open ? React.createElement('div', { className: 'mopsRdList' }, dockRows.map(rowEl)) : null,
       )
     }
 

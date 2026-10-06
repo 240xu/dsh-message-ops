@@ -370,3 +370,31 @@ Playwright 实测 opencode web（127.0.0.1:4096）后四项改造：
 - 验证：单测 44/44；Playwright 失败用例先红后绿（`inOfficialRow && sameRowAsCopy
   && !overlapsBubble` 全真 + `POST /revert 200` + 贴条出现）；对话框路径全环
   （回滚→贴条→展开→恢复→条清空+无前缀）复跑通过。
+
+## 0.8.0 · 按轮步进恢复（对齐 opencode 展开行语义）
+
+opencode 实测：展开行 = 每条被遮蔽消息一行，点行**只恢复该消息及其同轮回复**，
+后续保持遮蔽。0.8.0 把"按标记整段恢复"升级为"按轮步进"：
+
+- **服务端**：
+  - `planRestore(events, seq, upToSeq?, excludeSeqs?)`：`upToSeq` 截断重放区间；
+    `excludeSeqs` 排除已重放源 seq（**B1 修复**：此前每轮从区间头重放 →
+    消息副本成倍刷屏，实测 seq8 被重放 5 次）。
+  - 恢复 notice 新增 `restoredSourceSeqs`（本次重放的源 seq 列表）——
+    引擎准入**不拒绝** data 未知字段（研究册 01 §8），且实测磁盘原样持久化。
+  - `restoreProgress()`：标记的恢复进度（restored/pending/complete/legacy）；
+    `pendingRestoreTurns()`：未重放轮切分（一个 user 及其后继 assistant 为一轮）。
+  - `GET /messages` 为每个标记附 `restoreComplete` + `pendingTurns`
+    （含 preview，一次建 seq→text 索引，避免每标记全量扫）。
+  - `POST /restore` 接受可选 `upToSeq`（live 与磁盘两路径一致）。
+- **客户端**：
+  - 贴条行 = 待恢复轮（`#markerSeq · 首条预览 (+N)`），点击只回该轮；
+  - 标记活跃判定收敛到服务端权威 `restoreComplete`（删除客户端 restoresSeq
+    集合旧判——按轮下部分恢复的标记也带 restoresSeq，旧逻辑会误杀，
+    实测：第一轮恢复后整条消失）；
+  - 全部轮恢复完 → 标记不活跃 → 贴条消失；兼容旧 notice（视为整段已恢复）。
+- **验证**：单测 **49/49**（新增 5 条：upToSeq 截断 / notice 字段 / 进度推进 /
+  旧通知兼容 / B1 排除）；Playwright `v080.cjs` 全环 **GREEN**：
+  5 行=5 轮 → 点第一行（S1 副本=1、余 4 轮、贴条保持）→ 逐轮清空 →
+  `markerActive=false`、无前缀、贴条消失；0.7.0 布局用例复跑 GREEN；
+  对话框路径复跑通过（恢复亦按轮）。

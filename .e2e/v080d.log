@@ -1,0 +1,15 @@
+>>> new-session attempt 1 → session-42c6f5da-325e-4470-9dcc-1c59046b6913
+>>> SID: session-42c6f5da-325e-4470-9dcc-1c59046b6913
+>>> sent: S1 alpha round con
+>>> sent: S2 beta round cont
+>>> first user seq: 8 | users: ["8:S1 alpha round con","23:S2 beta round cont"]
+>>> revert: 200 {"ok":true,"mode":"revert","seq":8,"shadowedCount":5,"eventSeq":28}
+>>> marker: 28 | pendingTurns: [{"upTo":8,"count":1,"preview":"S1 alpha round content"},{"upTo":9,"count":1,"preview":"<system-reminder> The following workspace instructions may be relevant to your w"},{"upTo":10,"count":1,"preview":"Current runtime context. This snapshot supersedes earlier runtime-context snapsh"},{"upTo":11,"count":1,"preview":"<system-reminder> A skill is a reusable set of task-specific instructions. The f"},{"upTo":23,"count":1,"preview":"S2 beta round content"}]
+>>> DOCK rows (want 5 ): 5 ["#28 · S1 alpha round content Restore","#28 · <system-reminder> The following workspace instructions","#28 · Current runtime context. This snapshot supersedes earl","#28 · <system-reminder> A skill is a reusable set of task-sp","#28 · S2 beta round content Restore"]
+>>> client row1 click: true
+>>> after client row1: visible S1 copies = 1 | remaining turns: 4 (was 5 ) | bar still there: false
+>>> API restore → 200 restored 1 upTo 9
+>>> API restore → 200 restored 1 upTo 10
+>>> API restore → 200 restored 1 upTo 11
+>>> API restore → 200 restored 1 upTo 23
+FATAL ReferenceError: fin is not defined

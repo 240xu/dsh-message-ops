@@ -1,0 +1,20 @@
+>>> new-session attempt 1 → session-f1a57594-633f-49f9-977b-b6384212e3a3
+>>> SID: session-f1a57594-633f-49f9-977b-b6384212e3a3
+>>> sent: S1 alpha round con
+>>> sent: S2 beta round cont
+>>> first user seq: 8 | users: ["8:S1 alpha round con","23:S2 beta round cont"]
+>>> revert: 200 {"ok":true,"mode":"revert","seq":8,"shadowedCount":5,"eventSeq":28}
+>>> marker: 28 | pendingTurns: [{"upTo":8,"count":1,"preview":"S1 alpha round content"},{"upTo":9,"count":1,"preview":"<system-reminder> The following workspace instructions may be relevant to your w"},{"upTo":10,"count":1,"preview":"Current runtime context. This snapshot supersedes earlier runtime-context snapsh"},{"upTo":11,"count":1,"preview":"<system-reminder> A skill is a reusable set of task-specific instructions. The f"},{"upTo":23,"count":1,"preview":"S2 beta round content"}]
+>>> DOCK rows (want 5 ): 0 []
+>>> client row1 click: null
+>>> after client restore: visible S1 copies = 0
+>>> after turn1 restore: complete= false | remaining turns: 5 (was 5 )
+>>> API restore → 200 restored 1 upTo 8
+>>> API restore → 200 restored 1 upTo 9
+>>> API restore → 200 restored 1 upTo 10
+>>> API restore → 200 restored 1 upTo 11
+>>> API restore → 200 restored 1 upTo 23
+>>> dup check: visible S1 copies = 1 (want 1)
+>>> FINAL: markerActive= true | prefix: false
+>>> BAR GONE (client): true
+>>> VERDICT: RED

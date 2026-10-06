@@ -26,6 +26,7 @@ import { isSessionId, sessionIdVariants, findSessionDirs, readSessionFile, readS
 import { applyBranch } from "./branch.js";
 import { restoreNoticeText, planRevertFromEvents, planDeleteFromEvents, nextSeqFrom, buildMarkerEvent, buildRestoreNoticeEvent, buildReplayEvent, deriveTurnStep,
   OpsError, planRevert, planDelete, planRestore, applyRestore, applySurfaceReplace, exportMarkdown,
+  restoreProgress, pendingRestoreTurns,
   isTrustedApiRequest, isJsonContentType,
 } from "./ops-core.js";
 
@@ -266,6 +267,26 @@ async function opsList(targetCtx, sessionId) {
     m.visible = visibleNodes ? visibleNodes.has(m.seq) : !shadowed.has(m.seq);
     if (m.visible) visibleCount++;
   }
+  // 0.8.0 按轮步进：为每个回撤/删除标记附恢复进度与"待恢复轮"。
+  // 一次建 seq→text 索引，避免每标记全量扫文本（性能评审点）。
+  const seqText = new Map();
+  for (const e of events) {
+    if (!e || typeof e.seq !== "number") continue;
+    if (e.type !== "user/message" && e.type !== "assistant/message") continue;
+    const t = messageText(e);
+    if (t && t.trim()) seqText.set(e.seq, t.trim().replace(/\s+/g, " ").slice(0, 80));
+  }
+  for (const m of messages) {
+    if (!m || m.marker !== true) continue;
+    const prog = restoreProgress(events, m.seq);
+    if (!prog) { m.restoreComplete = false; m.pendingTurns = []; continue; }
+    m.restoreComplete = prog.complete;
+    m.pendingTurns = pendingRestoreTurns(events, m.seq).map((t) => ({
+      upTo: t.seqs[t.seqs.length - 1],
+      count: t.seqs.length,
+      preview: seqText.get(t.turnSeq) || ('#' + t.turnSeq),
+    }));
+  }
   return {
     ok: true,
     session: { id: header.id, createdAt: header.createdAt, parentSession: header.parentSession ?? null },
@@ -333,20 +354,29 @@ function opsBranch(targetCtx, sessionId, upToSeq) {
   return { ok: true, ...applyBranch(logPath, upToSeq) };
 }
 
-async function opsRestore(targetCtx, sessionId, restoreSeq) {
+// 0.8.0：upToSeq 可选 —— 给定则按轮步进恢复（只重放到该 seq，后续仍遮蔽）。
+async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq) {
   if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
   if (!Number.isSafeInteger(restoreSeq) || restoreSeq < 0) throw new OpsError("invalid seq", 400);
+  if (upToSeq !== undefined && (!Number.isSafeInteger(upToSeq) || upToSeq < 0)) throw new OpsError("invalid upToSeq", 400);
   if (isRunning(targetCtx, sessionId)) throw new OpsError("session is running; stop it first", 409);
   const { logPath } = pickSessionDir(sessionId);
   const { events } = await readSessionFileAsync(logPath);
-  const plan = planRestore(events, restoreSeq);
+  // 0.8.0（B1 修复）：步进恢复必须排除先前轮次已重放的源 seq，
+  // 否则每轮从区间头重放 → 消息副本成倍出现。
+  const progress = restoreProgress(events, restoreSeq);
+  const plan = planRestore(events, restoreSeq, upToSeq, progress ? progress.restoredSeqs : null);
+  if (plan.replayable.length === 0 && progress && !progress.complete && progress.pendingSeqs.length > 0) {
+    // 请求的 upTo 之前已全部重放过 → 只补一条进度 notice（不重复重放）
+    plan.upToSeq = upToSeq != null ? Math.min(upToSeq, plan.endSeq) : plan.endSeq;
+  }
   const acq = await acquireSession(targetCtx, sessionId);
   if (acq !== null && acq.session !== undefined) {
     try {
       const result = applyRestore(acq.session, plan, {
         flush: () => { flushSessions(targetCtx, acq.session); },
       });
-      return { ok: true, ...result, range: { startSeq: plan.startSeq, endSeq: plan.endSeq } };
+      return { ok: true, ...result, upToSeq: plan.upToSeq, restoredSourceSeqs: plan.replayable.map((i) => i.seq), range: { startSeq: plan.startSeq, endSeq: plan.endSeq } };
     } finally {
       acq.release();
     }
@@ -357,6 +387,7 @@ async function opsRestore(targetCtx, sessionId, restoreSeq) {
   const batch = [buildRestoreNoticeEvent({
     seq: cursor++, time: baseTime, turnStep: plan.turnStep,
     text: restoreNoticeText(plan), restoreSeq: plan.restoreSeq,
+    restoredSourceSeqs: plan.replayable.map((i) => i.seq),
   })];
   let offset = 0;
   for (const item of plan.replayable) {
@@ -366,6 +397,8 @@ async function opsRestore(targetCtx, sessionId, restoreSeq) {
   return {
     ok: true, disk: true,
     restoredCount: plan.replayable.length,
+    upToSeq: plan.upToSeq,
+    restoredSourceSeqs: plan.replayable.map((i) => i.seq),
     skipped: plan.skipped,
     eventSeqs: batch.map((e) => e.seq),
     range: { startSeq: plan.startSeq, endSeq: plan.endSeq },
@@ -494,7 +527,7 @@ function registerToolTolerantly(ctx) {
           revert: (c, id, seq) => opsCommit(c, "revert", id, seq),
           delete: (c, id, seq) => opsCommit(c, "delete", id, seq),
           branch: (c, id, upToSeq) => opsBranch(c, id, upToSeq),
-          restore: (c, id, seq) => opsRestore(c, id, seq),
+          restore: (c, id, seq, upToSeq) => opsRestore(c, id, seq, upToSeq),
           export: (c, id, seq) => opsExport(c, id, seq),
         };
         tools.register(createMessageOpsTool({ defineTool, ops, ctx: targetCtx }));
@@ -613,7 +646,8 @@ export function apply(ctx) {
         if (body === undefined) return;
         if (!body || typeof body !== "object") return sendJson(res, 400, { ok: false, error: "invalid json" });
         try {
-          return sendJson(res, 200, await opsRestore(targetCtx, body.sessionId, body.seq));
+          // 0.8.0：body.upToSeq 存在 → 按轮步进恢复（只到该 seq）
+          return sendJson(res, 200, await opsRestore(targetCtx, body.sessionId, body.seq, body.upToSeq != null ? Number(body.upToSeq) : undefined));
         } catch (err) {
           return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
         }

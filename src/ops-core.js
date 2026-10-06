@@ -124,7 +124,7 @@ export function applySurfaceReplace(session, startSeq, endSeq, sourceEventSeqs, 
  * @param {number} restoreSeq 一次 revert/delete 落定的 system/message 事件的
  *   seq（其 surfaceOp 为 replace、sourceEventSeqs 记录了被遮蔽节点）
  */
-export function planRestore(events, restoreSeq) {
+export function planRestore(events, restoreSeq, upToSeq, excludeSeqs) {
   if (!Array.isArray(events)) throw new OpsError("restore: events must be an array", 500);
   if (!Number.isSafeInteger(restoreSeq) || restoreSeq < 0) throw new OpsError("invalid seq", 400);
   const ev = events.find((e) => e && e.seq === restoreSeq);
@@ -135,11 +135,17 @@ export function planRestore(events, restoreSeq) {
     throw new OpsError(`restore: seq ${restoreSeq} is not a revert/delete marker event (no well-formed replace surfaceOp)`, 409);
   }
   const { startSeq, endSeq } = range;
+  // 0.8.0 按轮步进：upToSeq 给定则只重放到该 seq（含），后续仍保持遮蔽；
+  // excludeSeqs = 已重放过（先前轮次 notice 的 restoredSourceSeqs 并集），
+  // **必须排除，否则每轮都从区间头重放 → 消息副本刷屏**（0.8.0 实测 B1）。
+  const cap = Number.isSafeInteger(upToSeq) ? Math.min(upToSeq, endSeq) : endSeq;
+  const excluded = Array.isArray(excludeSeqs) ? new Set(excludeSeqs.filter((q) => Number.isSafeInteger(q))) : null;
   const replayable = [];
   let skipped = 0;
   for (const e of events) {
-    if (!e || typeof e.seq !== "number" || e.seq < startSeq || e.seq > endSeq) continue;
+    if (!e || typeof e.seq !== "number" || e.seq < startSeq || e.seq > cap) continue;
     if (e.type === "user/message" || e.type === "assistant/message") {
+      if (excluded && excluded.has(e.seq)) continue;
       const text = messageText(e);
       if (!text.trim()) { skipped++; continue; }
       replayable.push({
@@ -156,7 +162,7 @@ export function planRestore(events, restoreSeq) {
   // dock 会为这类标记常驻显示恢复按钮，409 死按钮 = 永远清不掉（实测 8 连 409）。
   // 改为返回空计划：applyRestore 仍追加说明 notice（含 restoresSeq）→ 标记停用、
   // dock 计数递减；语义如实：0 条重放 + 文案说明区间无 user/assistant 内容。
-  return { restoreSeq, startSeq, endSeq, replayable, skipped, turnStep: deriveTurnStep(events) };
+  return { restoreSeq, startSeq, endSeq, upToSeq: Number.isSafeInteger(upToSeq) ? cap : endSeq, replayable, skipped, turnStep: deriveTurnStep(events) };
 }
 
 /**
@@ -169,7 +175,8 @@ export function restoreNoticeText(plan) {
   return plan.replayable.length === 0
     ? `[消息恢复] seq ${plan.startSeq}..${plan.endSeq} 区间无可重放的 user/assistant 消息（` +
       `内容为 tool/system 事件或空文本）——该回撤标记就此停用，区间保持遮蔽`
-    : `[消息恢复] 重放 seq ${plan.startSeq}..${plan.endSeq} 的 ${plan.replayable.length} 条消息` +
+    : `[消息恢复] 重放 seq ${plan.startSeq}..${(plan.upToSeq != null ? plan.upToSeq : plan.endSeq)} 的 ${plan.replayable.length} 条消息` +
+      (plan.upToSeq != null && plan.upToSeq < plan.endSeq ? `（按轮步进：seq ${plan.upToSeq + 1}..${plan.endSeq} 仍遮蔽）` : "") +
       (plan.skipped > 0 ? `（另有 ${plan.skipped} 条不可重放事件已跳过）` : "") +
       `；原区间仍处于遮蔽状态，恢复为重放而非解除遮蔽`;
 }
@@ -183,7 +190,7 @@ export function applyRestore(session, plan, { flush } = {}) {
     ? plan.turnStep : { turn: 1, step: 1 };
   const noticeEvent = session.append(
     "system/message",
-    { turn: ts.turn, step: ts.step, message: { id: randomUUID(), role: "system", content: [{ type: "text", text: notice }] }, restoresSeq: plan.restoreSeq },
+    { turn: ts.turn, step: ts.step, message: { id: randomUUID(), role: "system", content: [{ type: "text", text: notice }] }, restoresSeq: plan.restoreSeq, restoredSourceSeqs: plan.replayable.map((i) => i.seq) },
     { surfaceOp: "append" },
   );
   if (noticeEvent && noticeEvent.seq != null) eventSeqs.push(noticeEvent.seq);
@@ -199,6 +206,76 @@ export function applyRestore(session, plan, { flush } = {}) {
     try { flush(); } catch { /* flush 失败不回滚已接受的事件 */ }
   }
   return { restoredCount: plan.replayable.length, skipped: plan.skipped, eventSeqs };
+}
+
+/**
+ * 0.8.0：计算一次 revert/delete 标记的「恢复进度」。
+ *
+ * @param {Array} events 全量事件（含标记与其后的恢复 notice）
+ * @param {number} markerSeq 标记事件 seq
+ * @returns {{ startSeq:number, endSeq:number, restoredSeqs:number[], pendingSeqs:number[], complete:boolean, legacy:boolean }}
+ *   - restoredSeqs：已被重放过的源 seq（来自各 notice 的 restoredSourceSeqs）
+ *   - pendingSeqs：仍未重放的、可重放的源 seq（贴条按行展示用）
+ *   - complete：是否已全部恢复（标记不再活跃）
+ *   - legacy：旧通知（无 restoredSourceSeqs 字段）→ 视为整段已恢复
+ */
+export function restoreProgress(events, markerSeq) {
+  const list = Array.isArray(events) ? events : [];
+  const marker = list.find((e) => e && e.seq === markerSeq);
+  if (!marker) return null;
+  const range = readReplaceOp(marker);
+  if (!range) return null;
+  const { startSeq, endSeq } = range;
+  // 该区间内可重放的消息型事件
+  const candidates = [];
+  for (const e of list) {
+    if (!e || typeof e.seq !== "number" || e.seq < startSeq || e.seq > endSeq) continue;
+    if (e.type !== "user/message" && e.type !== "assistant/message") continue;
+    if (!(messageText(e) || "").trim()) continue;
+    candidates.push(e.seq);
+  }
+  // 收集针对该标记的所有恢复 notice
+  const notices = list.filter((e) => e && e.data && e.data.restoresSeq === markerSeq);
+  const restored = new Set();
+  let legacy = false;
+  for (const n of notices) {
+    const seqs = n.data && Array.isArray(n.data.restoredSourceSeqs) ? n.data.restoredSourceSeqs : null;
+    if (!seqs) { legacy = true; continue; }
+    for (const q of seqs) if (Number.isSafeInteger(q)) restored.add(q);
+  }
+  const pending = candidates.filter((q) => !restored.has(q));
+  return {
+    startSeq,
+    endSeq,
+    restoredSeqs: Array.from(restored).sort((a, b) => a - b),
+    pendingSeqs: pending,
+    complete: legacy ? true : pending.length === 0,
+    legacy,
+  };
+}
+
+/**
+ * 0.8.0：贴条按行展示用 —— 列出该标记仍未重放的「轮」（一个 user 消息及其后
+ * 到下一个 user 之前的 assistant 回复算一轮，对齐 opencode 按轮步进恢复）。
+ *
+ * @returns {Array<{ turnSeq:number, seqs:number[] }>} 按 seq 升序
+ */
+export function pendingRestoreTurns(events, markerSeq) {
+  const prog = restoreProgress(events, markerSeq);
+  if (!prog || prog.pendingSeqs.length === 0) return [];
+  const list = Array.isArray(events) ? events : [];
+  const bySeq = new Map();
+  for (const e of list) if (e && typeof e.seq === "number") bySeq.set(e.seq, e);
+  const turns = [];
+  let current = null;
+  for (const q of prog.pendingSeqs) {
+    const e = bySeq.get(q);
+    if (!e) continue;
+    if (e.type === "user/message") { current = { turnSeq: q, seqs: [q] }; turns.push(current) }
+    else if (current) current.seqs.push(q);
+    else turns.push({ turnSeq: q, seqs: [q] }); // 孤立 assistant（无前导 user）
+  }
+  return turns;
 }
 
 /**
