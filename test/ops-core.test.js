@@ -6,7 +6,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-const { OpsError, planRestore, applyRestore, exportMarkdown, messageText } =
+const { OpsError, planRestore, applyRestore, messageText } =
   await import('../src/ops-core.js')
 const { createMessageOpsTool, apply } = await import('../src/index.js')
 
@@ -38,32 +38,8 @@ const header = { type: 'session', version: 3, id: 'session-aaaaaaaa-bbbb-cccc-dd
 
 // --- exportMarkdown ----------------------------------------------------------
 
-test('exportMarkdown：消息按角色小节展开，工具调用折叠为单行', () => {
-  const md = exportMarkdown(header, sampleEvents())
-  assert.match(md, /^# DSH 会话导出：session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/m)
-  assert.match(md, /## \[seq 0\] user\n\n第一问/)
-  assert.match(md, /## \[seq 1\] assistant\n\n第一答/)
-  // 工具调用是单行引用，且含参数提示
-  const toolLines = md.split('\n').filter((l) => l.startsWith('> [seq 2]'))
-  assert.equal(toolLines.length, 1)
-  assert.match(toolLines[0], /🔧 工具调用：bash/)
-  assert.match(toolLines[0], /command/)
-  // revert 标记本身是 system 消息，也展开
-  assert.match(md, /## \[seq 5\] system/)
-})
 
-test('exportMarkdown：seq 上界只导出 ≤ 上界的事件', () => {
-  const md = exportMarkdown(header, sampleEvents(), 1)
-  assert.match(md, /seq ≤ 1/)
-  assert.match(md, /第一问/)
-  assert.doesNotMatch(md, /第二问/)
-  assert.doesNotMatch(md, /工具调用：bash/)
-})
 
-test('exportMarkdown：非法 seq 抛 OpsError(400)', () => {
-  assert.throws(() => exportMarkdown(header, sampleEvents(), -1), (e) => e instanceof OpsError && e.status === 400)
-  assert.throws(() => exportMarkdown(header, sampleEvents(), 1.5), OpsError)
-})
 
 // --- planRestore / applyRestore ----------------------------------------------
 
@@ -124,9 +100,15 @@ test('applyRestore：重放 append 干净文本（0.6.0 无前缀）+ system 说
   assert.equal(appended[0].type, 'system/message')
   assert.match(appended[0].data.message.content[0].text, /\[消息恢复\] 重放 seq 3\.\.4 的 2 条消息/)
   assert.equal(appended[1].type, 'user/message')
-  assert.equal(appended[1].data.message.content[0].text, '第二问', '0.6.0 对齐 opencode：无前缀')
-  assert.equal(appended[2].data.message.content[0].text, '第二答')
+  // v4 契约：user/message 的消息本体字段直接摊在 data 上（0.8.1 P0 修正）
+  assert.equal(appended[1].data.content[0].text, '第二问', '0.6.0 对齐 opencode：无前缀')
+  assert.equal(appended[1].data.role, 'user')
+  assert.equal(appended[2].data.message.content[0].text, '第二答', 'assistant/message 才包 data.message')
   for (const a of appended) assert.equal(a.opts.surfaceOp, 'append')
+  for (const a of appended) {
+    const m = a.type === 'user/message' ? a.data : a.data.message
+    assert.ok(m.source && m.source.kind, 'v4 准入：每条消息带 producer-owned source')
+  }
 })
 
 test('messageText：数组 content 提取首个非空 text；data.content 兼容', () => {
@@ -151,7 +133,7 @@ test('createMessageOpsTool：defineTool 桩拿到 name/parameters/execute，exec
   const tool = createMessageOpsTool({ defineTool: stubDefineTool, ops, ctx: {} })
   assert.equal(tool.name, 'message_ops')
   assert.ok(tool.__compiled)
-  assert.equal(tool.parameters.action.enum.length, 6)
+  assert.equal(tool.parameters.action.enum.length, 4, '0.9.0：移除 branch/export（用官方能力）')
   assert.ok(tool.parameters.sessionId.required)
   const out = await tool.execute({ action: 'list', sessionId: 'session-x' })
   assert.match(out, /session session-x/)
@@ -192,19 +174,17 @@ test('apply：无 webServer、无 tools 时走 inject 等待，不抛错', () =>
   assert.equal(ctx.registrations.length, 0)
 })
 
-test('apply：webServer 存在时注册全部 7 条路由；tools 缺失走 inject 等待', () => {
+test('apply：webServer 存在时注册全部 5 条路由；tools 缺失走 inject 等待', () => {
   const ctx = mockCtx({ webServer: { register: (route) => ctx.registrations.push(route) } })
   assert.doesNotThrow(() => apply(ctx))
   const paths = ctx.registrations.map((r) => r.path).sort()
   assert.deepEqual(paths, [
-    '/api/message-ops/branch',
     '/api/message-ops/delete',
-    '/api/message-ops/export',
     '/api/message-ops/messages',
     '/api/message-ops/restore',
     '/api/message-ops/revert',
     '/api/message-ops/text',
-  ])
+  ], '0.9.0：branch/export 路由已移除（改用官方 session/fork 与 /api/session.export）')
   // tools 缺失 → 容错等待而非 fatal
   assert.ok(ctx.injects.some(([deps]) => deps[0] === 'tools'))
 })
@@ -220,7 +200,7 @@ test('apply：tools 服务存在时直接进入注册路径（包缺失时 catch
 
 // ── 0.5.2 回归：工具层必须 await async ops（0.2.1 改 async 后曾漏同步化，
 //    list/restore 抛 TypeError、export 渲出空 text；旧桩是同步的故漏检）──────
-test('工具 execute：async ops 被 await（list/branch/restore/export 全路径）', async () => {
+test('工具 execute：async ops 被 await（list/revert/delete/restore 全路径）', async () => {
   let def
   const defineTool = (d) => { def = d; return d }
   const asyncOps = {
@@ -228,23 +208,23 @@ test('工具 execute：async ops 被 await（list/branch/restore/export 全路�
       messages: [{ seq: 10, role: 'user', visible: true, snippet: 'hello' }] }),
     revert: async () => ({ mode: 'revert', shadowedCount: 2, seq: 10, eventSeq: 99 }),
     delete: async () => ({ mode: 'delete', shadowedCount: 1, seq: 10, eventSeq: 98 }),
-    branch: async () => ({ newId: 'session-child', keptEvents: 42, parentSession: undefined }),
     restore: async () => ({ restoredCount: 1, skipped: 0, range: { startSeq: 5, endSeq: 6 }, eventSeqs: [7, 8] }),
-    export: async () => ({ markdown: '# md' }),
   }
   createMessageOpsTool({ defineTool, ops: asyncOps, ctx: {} })
   assert.ok(def, 'tool defined')
   const outList = await def.execute({ action: 'list', sessionId: 'session-abc' })
   assert.match(String(outList), /session session-abc/)
   assert.doesNotMatch(String(outList), /failed:/)
-  const outBranch = await def.execute({ action: 'branch', sessionId: 'session-abc', upToSeq: 10 })
-  // 0.5.2 P2：branch 渲染读 keptEvents + parentSession（注入自入参），不再读不存在的 kept/parentId
-  assert.match(String(outBranch), /kept 42 event/)
-  assert.match(String(outBranch), /parent session-abc/)
+  const outRevert = await def.execute({ action: 'revert', sessionId: 'session-abc', seq: 10 })
+  assert.match(String(outRevert), /revert ok: shadowed 2 node\(s\) from seq 10/)
+  const outDelete = await def.execute({ action: 'delete', sessionId: 'session-abc', seq: 10 })
+  assert.match(String(outDelete), /delete ok: shadowed 1 node\(s\) from seq 10/)
   const outRestore = await def.execute({ action: 'restore', sessionId: 'session-abc', seq: 6 })
   assert.match(String(outRestore), /replayed 1 message/)
-  const outExport = await def.execute({ action: 'export', sessionId: 'session-abc' })
-  assert.equal(String(outExport), '# md')
+  // 0.9.0：branch / export 不再是本工具的动作（改用官方 session/fork 与 /api/session.export）
+  for (const gone of ['branch', 'export']) {
+    assert.equal(def.parameters.action.enum.includes(gone), false, gone + ' 不应出现在 enum')
+  }
   // 同步抛出的 ops 仍走错误文案路径
   const errTool = await (async () => {
     let d2
@@ -354,8 +334,25 @@ test('磁盘计划/构建器：可见节点剔除遮蔽、marker 字段逐项镜
   const nt = core.buildRestoreNoticeEvent({ seq: 16, time: 2, turnStep: { turn: 9, step: 6 }, text: 'n', restoreSeq: 13 });
   assert.equal(nt.surfaceOp, 'append');
   assert.equal(nt.data.restoresSeq, 13);
-  const rp = core.buildReplayEvent({ seq: 17, time: 3, item: { type: 'user/message', role: 'user', text: 'hi' } });
-  assert.equal(rp.surfaceOp, 'append');
-  assert.deepEqual(rp.data.message, { role: 'user', content: [{ type: 'text', text: 'hi' }] }); // 0.6.0 无前缀
-  assert.ok(!('id' in rp.data.message), '重放镜像引擎：不带 id');
+  const rp = core.buildReplayEvent({ seq: 17, time: 3, turnStep: { turn: 3, step: 7 }, item: { type: 'user/message', role: 'user', text: 'hi' } })
+  assert.equal(rp.surfaceOp, 'append')
+  // 0.8.1 P0 修正：user/message 本体摊在 data 上（不是 data.message）
+  assert.equal(rp.data.role, 'user')
+  assert.deepEqual(rp.data.content, [{ type: 'text', text: 'hi' }]) // 0.6.0 无前缀
+  assert.ok(!('message' in rp.data), 'user/message 不双重包裹')
+  // 契约断言：v3 要求 system 类消息 kind==='plugin'，v4 只拒**字面量** 'plugin'，
+  // 故只能是 {kind:'plugin', plugin:<name>}（迁移后成 plugin:<name>，v4 接受）
+  assert.equal(rp.data.source.kind, 'plugin:@240xu/dsh-message-ops', 'v4 直接写必须用 producerKind 形态')
+  // assistant 必须带**打开的**坐标，且不是写死的 1/1
+  const rp2 = core.buildReplayEvent({ seq: 18, time: 4, turnStep: { turn: 3, step: 7 }, item: { type: 'assistant/message', role: 'assistant', text: 'yo' } })
+  assert.equal(rp2.data.turn, 3, 'replayed assistant must use the open turn')
+  assert.equal(rp2.data.step, 7, 'replayed assistant must use the open step')
+  assert.equal(rp2.data.message.role, 'assistant')
+  assert.equal(rp2.data.message.source.kind, 'plugin:@240xu/dsh-message-ops')
+  // v3 目标日志：必须用 {kind:'plugin', plugin:<name>}（v3 要求字面量 plugin）
+  const rp3 = core.buildReplayEvent({ seq: 20, time: 6, version: 3, turnStep: { turn: 1, step: 1 }, item: { type: 'user/message', role: 'user', text: 'v3' } })
+  assert.equal(rp3.data.source.kind, 'plugin', 'v3 日志要求字面量 plugin')
+  assert.equal(rp3.data.source.plugin, '@240xu/dsh-message-ops')
+  // 缺 turnStep 必须抛错，绝不静默落 1/1
+  assert.throws(() => core.buildReplayEvent({ seq: 19, time: 5, item: { type: 'assistant/message', role: 'assistant', text: 'z' } }), (e) => e.status === 500)
 });

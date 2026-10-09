@@ -12,7 +12,6 @@ process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-msgops-'))
 
 const { scanZstdFrames, readSessionFile, encodeSessionFile, findSessionDirs, listMessages, computeShadowed } =
   await import('../src/session-file.js')
-const { planBranch, applyBranch } = await import('../src/branch.js')
 
 const MAGIC = 0xfd2fb528
 
@@ -74,30 +73,7 @@ test('computeShadowed 识别 surface replace 遮蔽区间', () => {
   assert.ok(!shadowed.has(0))
 })
 
-test('planBranch 生成新 id + parentSession，事件截断正确', () => {
-  const h = header('session-00000000-0000-0000-0000-000000000004')
-  const events = [msg('user/message', 0, 'a'), msg('assistant/message', 1, 'b'), msg('user/message', 2, 'c')]
-  const { header: nh, events: kept } = planBranch(h, events, 1)
-  assert.notEqual(nh.id, h.id)
-  assert.equal(nh.parentSession, h.id)
-  assert.match(nh.id, /^session-[0-9a-f-]{36}$/)
-  assert.equal(kept.length, 2)
-  assert.throws(() => planBranch(h, events, -1))
-})
 
-test('applyBranch 落盘：新目录 + 新日志 + 原文件字节不变', () => {
-  const id = 'session-00000000-0000-0000-0000-000000000005'
-  const events = [msg('user/message', 0, 'a'), msg('assistant/message', 1, 'b'), msg('user/message', 2, 'c')]
-  const origLog = writeLog(path.join(process.env.DSH_HOME, 'sessions', 'proj-b', id), header(id), events)
-  const before = fs.readFileSync(origLog)
-  const result = applyBranch(origLog, 1)
-  assert.match(result.newId, /^session-[0-9a-f-]{36}$/)
-  assert.ok(fs.existsSync(result.logPath))
-  const { header: nh, events: kept } = readSessionFile(result.logPath)
-  assert.equal(nh.parentSession, id)
-  assert.equal(kept.length, 2)
-  assert.deepEqual(fs.readFileSync(origLog), before)
-})
 
 test('findSessionDirs 两种 id 拼写均可定位', () => {
   const uuid = '11111111-2222-3333-4444-555555555555'

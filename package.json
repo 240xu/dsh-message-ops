@@ -1,7 +1,7 @@
 {
   "name": "@240xu/dsh-message-ops",
-  "version": "0.8.1",
-  "description": "Roll back, branch, and export any DSH conversation — from the UI or straight from the agent via a message_ops tool. Non-destructive: logs stay append-only and recoverable. 消息回滚/删除/分支/导出四合一，内置 message_ops agent 工具；非破坏语义，日志只追加可恢复。",
+  "version": "0.9.0",
+  "description": "DSH web 插件：消息级回滚 / 删除 / 恢复（补 dsh 官方没有的部分）。分支与导出用官方内置能力。",
   "type": "module",
   "license": "MIT",
   "author": "240xu",

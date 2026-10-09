@@ -5,16 +5,18 @@
  * 五操作一条龙（同名插件，一个注入点）：
  *   POST /api/message-ops/revert   回滚：surface replace 遮蔽 targetSeq..末尾
  *   POST /api/message-ops/delete   删除：surface replace 遮蔽单条 seq
- *   POST /api/message-ops/branch   分支：磁盘级 fork（新会话，parentSession 关联）
  *   GET  /api/message-ops/messages 消息列表（磁盘真相 + 可见性标注）
- *   GET  /api/message-ops/export   导出 Markdown（seq 可选上界，附件下载）
  *   POST /api/message-ops/restore  回滚恢复：重放被遮蔽的 user/assistant 消息
  *
  * 回滚/删除走 DSH 原生 surface replace（append-only，日志完整可恢复；
  * 约束由引擎 assertProvenance 校验，违规如实上报 409）。
  * 运行中的会话一律拒绝（409），由用户先停止再操作。
  *
- * Agent 工具：action revert/delete/branch/list/restore 共用 HTTP 同一套
+ * Agent 工具：action revert/delete/list/restore 共用 HTTP 同一套
+ *
+ * 分支与导出不属本插件：dsh 官方已有 session/fork（任意 atSeq，且会补 fork closers）
+ * 与 /api/session.export（ZIP 归档）。0.9.0 移除了本插件的磁盘分支与 Markdown 导出 ——
+ * 前者语义有偏差（缺 isSeeded / inheritedEventCount / closers），后者零 UI 入口。
  * 核心逻辑（src/ops-core.js）。工具注册是容错的——ctx 里没有 tools 服务、
  * 或 @deepseek-ai/dsh-tools 包不可解析时，只跳过工具注册，不影响 HTTP。
  * @module dsh-message-ops
@@ -23,9 +25,8 @@
 import { zstdCompressSync } from "node:zlib";
 import { open as openFile, truncate as truncateFile, stat as statFile } from "node:fs/promises";
 import { isSessionId, sessionIdVariants, findSessionDirs, readSessionFile, readSessionFileAsync, listMessages, computeShadowed, messageText } from "./session-file.js";
-import { applyBranch } from "./branch.js";
-import { restoreNoticeText, planRevertFromEvents, planDeleteFromEvents, nextSeqFrom, buildMarkerEvent, buildRestoreNoticeEvent, buildReplayEvent, deriveTurnStep,
-  OpsError, planRevert, planDelete, planRestore, applyRestore, applySurfaceReplace, exportMarkdown,
+import { restoreNoticeText, planRevertFromEvents, planDeleteFromEvents, nextSeqFrom, buildMarkerEvent, buildRestoreNoticeEvent, buildReplayEvent, planNoticeWindow, noticeWindowPreamble, noticeWindowPostamble,
+  OpsError, planRevert, planDelete, planRestore, applyRestore, applySurfaceReplace,
   restoreProgress, pendingRestoreTurns,
   isTrustedApiRequest, isJsonContentType,
 } from "./ops-core.js";
@@ -303,8 +304,13 @@ async function opsCommit(targetCtx, mode, sessionId, seq) {
   if (!Number.isSafeInteger(seq) || seq < 0) throw new OpsError("invalid seq", 400);
   if (isRunning(targetCtx, sessionId)) throw new OpsError("session is running; stop it first", 409);
   const { logPath } = pickSessionDir(sessionId);
-  const { events } = await readSessionFileAsync(logPath);
-  const turnStep = deriveTurnStep(events);
+  const { header, events } = await readSessionFileAsync(logPath);
+  // 0.8.2：空闲会话（实测 340/364）没有打开的 turn/step → 用自足的**合成 turn**
+  // 承载 notice，而不是拒绝。引擎 append-only 插不进已有 step，但合成一整个 turn 合法
+  //��已对官方校验闸实测：append 型 / 单节点 replace / 多节点 replace 全 PASS，遮蔽受保护头正确拒绝）。
+  // 带 reason:"message-ops"，UI 与审计可识别，不与真实模型轮次混淆。
+  const win = planNoticeWindow(events);
+  const turnStep = { turn: win.turn, step: win.step };
   const notice = mode === "delete"
     ? `[消息删除] 已遮蔽 seq ${seq}`
     : null; // revert 文案含 shadowed 数量，规划后拼
@@ -317,10 +323,16 @@ async function opsCommit(targetCtx, mode, sessionId, seq) {
       const plan = mode === "delete" ? planDelete(session.surface, seq) : planRevert(session.surface, seq);
       const text = mode === "delete" ? notice
         : `[消息回滚] 已回滚到 seq ${seq}（含）之后的 ${plan.shadowedSeqs.length} 个节点`;
+      // 0.8.2：会话 store 命中时走引擎路径 —— 同样要先开合成 turn 窗口，
+      // 否则 notice 落在已关闭的 turn/step 里，加载端拒绝整份历史。
+      for (const pre of noticeWindowPreamble(win)) session.append(pre.kind, pre.data);
       const event = applySurfaceReplace(session, plan.startSeq, plan.endSeq, plan.shadowedSeqs, text, turnStep);
+      // 必须闭合：否则引擎内存里 turn 16 永远开着 → isRunning 恒真 → 后续操作全被 409
+      for (const post of noticeWindowPostamble(win)) session.append(post.kind, post.data);
       flushSessions(targetCtx, session);
       return {
         ok: true, mode, seq,
+        syntheticTurn: win.synthetic === true,
         shadowedCount: plan.shadowedSeqs.length,
         eventSeq: event && event.seq != null ? event.seq : null,
       };
@@ -332,26 +344,25 @@ async function opsCommit(targetCtx, mode, sessionId, seq) {
   const plan = mode === "delete" ? planDeleteFromEvents(events, seq) : planRevertFromEvents(events, seq);
   const text = mode === "delete" ? notice
     : `[消息回滚] 已回滚到 seq ${seq}（含）之后的 ${plan.shadowedSeqs.length} 个节点`;
+  // 0.8.2：磁盘路径同样把 marker 包进合成 turn（裸 zstd 写、零校验，写错就是整份日志报废）
+  const baseTime = Date.now();
+  let cursor = nextSeqFrom(events);
+  const batch = noticeWindowPreamble(win).map((e, i) => ({
+    type: e.kind, seq: cursor++, time: baseTime + i, data: e.data,
+  }));
   const marker = buildMarkerEvent({
-    seq: nextSeqFrom(events), time: Date.now(), turnStep, text,
+    seq: cursor++, time: baseTime + batch.length, turnStep, text, version: header?.version ?? 4,
     startSeq: plan.startSeq, endSeq: plan.endSeq, shadowedSeqs: plan.shadowedSeqs,
   });
-  await diskAppend(logPath, [marker]);
+  batch.push(marker);
+  let tail = marker.time + 1;
+  for (const e of noticeWindowPostamble(win)) batch.push({ type: e.kind, seq: cursor++, time: tail++, data: e.data });
+  await diskAppend(logPath, batch);
   return {
-    ok: true, mode, seq, disk: true,
+    ok: true, mode, seq, disk: true, syntheticTurn: win.synthetic === true,
     shadowedCount: plan.shadowedSeqs.length,
     eventSeq: marker.seq,
   };
-}
-
-function opsBranch(targetCtx, sessionId, upToSeq) {
-  if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
-  if (!Number.isSafeInteger(upToSeq) || upToSeq < 0) throw new OpsError("invalid upToSeq", 400);
-  if (isRunning(targetCtx, sessionId)) {
-    throw new OpsError("session is running; stop it first (the log may be mid-append)", 409);
-  }
-  const { logPath } = pickSessionDir(sessionId);
-  return { ok: true, ...applyBranch(logPath, upToSeq) };
 }
 
 // 0.8.0：upToSeq 可选 —— 给定则按轮步进恢复（只重放到该 seq，后续仍遮蔽）。
@@ -365,8 +376,15 @@ async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq, discard) {
   const { events } = await readSessionFileAsync(logPath);
   // 0.8.0（B1 修复）：步进恢复必须排除先前轮次已重放的源 seq，
   // 否则每轮从区间头重放 → 消息副本成倍出现。
+  // 0.8.2：空闲会话（实测 340/364）没有打开的 turn/step → 用自足的**合成 turn**
+  // 承载 notice，而不是拒绝。引擎 append-only 插不进已有 step，但合成一整个 turn 合法
+  //��已对官方校验闸实测：append 型 / 单节点 replace / 多节点 replace 全 PASS，遮蔽受保护头正确拒绝）。
+  // 带 reason:"message-ops"，UI 与审计可识别，不与真实模型轮次混淆。
+  const win = planNoticeWindow(events);
   const progress = restoreProgress(events, restoreSeq);
   const plan = planRestore(events, restoreSeq, upToSeq, progress ? progress.restoredSeqs : null);
+  plan.turnStep = { turn: win.turn, step: win.step };
+  plan.window = win;
   if (discard) plan.discard = true;
   if (plan.replayable.length === 0 && progress && !progress.complete && progress.pendingSeqs.length > 0) {
     // 请求的 upTo 之前已全部重放过 → 只补一条进度 notice（不重复重放）
@@ -375,9 +393,11 @@ async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq, discard) {
   const acq = await acquireSession(targetCtx, sessionId);
   if (acq !== null && acq.session !== undefined) {
     try {
+      for (const pre of noticeWindowPreamble(win)) acq.session.append(pre.kind, pre.data);
       const result = applyRestore(acq.session, plan, {
         flush: () => { flushSessions(targetCtx, acq.session); },
       });
+      for (const post of noticeWindowPostamble(winR)) acq.session.append(post.kind, post.data);
       return { ok: true, ...result, discarded: plan.discard === true, upToSeq: plan.upToSeq, restoredSourceSeqs: plan.replayable.map((i) => i.seq), range: { startSeq: plan.startSeq, endSeq: plan.endSeq } };
     } finally {
       acq.release();
@@ -386,21 +406,28 @@ async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq, discard) {
   // store-miss → 磁盘路径：说明事件 + 重放事件批量追加（一个帧）
   let cursor = nextSeqFrom(events);
   const baseTime = Date.now();
-  const batch = [buildRestoreNoticeEvent({
-    seq: cursor++, time: baseTime, turnStep: plan.turnStep,
+  const version = (await readSessionFileAsync(logPath)).header?.version ?? 4;
+  const batch = noticeWindowPreamble(win).map((e, i) => ({
+    type: e.kind, seq: cursor++, time: baseTime + i, data: e.data,
+  }));
+  const noticeBase = baseTime + batch.length;
+  batch.push(buildRestoreNoticeEvent({
+    seq: cursor++, time: noticeBase, turnStep: plan.turnStep, version,
     text: plan.discard
       ? `[消息操作] 回撤标记 seq ${plan.restoreSeq} 已停用（丢弃）：区间内容保持遮蔽、未重放；日志原文仍在，可搜索`
       : restoreNoticeText(plan),
     restoreSeq: plan.restoreSeq,
     discard: plan.discard === true,
-  })];
+  }));
   let offset = 0;
   for (const item of plan.discard ? [] : plan.replayable) {
-    batch.push(buildReplayEvent({ seq: cursor++, time: baseTime + (++offset), item }));
+    batch.push(buildReplayEvent({ seq: cursor++, time: noticeBase + (++offset), item, turnStep: plan.turnStep, version }));
   }
+  let tail = noticeBase + offset + 1;
+  for (const e of noticeWindowPostamble(win)) batch.push({ type: e.kind, seq: cursor++, time: tail++, data: e.data });
   await diskAppend(logPath, batch);
   return {
-    ok: true, disk: true,
+    ok: true, disk: true, syntheticTurn: win.synthetic === true,
     restoredCount: plan.replayable.length,
     upToSeq: plan.upToSeq,
     restoredSourceSeqs: plan.replayable.map((i) => i.seq),
@@ -410,18 +437,6 @@ async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq, discard) {
   };
 }
 
-async function opsExport(targetCtx, sessionId, seq) {
-  if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
-  if (seq !== undefined && (!Number.isSafeInteger(seq) || seq < 0)) throw new OpsError("invalid seq", 400);
-  const { logPath } = pickSessionDir(sessionId);
-  const { header, events, frameCount, partial } = await readSessionFileAsync(logPath);
-  let markdown = exportMarkdown(header, events, seq);
-  // 超阈值提示（partial 语义）：内容完整，仅告知本次解压耗时可能较长。
-  if (partial) {
-    markdown += `\n> 注：本日志共 ${frameCount} 个事件帧（超过 ${500} 帧阈值），本次导出已完整读取，但大日志解压耗时较长。\n`;
-  }
-  return { header, markdown, upToSeq: seq, frameCount, partial };
-}
 
 // ---------------------------------------------------------------------------
 // Agent 工具 message_ops（容错注册）
@@ -436,12 +451,12 @@ export function createMessageOpsTool({ defineTool, ops, ctx }) {
   return defineTool({
     name: "message_ops",
     description:
-      "Manage DSH conversation messages: list messages with visibility, revert to a seq (surface replace shadows the tail), delete a single message, fork a branch from any seq, restore (replay) messages shadowed by a previous revert, or export the conversation as Markdown. Sessions must not be running for mutating actions.",
+      "Manage DSH conversation messages: list messages with visibility, revert to a seq (surface replace shadows the tail), delete a single message, restore (replay) messages shadowed by a previous revert. These are the message-level operations dsh does NOT provide natively (use the built-in session/fork for branching and /export for archives). Sessions must not be running for mutating actions.",
     parameters: {
       action: {
         type: "string",
         required: true,
-        enum: ["list", "revert", "delete", "branch", "restore", "export"],
+        enum: ["list", "revert", "delete", "restore"],
         description: "Which operation to perform.",
       },
       sessionId: {
@@ -451,11 +466,10 @@ export function createMessageOpsTool({ defineTool, ops, ctx }) {
       },
       seq: {
         type: "integer",
-        description: "revert/delete: the target seq. restore: the seq of the revert/delete marker event. export: optional upper bound (inclusive). Ignored by list/branch.",
+        description: "revert/delete: the target seq. restore: the seq of the revert/delete marker event. Ignored by list.",
       },
       upToSeq: {
         type: "integer",
-        description: "branch: fork keeps events up to this seq (inclusive).",
       },
     },
     output: {
@@ -468,18 +482,13 @@ export function createMessageOpsTool({ defineTool, ops, ctx }) {
       try {
         let result;
         // 0.5.2（P1）：ops 自 0.2.1 起为 async——不 await 会把 Promise 直接送进 renderResult，
-        // list/restore 必抛 TypeError、export 渲出空 text（测试桩曾是同步的故漏检）。
+        // list/restore 必抛 TypeError（测试桩曾是同步的故漏检）。
         switch (action) {
           case "list": result = await ops.list(ctx, sessionId); break;
           case "revert": result = await ops.revert(ctx, sessionId, args.seq); break;
           case "delete": result = await ops.delete(ctx, sessionId, args.seq); break;
-          case "branch": result = await ops.branch(ctx, sessionId, args.upToSeq); break;
           case "restore": result = await ops.restore(ctx, sessionId, args.seq); break;
-          case "export": result = await ops.export(ctx, sessionId, args.seq); break;
           default: throw new OpsError(`unknown action: ${action}`, 400);
-        }
-        if (action === "branch" && result && typeof result === "object" && result.parentSession == null) {
-          result.parentSession = sessionId; // renderResult 需要原始会话 id（branch 返回值不含/可为 undefined）
         }
         return renderResult(action, result);
       } catch (e) {
@@ -494,7 +503,7 @@ function renderResult(action, r) {
   switch (action) {
     case "list": {
       const lines = [
-        `session ${r.session.id}${r.session.parentSession ? ` (branch of ${r.session.parentSession})` : ""}`,
+        `session ${r.session.id}`,
         `running: ${r.running}; total: ${r.total}; visible: ${r.visibleCount}`,
       ];
       for (const m of r.messages) {
@@ -505,12 +514,8 @@ function renderResult(action, r) {
     case "revert":
     case "delete":
       return `${r.mode} ok: shadowed ${r.shadowedCount} node(s) from seq ${r.seq}; marker event seq ${r.eventSeq}`;
-    case "branch":
-      return `branch ok: new session ${r.newId} (parent ${r.parentSession ?? "n/a"}), kept ${r.keptEvents ?? "?"} event(s)`;
     case "restore":
       return `restore ok: replayed ${r.restoredCount} message(s) from range ${r.range.startSeq}..${r.range.endSeq} (${r.skipped} skipped); appended event seqs ${r.eventSeqs.join(", ")}`;
-    case "export":
-      return r.markdown;
     default:
       return JSON.stringify(r);
   }
@@ -531,13 +536,15 @@ function registerToolTolerantly(ctx) {
           list: (c, id) => opsList(c, id),
           revert: (c, id, seq) => opsCommit(c, "revert", id, seq),
           delete: (c, id, seq) => opsCommit(c, "delete", id, seq),
-          branch: (c, id, upToSeq) => opsBranch(c, id, upToSeq),
           restore: (c, id, seq, upToSeq) => opsRestore(c, id, seq, upToSeq),
-          export: (c, id, seq) => opsExport(c, id, seq),
         };
         tools.register(createMessageOpsTool({ defineTool, ops, ctx: targetCtx }));
       })
-      .catch(() => { /* dsh-tools 不可解析：跳过工具注册，不影响其余功能 */ });
+      // 0.9.0：不再静默吞错。原先 catch(() => {}) 让「工具注册成功与否」完全无从诊断
+      // （实测日志里 defineTool / ERR_MODULE_NOT_FOUND 零命中）。
+      .catch((e) => {
+        console.warn('[message-ops] defineTool 注册失败，工具不可用（其余功能不受影响）:', e && (e.code || e.message) ? (e.code || e.message) : e)
+      });
     return true;
   }
   if (tryRegister(ctx)) return;
@@ -622,23 +629,6 @@ export function apply(ctx) {
       kind: "exact", path: "/api/message-ops/delete", handler: commitHandler("delete"),
     }), "dsh-message-ops: delete route");
 
-    // --- POST branch：磁盘级 fork（唯一非破坏操作） ---------------------------
-    targetCtx.effect(() => host.register({
-      kind: "exact",
-      path: "/api/message-ops/branch",
-      handler: async (req, res) => {
-        if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method not allowed" });
-        if (!writeFence(req, res)) return;
-        const body = await readFencedBody(req, res);
-        if (body === undefined) return;
-        if (!body || typeof body !== "object") return sendJson(res, 400, { ok: false, error: "invalid json" });
-        try {
-          return sendJson(res, 200, opsBranch(targetCtx, body.sessionId, body.upToSeq));
-        } catch (err) {
-          return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
-        }
-      },
-    }), "dsh-message-ops: branch route");
 
     // --- POST restore：回滚恢复（重放语义，见 ops-core.js 注释） --------------
     targetCtx.effect(() => host.register({
@@ -659,29 +649,6 @@ export function apply(ctx) {
       },
     }), "dsh-message-ops: restore route");
 
-    // --- GET export：Markdown 附件下载 ----------------------------------------
-    targetCtx.effect(() => host.register({
-      kind: "exact",
-      path: "/api/message-ops/export",
-      handler: async (req, res) => {
-        if (!fence(req, res)) return;
-        try {
-          const url = new URL(req.url, "http://localhost");
-          const sessionId = url.searchParams.get("sessionId") || "";
-          const rawSeq = url.searchParams.get("seq");
-          const seq = rawSeq === null || rawSeq === "" ? undefined : Number(rawSeq);
-          const { header, markdown, upToSeq } = await opsExport(targetCtx, sessionId, seq);
-          const suffix = upToSeq === undefined ? "full" : `seq-${upToSeq}`;
-          res.writeHead(200, {
-            "content-type": "text/markdown; charset=utf-8",
-            "content-disposition": `attachment; filename="${header.id}-${suffix}.md"`,
-          });
-          res.end(markdown);
-        } catch (err) {
-          return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
-        }
-      },
-    }), "dsh-message-ops: export route");
   }
 
   const ws = ctx.get("webServer");

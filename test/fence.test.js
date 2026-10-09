@@ -110,33 +110,6 @@ test('路由级：写操作 text/plain 绕预检 → 415；超大 body → 413',
   assert.equal(res2.status, 413)
 })
 
-test('路由级：回环同源 GET export → 200 附件；非法 body JSON → 400', async () => {
-  const id = 'session-99999999-8888-7777-6666-555555555555'
-  const dir = path.join(process.env.DSH_HOME, 'sessions', 'proj-fence', id)
-  fs.mkdirSync(dir, { recursive: true })
-  const events = [
-    { type: 'user/message', seq: 0, surfaceOp: 'append', data: { message: { role: 'user', content: [{ type: 'text', text: '围栏测试' }] } } },
-  ]
-  fs.writeFileSync(path.join(dir, 'session.v3.jsonl.zstd'), encodeSessionFile({ type: 'session', version: 3, id, createdAt: 1 }, events))
-
-  const routes = makeCtx()
-  const res1 = mockRes()
-  await routes.get('/api/message-ops/export')(mockReq({
-    url: `/api/message-ops/export?sessionId=${id}`,
-    headers: { host: 'localhost:3080', origin: 'http://localhost:3080' },
-  }), res1)
-  assert.equal(res1.status, 200)
-  assert.match(res1.headers['content-type'], /text\/markdown/)
-  assert.match(res1.headers['content-disposition'], /attachment/)
-  assert.match(res1.body, /围栏测试/)
-
-  const res2 = mockRes()
-  await routes.get('/api/message-ops/revert')(mockReq({
-    method: 'POST', url: '/api/message-ops/revert',
-    headers: { host: '127.0.0.1', 'content-type': 'application/json' }, body: '{broken',
-  }), res2)
-  assert.equal(res2.status, 400)
-})
 
 // --- 写端 replace 拼写运行时探测（P1 前向雷） -----------------------------------
 

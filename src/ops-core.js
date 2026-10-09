@@ -20,7 +20,7 @@ import { randomUUID } from "node:crypto";
 import { readReplaceOp, messageText, computeShadowed } from "./session-file.js";
 
 // messageText 的单点实现在 session-file.js（listMessages 同用）；此处转出保持
-// 既有导入面兼容（ops-core 的 messageText/exportMarkdown 调用方不受影响）。
+// 既有导入面兼容（ops-core 的 messageText 调用方不受影响）。
 export { messageText };
 
 /** 带语义状态码的操作错误（HTTP 直接映射，工具端转为失败文本）。 */
@@ -72,6 +72,91 @@ function replaceOpFor(shape, startSeq, endSeq) {
 export function _resetReplaceShape() { replaceShape = null; }
 
 /**
+ * v4 消息归属（producer-owned source）构造。
+ *
+ * 0.8.1 P0 实机事故：dsh 0.2.0 收紧 v4 准入后，本插件写的每条消息都缺
+ * `message.source` → `format v4 message requires a producer-owned source kind`
+ * → **整份日志被拒绝，20 个会话在 UI 打不开**（v4 要求 kind 非空且非
+ * "plugin"；v3 反过来要求 system/message 的 kind==="plugin"，两边都不
+ * 接受缺失）。
+ *
+ * 形状必须**同时满足 v3 与迁移后的 v4**（实测踩出来的）：
+ *  - v3（v2-to-v3 `assertV3RowAdmission`）要求 `system/message` 的
+ *    `message.source.kind === "plugin"`，否则报 `system message requires
+ *    plugin source`。而插件的 `findSessionDirs` 会 v4 → v3 → 旧单帧逐级回退，
+ *    24 个 v3 日志是活靶子。
+ *  - v4 的 `source()` 只拒绝**字面量** `"plugin"`（v3-to-v4:126），而
+ *    `producerKind()` 对未知插件返回 `plugin:<name>` —— 该值 v4 接受。
+ *  → `{kind:"plugin", plugin:"<name>"}` 是唯一两边都合法的形状：迁移时
+ *    `rewritePluginSource` → `producerKind` → `plugin:@240xu/dsh-message-ops`。
+ *
+ * ⚠️ 不要改成 `{kind:"message-ops"}`：它在 v3 直接非法（实测 FAIL）。
+ */
+const PLUGIN_NAME = "@240xu/dsh-message-ops";
+const PRODUCER_KIND = `plugin:${PLUGIN_NAME}`; // 迁移后的 v4 形态
+
+/**
+ * 按**目标代**构造消息 source —— v3 与 v4 的合法形状互斥（实测）：
+ *
+ *   source                                  v3 日志      v4 日志
+ *   {kind:"plugin", plugin:<name>}          PASS ✅      FAIL ✗（拒字面量 "plugin"）
+ *   {kind:"plugin:<name>"}（producerKind）  FAIL ✗      PASS ✅
+ *   {kind:"message-ops"}                    FAIL ✗      PASS ✅
+ *
+ * 根因：v3 的 `assertV3RowAdmission` 要求 system 类消息 `source.kind==="plugin"`；
+ * v4 的 `source()` 只拒绝**字面量** "plugin"，而 `producerKind()` 对未知插件产出
+ * `plugin:<name>`，该值 v4 接���。
+ * 插件的 `findSessionDirs` 会 v4 → v3 → 旧单帧逐级回退（语料里 24 个 v3 日志），
+ * 所以**必须按写到哪里决定形状**，不能一刀切。
+ *
+ * @param {number|undefined} version 目标日志的 header.version（4 = v4；其余按 v3 形状）
+ */
+function messageSource(role, version) {
+  const r = role ?? "system";
+  // ⚠️ role=system 只能写 "system-prompt"：Session 运行时层（dsh-session/lib/index.js:1206）
+  // 对 `system/message` 要求 kind **严格等于** "system-prompt"，比 v4 格式闸更严，
+  // 任何 producer-owned kind（含 plugin:<name>）都会被加载端拒���：
+  //   `session event at seq N message must have system-prompt source`
+  if (r === "system") return { kind: "system-prompt" };
+  if (version === 4) return { kind: PRODUCER_KIND, role: r };
+  return { kind: "plugin", plugin: PLUGIN_NAME, role: r };
+}
+
+/**
+ * 重放事件的 data 形状 —— **按事件类型分派**。
+ *
+ * 0.8.1 P0 实机事故（第二处）：`user/message` 的 v4 契约里**消息本体字段
+ * 直接摊在 data 上**（`data.id` / `data.role` / `data.source` /
+ * `data.content`），而 `assistant/message` 才包一层 `data.message`
+ * （并带 turn/step）。旧代码对两者一律写 `{ message: {...} }` →
+ * user/message 被双重包裹成 `data.message.role`，且丢 id、丢 source。
+ * 正确形状见 `dsh-session-format-v2-to-v3/lib/index.js:264-271`。
+ */
+export function replayEventData(item, ts, version = 4) {
+  if (item.type === "user/message") {
+    return {
+      id: item.id ?? randomUUID(),
+      role: "user",
+      source: messageSource("user", version),
+      content: [{ type: "text", text: item.text }],
+    };
+  }
+  if (!ts || !Number.isSafeInteger(ts.turn) || ts.turn <= 0 || !Number.isSafeInteger(ts.step) || ts.step <= 0) {
+    throw new OpsError("replayEventData: assistant/message 需要打开的 turn/step，拒绝写出注定无法加载的事件", 500);
+  }
+  return {
+    turn: ts.turn,
+    step: ts.step,
+    message: {
+      id: item.id ?? randomUUID(),
+      role: "assistant",
+      source: messageSource("assistant", version),
+      content: [{ type: "text", text: item.text }],
+    },
+  };
+}
+
+/**
  * surface replace 落定：append 一条承载 replace 的 system/message。
  * sourceEventSeqs 必须覆盖被遮蔽的全部 surface 节点（引擎
  * assertProvenance 强校验，缺失即抛错）。
@@ -98,10 +183,71 @@ export function deriveTurnStep(events) {
   return { turn: 1, step: 1 };
 }
 
+/**
+ * 规划承载 notice 的 turn/step 窗口。
+ *
+ * v4 关系状态机要求 `system/message` 的 `data.turn/step` 匹配**当前打开**的
+ * turn+step（`assertReleasedV4Relationships` → `requireStep`）。但用户恰恰在会话
+ * **空闲**时想回滚消息，而正常会话都以 `turn/end` 收尾 —— 实测 364 个日志里
+ * **340 个（93%）空闲时 turn+step 是关闭的**。若此时拒绝，功能等于不存在。
+ *
+ * 出路：引擎 append-only（Session 公开方法里确无 insert/splice），所以把 notice
+ * 包进一个**自足的合成 turn**：turn/start → step/start → notice → step/end → turn/end。
+ * 这正是 dsh 自己的崩溃恢复（`openTurnClosers`���用同一手法合��闭合事件。
+ * 已对官方校验闸实测四种情形全部通过：append 型 / 单节点 replace / 多节点 replace /
+ * 遮蔽受保护头（正确拒绝）。
+ *
+ * 合成 turn 带 `reason:"message-ops"`，UI 与审计可据此识别，不与真实模型轮次混淆。
+ *
+ * @returns {{synthetic: boolean, turn: number, step: number,
+ *            preamble?: Array, postamble?: Array}}
+ */
+export function planNoticeWindow(events) {
+  let turn = null, step = null, maxTurn = 0;
+  for (const e of events ?? []) {
+    const d = e?.data;
+    if (Number.isSafeInteger(d?.turn) && d.turn > maxTurn) maxTurn = d.turn;
+    switch (e?.type) {
+      case "turn/start": turn = d?.turn ?? null; step = null; break;
+      case "step/start": step = d?.step ?? null; break;
+      case "step/end": step = null; break;
+      case "turn/end": turn = null; step = null; break;
+      default: break;
+    }
+  }
+  // 会话正开着 turn+step（例如上一轮被中断）→ 直接用现成窗口，不造合成 turn
+  if (turn !== null && step !== null) return { synthetic: false, turn, step };
+  const nextTurn = maxTurn + 1;
+  return { synthetic: true, turn: nextTurn, step: 1 };
+}
+
+/** 合成窗口的前缀事件（seq/time 由调用方分配）。 */
+export function noticeWindowPreamble(win) {
+  if (!win.synthetic) return [];
+  return [
+    { kind: "turn/start", data: { turn: win.turn, reason: "message-ops" } },
+    { kind: "step/start", data: { turn: win.turn, step: win.step } },
+  ];
+}
+
+/** 合成窗口的后缀事件。 */
+export function noticeWindowPostamble(win) {
+  if (!win.synthetic) return [];
+  return [
+    { kind: "step/end", data: { turn: win.turn, step: win.step } },
+    // ⚠️ turn/end.data.reason 是**必填契约**（types.d.ts:271-276），引擎自己也这么写
+    // （dsh-session/lib/index.js:783-786）。UI 的 trajectory 装配器无防护地读
+    // `match.event.data.reason.kind`（dsh-client-ui-trajectory/lib/client.js:997-998）
+    // → 缺字段会让整个会话页白屏（ConversationNodeAssembler.replayContext 抛 TypeError）。
+    // kind 选 "interrupted"：语义上就是"非模型驱动的 turn"（引擎用它标记被打断的轮次）。
+    { kind: "turn/end", data: { turn: win.turn, reason: { kind: "interrupted" } } },
+  ];
+}
+
 export function applySurfaceReplace(session, startSeq, endSeq, sourceEventSeqs, noticeText, turnStep) {
   const ts = turnStep && Number.isSafeInteger(turnStep.turn) && turnStep.turn > 0
     ? turnStep : { turn: 1, step: 1 };
-  const data = { turn: ts.turn, step: ts.step, message: { id: randomUUID(), role: "system", content: [{ type: "text", text: noticeText }] } };
+  const data = { turn: ts.turn, step: ts.step, message: { id: randomUUID(), role: "system", source: messageSource("system", 4), content: [{ type: "text", text: noticeText }] } };
   if (replaceShape) {
     return session.append("system/message", data, { surfaceOp: replaceOpFor(replaceShape, startSeq, endSeq), sourceEventSeqs });
   }
@@ -162,7 +308,7 @@ export function planRestore(events, restoreSeq, upToSeq, excludeSeqs) {
   // dock 会为这类标记常驻显示恢复按钮，409 死按钮 = 永远清不掉（实测 8 连 409）。
   // 改为返回空计划：applyRestore 仍追加说明 notice（含 restoresSeq）→ 标记停用、
   // dock 计数递减；语义如实：0 条重放 + 文案说明区间无 user/assistant 内容。
-  return { restoreSeq, startSeq, endSeq, upToSeq: Number.isSafeInteger(upToSeq) ? cap : endSeq, replayable, skipped, turnStep: deriveTurnStep(events) };
+  return { restoreSeq, startSeq, endSeq, upToSeq: Number.isSafeInteger(upToSeq) ? cap : endSeq, replayable, skipped };
 }
 
 /**
@@ -192,14 +338,14 @@ export function applyRestore(session, plan, { flush } = {}) {
     ? plan.turnStep : { turn: 1, step: 1 };
   const noticeEvent = session.append(
     "system/message",
-    { turn: ts.turn, step: ts.step, message: { id: randomUUID(), role: "system", content: [{ type: "text", text: notice }] }, restoresSeq: plan.restoreSeq, restoredSourceSeqs: plan.discard ? [] : plan.replayable.map((i) => i.seq), ...(plan.discard ? { discarded: true } : {}) },
+    { turn: ts.turn, step: ts.step, message: { id: randomUUID(), role: "system", source: messageSource("system", 4), content: [{ type: "text", text: notice }] }, restoresSeq: plan.restoreSeq, restoredSourceSeqs: plan.discard ? [] : plan.replayable.map((i) => i.seq), ...(plan.discard ? { discarded: true } : {}) },
     { surfaceOp: "append" },
   );
   if (noticeEvent && noticeEvent.seq != null) eventSeqs.push(noticeEvent.seq);
   for (const item of plan.discard ? [] : plan.replayable) {
     const event = session.append(
       item.type,
-      { message: { role: item.role, content: [{ type: "text", text: item.text }] } },
+      replayEventData(item, ts),
       { surfaceOp: "append" },
     );
     if (event && event.seq != null) eventSeqs.push(event.seq);
@@ -285,51 +431,6 @@ export function pendingRestoreTurns(events, markerSeq) {
   return turns;
 }
 
-/**
- * exportMarkdown：把到 upToSeq（含）为止的事件流渲染为 Markdown。
- * user/assistant/system 消息按角色小节展开，工具调用折叠为单行引用。
- * @param {object} header 会话 header（readSessionFile）
- * @param {Array} events 全量事件
- * @param {number=} upToSeq 可选上界（含）；缺省导出全部
- */
-export function exportMarkdown(header, events, upToSeq) {
-  if (upToSeq !== undefined && (!Number.isSafeInteger(upToSeq) || upToSeq < 0)) {
-    throw new OpsError("invalid seq", 400);
-  }
-  const sessionId = header && header.id ? header.id : "unknown";
-  const scoped = upToSeq === undefined ? events : events.filter((e) => e && typeof e.seq === "number" && e.seq <= upToSeq);
-  const lines = [];
-  lines.push(`# DSH 会话导出：${sessionId}`);
-  lines.push("");
-  lines.push(`- 会话 id：${sessionId}`);
-  if (header && header.parentSession) lines.push(`- 来源分支：${header.parentSession}`);
-  lines.push(`- 导出范围：${upToSeq === undefined ? "全部" : `seq ≤ ${upToSeq}`}`);
-  lines.push(`- 生成时间：${new Date().toISOString()}`);
-  lines.push("");
-  lines.push("---");
-  lines.push("");
-  for (const e of scoped) {
-    if (!e || typeof e.seq !== "number") continue;
-    if (e.type === "user/message" || e.type === "assistant/message" || e.type === "system/message") {
-      const role = (e.data && e.data.message && e.data.message.role) ||
-        (e.type === "user/message" ? "user" : e.type === "assistant/message" ? "assistant" : "system");
-      const text = messageText(e);
-      lines.push(`## [seq ${e.seq}] ${role}`);
-      lines.push("");
-      lines.push(text || "（无文本内容）");
-      lines.push("");
-    } else if (e.type === "tool/call") {
-      const d = e.data || {};
-      const name = d.name || (d.call && d.call.name) || "tool";
-      const argsHint = d.call && d.call.arguments !== undefined
-        ? JSON.stringify(d.call.arguments).slice(0, 80)
-        : "";
-      lines.push(`> [seq ${e.seq}] 🔧 工具调用：${name}${argsHint ? ` — ${argsHint}` : ""}`);
-      lines.push("");
-    }
-  }
-  return lines.join("\n");
-}
 
 // ---------------------------------------------------------------------------
 // HTTP 信任围栏（评审 P0）：插件经 webServer.register 挂载的路由不经过宿主
@@ -433,32 +534,58 @@ export function isSurfaceMessageType(type) {
 }
 
 /** 磁盘可见节点：按事件流推导的 message 类 seq（剔除既有遮蔽）。 */
-export function diskVisibleNodes(events) {
+/**
+ * 当前 surface 上的**全部**节点（v4 的 5 种 surface 类型），已剔除被遮蔽的。
+ *
+ * ⚠️ 与 `diskVisibleNodes` 的区别是关键的（0.8.2 实机事故）：
+ * `diskVisibleNodes` 只收 4 种**消息**类型（UI 列表用），而 v4 的 surface 还包含
+ * `tool/result`。surface replace 的 `sourceEventSeqs` 必须覆盖**被遮蔽的每一个
+ * surface 节点**（`foldSurface`：`if (removed.some(s => !sources.includes(s))) throw
+ * "replacement sourceEventSeqs omit a shadowed surface node"`）—— 用消息集合当溯源
+ * 会漏掉区间内的 tool/result，**整份日志被加载端拒绝**。这正是历史上 14 个打不开的
+ * 会话的真正成因（不是区间压缩编码问题）。
+ */
+export function diskSurfaceNodes(events) {
   const shadowed = computeShadowed(events);
   const nodes = [];
   for (const e of events) {
     if (!e || !Number.isSafeInteger(e.seq)) continue;
     if (shadowed.has(e.seq)) continue;
-    if (isSurfaceMessageType(e.type)) nodes.push(e.seq);
+    if (isSurfaceType(e.type)) nodes.push(e.seq);
   }
   return nodes;
 }
 
+function isSurfaceType(type) {
+  return isSurfaceMessageType(type) || type === "tool/result";
+}
+
+export function diskVisibleNodes(events) {
+  return diskSurfaceNodes(events).filter((seq) => {
+    const e = events.find((x) => x && x.seq === seq);
+    return e && isSurfaceMessageType(e.type);
+  });
+}
+
 /** 磁盘版 planRevert：target 必须可见，遮蔽 target 之后（含）全部可见节点。 */
 export function planRevertFromEvents(events, targetSeq) {
+  // 目标用「消息」集合（回滚对象是消息），溯源用「全部 surface」集合（0.8.2 修正）
   const nodes = diskVisibleNodes(events);
   const startIdx = nodes.indexOf(targetSeq);
   if (startIdx === -1) throw new OpsError(`surface replace: start seq ${targetSeq} not found in surface`, 409);
-  const shadowedSeqs = nodes.slice(startIdx);
+  const surface = diskSurfaceNodes(events);
+  const shadowedSeqs = surface.slice(surface.indexOf(targetSeq));
   if (shadowedSeqs.length === 0) throw new OpsError("nothing to revert", 409);
   return { startSeq: targetSeq, endSeq: shadowedSeqs[shadowedSeqs.length - 1], shadowedSeqs };
 }
 
 /** 磁盘版 planDelete：单条可见遮蔽。 */
 export function planDeleteFromEvents(events, seq) {
-  if (!diskVisibleNodes(events).includes(seq)) {
+  const surface = diskSurfaceNodes(events);
+  if (!diskVisibleNodes(events).includes(seq) || !surface.includes(seq)) {
     throw new OpsError(`seq ${seq} not visible on current surface`, 409);
   }
+  // 单节点遮蔽：溯源就是它自己（0.8.2：也走完整 surface 判定，避免非 surface 节点）
   return { startSeq: seq, endSeq: seq, shadowedSeqs: [seq] };
 }
 
@@ -470,7 +597,7 @@ export function nextSeqFrom(events) {
 }
 
 /** 磁盘回撤/删除标记事件（字段镜像引擎金标准：type/seq/time/data/sourceEventSeqs/surfaceOp）。 */
-export function buildMarkerEvent({ seq, time, turnStep, text, startSeq, endSeq, shadowedSeqs }) {
+export function buildMarkerEvent({ seq, time, turnStep, text, startSeq, endSeq, shadowedSeqs, version = 4 }) {
   return {
     type: "system/message",
     seq,
@@ -478,7 +605,7 @@ export function buildMarkerEvent({ seq, time, turnStep, text, startSeq, endSeq, 
     data: {
       turn: turnStep.turn,
       step: turnStep.step,
-      message: { id: randomUUID(), role: "system", content: [{ type: "text", text }] },
+      message: { id: randomUUID(), role: "system", source: messageSource("system", version), content: [{ type: "text", text }] },
     },
     sourceEventSeqs: [...shadowedSeqs],
     surfaceOp: { op: "replace", startSeq, endSeq },
@@ -486,7 +613,7 @@ export function buildMarkerEvent({ seq, time, turnStep, text, startSeq, endSeq, 
 }
 
 /** 磁盘恢复说明事件（restoresSeq → dock 移除该行；surfaceOp 恒 "append"）。 */
-export function buildRestoreNoticeEvent({ seq, time, turnStep, text, restoreSeq, discard }) {
+export function buildRestoreNoticeEvent({ seq, time, turnStep, text, restoreSeq, discard, version = 4 }) {
   return {
     type: "system/message",
     seq,
@@ -494,7 +621,7 @@ export function buildRestoreNoticeEvent({ seq, time, turnStep, text, restoreSeq,
     data: {
       turn: turnStep.turn,
       step: turnStep.step,
-      message: { id: randomUUID(), role: "system", content: [{ type: "text", text }] },
+      message: { id: randomUUID(), role: "system", source: messageSource("system", version), content: [{ type: "text", text }] },
       restoresSeq: restoreSeq,
       ...(discard ? { discarded: true } : {}),
     },
@@ -502,13 +629,26 @@ export function buildRestoreNoticeEvent({ seq, time, turnStep, text, restoreSeq,
   };
 }
 
-/** 磁盘重放事件（镜像引擎：无 id、干净文本无前缀（0.6.0 对齐 opencode）、surfaceOp "append"）。 */
-export function buildReplayEvent({ seq, time, item }) {
+/**
+ * 磁盘重放事件（镜像引擎：干净文本无前缀（0.6.0 对齐 opencode）、surfaceOp "append"）。
+ *
+ * turnStep 由调用方传**打开的** turn/step（index.js 的 `plan.turnStep`，由
+ * `requireOpenTurnStep` 校验）。曾经硬编码 {turn:1,step:1} —— 那是同一类事故的
+ * "修了一半"版本：notice 用了正确坐标、replay 仍写死 1/1，一旦会话当前打开的
+ * turn ≠ 1，`assertReleasedV4Relationships` 报
+ * `assistant/message does not match an open turn and step` → **整份日志被拒**，
+ * 而 `diskAppend` 是裸 zstd 写、零校验，拦不住。
+ */
+export function buildReplayEvent({ seq, time, item, turnStep, version = 4 }) {
+  const ts = turnStep && Number.isSafeInteger(turnStep.turn) && turnStep.turn > 0
+    && Number.isSafeInteger(turnStep.step) && turnStep.step > 0
+    ? turnStep
+    : (() => { throw new OpsError("buildReplayEvent: 缺少合法的打开 turn/step，拒绝写出注定无法加载的事件", 500); })();
   return {
     type: item.type,
     seq,
     time,
-    data: { message: { role: item.role, content: [{ type: "text", text: item.text }] } },
+    data: replayEventData(item, ts, version),
     surfaceOp: "append",
   };
 }

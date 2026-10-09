@@ -1,13 +1,37 @@
 # @240xu/dsh-message-ops
 
-DSH web 插件：**消息回滚 + 消息删除 + 消息分支** 三合一。在会话头部添加分支图标按钮，
-侧栏会话行 "..." 菜单注入「消息操作」项，打开统一操作对话框：
+DSH web 插件：**消息回滚 + 删除 + 恢复**。只补 dsh 官方**没有**的能力。
 
-- **回滚（Revert）**：遮蔽所选消息及其后的全部可见内容（DSH 原生 surface replace 语义）。
-  日志 append-only，原事件完整保留，语境可通过重新发送恢复。
-- **删除（Delete）**：仅遮蔽所选的那一条消息，其余内容不变（同样是 surface replace）。
-- **分支（Branch）**：把所选消息（含）之前的全部事件复制为一个**新会话**，
-  新会话 header 携带 `parentSession=<原会话 id>`，原会话一个字节都不动 —— 唯一的非破坏操作。
+> **0.9.0 是破坏性变更**：移除了本插件的**分支**与 **Markdown 导出**。
+> 两者 dsh 官方都已有（`session/fork` 与 `/api/session.export`），详见下方「为什么不重复造轮子」。
+
+## 官方没有、本插件提供的
+
+| 能力 | 官方 dsh 0.2.0-rc.2 | 本插件 |
+|---|---|---|
+| **消息回滚**（遮蔽该条及其后全部内容） | ❌ 没有。`SurfaceOp` 只有 `append\|replace`，**没有解除遮蔽的操作**；`undo` 仅指草稿编辑器的 Ctrl+Z | ✅ |
+| **单条删除** | ❌ 没有。官方 README 明文 *"sessions can be archived but never deleted"* | ✅ |
+| **恢复**（撤销一次回滚/删除） | ❌ 没有 | ✅ |
+
+## 为什么不重复造轮子（0.9.0 的取舍）
+
+- **分支** → 官方有完整实现：RPC `session/fork`（`atSeq` 任意）+ `SessionStore.fork()`
+  + UI 消息级按钮 + 官方埋点就叫 `branch_session_click`。
+  本插件原先还有一个磁盘实现（`applyBranch`）作为「官方失败时的回落」，但它语义是错的：
+  删掉了 `isSeeded`（官方 fork 设 `true`）、不写 `inheritedEventCount`、
+  也不补 fork closers → 产出的子会话边界可能悬空。**已删除**，失败时直接提示停止运行中的会话。
+- **Markdown 导出** → 官方 `/api/session.export` 提供 ZIP 归档（原始 JSONL + 附件，面向迁移/复现）。
+  格式确实不重叠，但本插件的导出**零 UI 入口**（实测路由可用但前端从不调用），等于死代码。**已删除**。
+
+## 用法
+
+- **会话头部**的 `Message ops (revert / delete / branch)` 按钮 → 统一对话框
+- **助手消息** hover 行的 `Revert to here` / `Quote to composer`
+- **用户消息** hover 行的 `Revert to here`
+- **输入框上方的回撤贴条**：展开后可逐条 `Restore`（这是恢复的唯一入口）
+- **侧栏会话行**的 `...` 菜单
+
+对话框流程：**先在列表里选一条消息 → 上方出现三个操作 → 破坏性操作需勾选确认**。
 
 ## 安装
 
@@ -410,3 +434,53 @@ opencode 实测：展开行 = 每条被遮蔽消息一行，点行**只恢复该
   （修正 0.8.0 时代"2709 条测试污染"的误判）。清理前已备份日志
   （~/.dsh/backups/session-4e10c1a2.*.zstd.bak，9.2MB）。
 - 单测 50/50（+1 discard 语义）。
+
+---
+
+## 0.9.0 变更清单
+
+### 移除（与官方重复或无入口）
+- `src/branch.js` 整个删除；`/api/message-ops/branch` 路由、tool 的 `branch` 动作、
+  客户端的磁盘回落（`diskBranch`）与 `fork.disk` 文案全部移除。**分支现在只走官方 `sessions.fork()`**，
+  失败时提示「官方分支不可用，通常是会话正在运行」。
+- `/api/message-ops/export` 路由、`exportMarkdown()`、tool 的 `export` 动作移除。
+  **导出一律用官方 `/api/session.export`**（ZIP 归档）。
+- 死代码清理：`IconTrash`/`TrashFallback`（零渲染点）、对话框内永不可达的 restore 分支、
+  4 组 restore locale 文案（dock 用自己的 `dock.*` 键）。
+
+### 修复（均为浏览器实测发现，静态审查无法发现）
+1. **用户消息回滚按钮恒定失效**。四个 bug 叠在一起：
+   - `userAnchors()` 匹配 CSS-module 生成的前缀 `Sixlwa_*`，而 dsh 0.2.0-rc.2 的哈希已变为
+     `EvIC1a_*` → 锚点集为空；
+   - 过滤了 `m.visible !== false`，但宿主聊天视图**不施加**遮蔽模型、照常渲染被回滚的消息
+     → 配对候选与 DOM 块零交集；
+   - `injected()` 的 `current\s+runtime\s+context` 跑在 `norm()`（`replace(/\s+/g,'')`，删掉**全部**空白）
+     之后的串上 → 永远匹配不上，伪 user 行漏进配对；
+   - 按钮可用性在 fetch 回调里做事后全局扫描，与 DOM 注入/重排竞态
+     → 块已打上 seq 而按钮仍禁用。
+   现在实测 `data-mops-seq=["8","54"]`、按钮可用；配不上的块会被**禁用并说明原因**，
+   而不是留一个点了才报错的装饰按钮。
+2. **对话区硬编码 `_flowItem` 会误收官方 `turn-tail`**（官方 branch 按钮所在行）→ 收紧为
+   `data-chat-flow-kind="user"` + `_userRow|_userStack|_bubble`。
+3. `defineTool` 注册失败原先 `catch(() => {})` 静默吞掉，无法诊断 → 改为 `console.warn`。
+
+### 契约测试
+新增 `test/revert-contract.test.js`：把 **dsh 官方三层闸**接进测试 ——
+① 格式层 `assertV4RowAdmission` + `restoreReleasedV4Artifact`、
+② 运行时层（role 匹配 / `source.kind` 非空 / `system/message` 必须 `system-prompt`）、
+③ **UI 装配层**（`turn/end.data.reason` 必填）。
+只��第 ① 层会得到「全绿但 UI 崩」的假象（0.8.x 实机踩过：`dsh-client-ui-trajectory`
+的装配器无防护读 `reason.kind`，缺字段直接白屏）。
+
+## 事件形状的三条硬规则（写错就是整份日志报废）
+
+1. **`system/message` 的 `source.kind` 必须严格是 `"system-prompt"`** ——
+   Session 运行时层（`dsh-session/lib/index.js:1206`）比格式闸更严。
+2. **`turn/end.data.reason` 必填**（`types.d.ts:271-276`）——UI 装配器直接读 `reason.kind`。
+3. **空闲会话要写 notice，必须自带一个合成 turn**（`turn/start`+`step/start`+notice+`step/end`+`turn/end`，
+   带 `reason:{kind:"interrupted"}`）——v4 要求 `system/message` 匹配**打开的** turn/step，
+   而正常会话都以 `turn/end` 收尾（实测 340/364 空闲时是关闭的）。引擎 append-only 插不进已有 step，
+   但合成一整个 turn 合法。dsh 自己的崩溃恢复（`openTurnClosers`）用同一手法。
+
+`surfaceOp: replace` 的 notice **不会**渲染成对话行（`dsh-client-ui-chat/lib/client.js:9370`
+只渲染 `surfaceOp==="append"`），这是设计如此 —— 回撤提示由输入框上方的贴条负责。

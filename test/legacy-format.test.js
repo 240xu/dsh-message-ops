@@ -13,7 +13,6 @@ process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-msgops-legacy-
 
 const { readSessionFile, readSessionFileAsync, encodeSessionFile, findSessionDirs, listMessages } =
   await import('../src/session-file.js')
-const { applyBranch } = await import('../src/branch.js')
 
 const HEADER = { type: 'session', version: 3, id: 'session-22222222-2222-2222-2222-222222222222', createdAt: 1, cwd: '/tmp/x' }
 const EVENTS = [
@@ -119,19 +118,3 @@ test('findSessionDirs：v4 文件名优先发现；同目录 v4 压过 v3/legacy
   assert.match(dirs[0].logPath, /session\.v4\.jsonl\.zstd$/)
 })
 
-test('applyBranch：v4 会话分支写回 v4 文件名与 version=4', () => {
-  const id = 'session-66666666-6666-6666-6666-666666666666'
-  const dir = path.join(process.env.DSH_HOME, 'sessions', 'v4-b', id)
-  fs.mkdirSync(dir, { recursive: true })
-  const origLog = path.join(dir, 'session.v4.jsonl.zstd')
-  fs.writeFileSync(origLog, encodeSessionFile({ ...V4_HEADER, id }, [
-    { type: 'user/message', seq: 0, surfaceOp: 'append', data: { message: { role: 'user', content: [{ type: 'text', text: 'a' }] } } },
-    { type: 'user/message', seq: 1, surfaceOp: 'append', data: { message: { role: 'user', content: [{ type: 'text', text: 'b' }] } } },
-  ]))
-  const result = applyBranch(origLog, 0)
-  assert.match(result.logPath, /session\.v4\.jsonl\.zstd$/)
-  const { header, events } = readSessionFile(result.logPath)
-  assert.equal(header.version, 4)
-  assert.equal(header.parentSession, id)
-  assert.equal(events.length, 1)
-})

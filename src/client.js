@@ -41,6 +41,8 @@ window.__ModuleLoader__.load({
       'dialog.session': '会话：',
       'dialog.runningWarn': '⚠ 会话正在运行：请先停止该会话再执行回滚/删除/分支。',
       'dialog.pick': '选择一条消息：',
+      'dialog.pickFirst': '第 1 步 · 在下方选择一条消息，第 2 步在这里选择操作。',
+      'dialog.pickedAs': '已选 #{seq} · {{text}}',
       'dialog.invisible': '（已遮蔽，仅日志可见）',
       'dialog.showMore': '显示更多（剩余 {n} 条）',
       'dialog.more': '…（仅显示最近 200 条，共 {n} 条）',
@@ -63,18 +65,14 @@ window.__ModuleLoader__.load({
       'done.delete': '删除完成，刷新页面后生效',
       'action.reload': '刷新页面',
       'errorPrefix': '操作失败：',
-      'op.restore': '恢复（重放被遮蔽的消息）',
-      'op.restoreDesc': '仅当选中行是回滚/删除标记时可用。这是重放而非取消遮蔽：被遮蔽的用户/助手消息会以新 seq 重新追加并带「[恢复]」前缀；不可重放的事件（如工具调用）会被跳过并计数。',
       'slot.revert': '回滚到此条',
       'slot.delete': '删除此条',
       'slot.branch': '从此分支',
       'toast.openNew': '打开新会话',
       'fork.official': '分支完成：新会话 {id}',
-      'fork.disk': '分支完成：新会话 {id}（列表刷新后可见）',
+      'fork.unavailable': '官方分支不可用：通常是因为会话正在运行，请先停止会话后重试。分支功能由 dsh 内置的 session/fork 提供。',
       'done.restore': '恢复完成：重放 {n} 条，跳过不可重放 {s} 条',
       'busy.restore': '恢复中…',
-      'confirm.restore': '恢复',
-      'ack.restore': '我已了解：恢复将以新 seq 重放被遮蔽的消息（原日志不变）',
       'dock.title': '已回撤 {n} 条消息',
       'dock.expand': '展开回撤列表',
       'dock.collapse': '折叠回撤列表',
@@ -96,6 +94,8 @@ window.__ModuleLoader__.load({
       'dialog.session': 'Session: ',
       'dialog.runningWarn': '⚠ Session is running: stop it before revert / delete / branch.',
       'dialog.pick': 'Pick a message:',
+      'dialog.pickFirst': 'Step 1 · pick a message below, then choose an operation here.',
+      'dialog.pickedAs': 'Selected #${seq} · ${text}',
       'dialog.invisible': ' (shadowed, log-only)',
       'dialog.showMore': 'Show more ({n} older)',
       'dialog.more': '…(showing latest 200 of {n})',
@@ -105,14 +105,13 @@ window.__ModuleLoader__.load({
       'op.deleteDesc': 'Shadows only the picked message; everything else stays.',
       'op.branch': 'Branch into a new session from here',
       'op.branchDesc': 'Copies everything up to and including the picked message into a new session (original untouched, non-destructive).',
-      'op.restore': 'Restore (replay shadowed messages)',
-      'op.restoreDesc': 'Only when the selected row is a revert/delete marker. This is a replay, not an un-shadow: shadowed user/assistant messages are re-appended with NEW seqs and a [Restored] prefix; non-replayable events (tool calls) are skipped and counted.',
       'slot.revert': 'Revert to here',
+      'slot.revertUnmatched': 'Cannot locate this message seq in the log (usually the model-written summary drifted too far from the rendered text) — use the Message ops dialog instead.',
       'slot.delete': 'Delete this message',
       'slot.branch': 'Branch from here',
       'toast.openNew': 'Open new session',
       'fork.official': 'Branched (official fork): new session {id}',
-      'fork.disk': 'Branched: new session {id} (visible after list refresh)',
+      'fork.unavailable': 'Built-in branch unavailable — usually because the session is running. Stop it and retry. Branching is provided by the dsh built-in session/fork.',
       'ack.revert': 'I understand: revert shadows the picked message and everything after it',
       'ack.delete': 'I understand: this message will be shadowed (kept in the log)',
       'confirm.revert': 'Revert',
@@ -124,8 +123,6 @@ window.__ModuleLoader__.load({
       'done.branch': 'Branched: new session {id} (visible after list refresh)',
       'done.restore': 'Restored: replayed {n}, skipped non-replayable {s}',
       'busy.restore': 'Restoring…',
-      'confirm.restore': 'Restore',
-      'ack.restore': 'I understand: restore re-appends shadowed messages with new seqs (the log stays append-only)',
       'done.revert': 'Reverted; reload to apply',
       'done.delete': 'Deleted; reload to apply',
       'action.reload': 'Reload page',
@@ -323,72 +320,40 @@ window.__ModuleLoader__.load({
         setMode(m); setAcknowledged(false); setError(null)
       }, [picked, state])
 
-      // 磁盘分支回退（0.1.x / 官方 fork 失败时）：POST /api/message-ops/branch
-      const diskBranch = (cause) => {
-        const finish = () => {
-          fetch('/api/message-ops/branch', {
-            method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ sessionId: target.sessionId, upToSeq: picked }),
-          })
-            .then(async (res) => {
-              let data = {}
-              try { data = await res.json() } catch { /* keep {} */ }
-              if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
-              setDoneMsg(t('fork.disk', { id: data.newId || '' }))
-              setBusyMsg('')
-              setChildId(null)
-              setState('done')
-              // ISessions.refresh() 是宿主现行 API；refreshList 是旧名兜底。
-              if (__sessionsSvc) {
-                try {
-                  const r = typeof __sessionsSvc.refresh === 'function'
-                    ? __sessionsSvc.refresh()
-                    : (typeof __sessionsSvc.refreshList === 'function' ? __sessionsSvc.refreshList() : null)
-                  if (r != null) Promise.resolve(r).catch(() => {})
-                } catch { /* ignore */ }
-              }
-            })
-            .catch((reason) => {
-              setBusyMsg('')
-              setState('ready')
-              setError(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)))
-            })
-        }
-        if (cause) {
-          // 官方 fork 失败原因留痕后回退
-          setError(t('errorPrefix') + (cause && cause.message ? cause.message : String(cause)) + ' → fallback')
-        }
-        finish()
-      }
-
       const run = useCallback(() => {
         if (state === 'busy' || picked == null || !mode) return
-        if (mode !== 'branch' && mode !== 'restore' && !acknowledged) return
-        setBusyMsg(t('busy.' + (mode === 'revert' || mode === 'delete' || mode === 'restore' ? mode : 'branch')))
+        if (mode !== 'branch' && !acknowledged) return
+        setBusyMsg(t('busy.' + (mode === 'revert' || mode === 'delete' ? mode : 'branch')))
         setState('busy'); setError(null)
         if (mode === 'branch') {
-          // 0.3.0 分支双路径：官方 sessions.fork({atSeq})（0.2.0+，子会话进宿主
-          // 列表并可立即打开）优先；0.1.x / fork 缺席回退磁盘 applyBranch。
+          // 0.9.0：分支**只走官方** sessions.fork({atSeq})。
+          // 原先有一条「官方失败 → 磁盘 applyBranch」的回落，但那个实现语义是错的：
+          // 它删掉 isSeeded（官方 fork 设 true）、不写 inheritedEventCount、
+          // 也不调 buildForkSeed 补 step/turn closers → 产出的子会话边界可能悬空。
+          // 官方 fork 失败通常意味着源会话正在运行，正确做法是拒绝而非绕过引擎写盘。
           const forkPath = pickForkPath(__sessionsSvc)
-          if (forkPath.kind === 'official') {
-            forkPath.fork({ sessionId: target.sessionId, atSeq: picked, increaseTitle: true })
-              .then((childId) => {
-                setDoneMsg(t('fork.official', { id: String(childId || '') }))
-                setBusyMsg('')
-                setChildId(childId || null)
-                setState('done')
-                notifyDone(t('fork.official', { id: String(childId || '') }))
-              })
-              .catch((reason) => {
-                // 官方 fork 失败（如未编目）→ 回退磁盘分支，不中断用户
-                return diskBranch(reason)
-              })
+          if (forkPath.kind !== 'official') {
+            setError(t('fork.unavailable'))
+            setBusyMsg('')
+            setState('error')
             return
           }
-          diskBranch(null)
+          forkPath.fork({ sessionId: target.sessionId, atSeq: picked, increaseTitle: true })
+            .then((childId) => {
+              setDoneMsg(t('fork.official', { id: String(childId || '') }))
+              setBusyMsg('')
+              setChildId(childId || null)
+              setState('done')
+              notifyDone(t('fork.official', { id: String(childId || '') }))
+            })
+            .catch((reason) => {
+              setError(String((reason && reason.message) || reason || t('fork.unavailable')))
+              setBusyMsg('')
+              setState('error')
+            })
           return
         }
-        const path = mode === 'restore' ? 'restore' : mode
+        const path = mode
         const body = { sessionId: target.sessionId, seq: picked }
         Promise.resolve()
           .then(() => fetch('/api/message-ops/' + path, {
@@ -403,7 +368,6 @@ window.__ModuleLoader__.load({
             // S6 修复（G-M1）：不再 900ms 裸 location.reload。成功走 devkit
             // 标准 toast（无 devkit 时降级为对话框内 doneMsg），并提供手动
             // 「刷新页面」按钮。
-            const okMsg = mode === 'restore'
               ? t('done.restore', { n: String(data.restoredCount != null ? data.restoredCount : '?'), s: String(data.skipped != null ? data.skipped : 0) })
               : t(mode === 'revert' ? 'done.revert' : 'done.delete')
             // 0.4.0 composer 回填（opencode 式）：回滚用户消息 → 原文回填输入框，「编辑重发」零按钮
@@ -442,6 +406,35 @@ window.__ModuleLoader__.load({
       const pagedCount = shownBase.length - shown.length
       const pickedMsg = picked != null ? messages.find((m) => m.seq === picked) : null
 
+      // 0.9.0 可发现性：操作区固定在**消息列表之前**。
+      // 原先它在列表之后，而列表是 260px 滚动 + 分批渲染 50 条/页 ——
+      // 未选中消息时三个 radio 完全不在视野内，用户以为「只有列表、没有操作」。
+      // 未选中时给明确指引，而不是空着。
+      const opsPanel = pickedMsg
+        ? React.createElement('div', { key: 'ops', style: { margin: '8px 0 0' } },
+            React.createElement('div', { style: { ...metaStyle, margin: '0 0 4px' } },
+              t('dialog.pickedAs', { seq: String(pickedMsg.seq), text: (pickedMsg.snippet || '').slice(0, 60) })),
+            ['revert', 'delete', 'branch'].map((m, i) => React.createElement('div', { key: m, style: { marginTop: i === 0 ? 6 : 4 } },
+              React.createElement('label', { style: optStyle },
+                React.createElement('input', {
+                  type: 'radio', name: 'dsh-message-ops-mode', checked: mode === m,
+                  onChange: () => chooseMode(m), disabled: state === 'busy',
+                }),
+                t('op.' + m)),
+              mode === m ? React.createElement('div', { style: descStyle }, t('op.' + m + 'Desc')) : null,
+            )),
+            mode && mode !== 'branch'
+              ? React.createElement('label', { key: 'ack', style: optStyle },
+                  React.createElement('input', {
+                    type: 'checkbox', checked: acknowledged, disabled: state === 'busy',
+                    onChange: (e) => setAcknowledged(e.target.checked),
+                  }),
+                  t(mode === 'revert' ? 'ack.revert' : 'ack.delete'))
+              : null,
+          )
+        : React.createElement('div', { key: 'opshint', style: { ...metaStyle, margin: '8px 0 0', padding: '6px 8px', borderRadius: 6, background: 'var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.1))' } },
+            t('dialog.pickFirst'))
+
       let body
       if (state === 'loading') {
         body = React.createElement('div', { key: 'load', style: statusStyle }, t('dialog.loading'))
@@ -450,6 +443,7 @@ window.__ModuleLoader__.load({
       } else {
         body = React.createElement(React.Fragment, null, [
           target.running ? React.createElement('div', { key: 'warn', style: warnStyle }, t('dialog.runningWarn')) : null,
+          opsPanel,
           React.createElement('div', { key: 'pick', style: metaStyle }, t('dialog.pick')),
           React.createElement('div', { key: 'list', style: listStyle },
             hiddenCount > 0
@@ -482,26 +476,7 @@ window.__ModuleLoader__.load({
                 '#' + m.seq + ' ' + (m.role || '') + ' · ' + (m.snippet || '') + (m.visible === false ? t('dialog.invisible') : '')),
             )),
           ),
-          pickedMsg ? React.createElement('div', { key: 'ops' },
-            // restore 仅对 revert/delete 落定的 replace 标记行提供（重放语义）
-            // 0.6.0（用户定调）：恢复不进对话框——唯一入口是输入框上方贴条；
-            ['revert', 'delete', 'branch'].map((m, i) => React.createElement('div', { key: m, style: { marginTop: i === 0 ? 8 : 4 } },
-              React.createElement('label', { style: optStyle },
-                React.createElement('input', {
-                  type: 'radio', name: 'dsh-message-ops-mode', checked: mode === m,
-                  onChange: () => chooseMode(m), disabled: state === 'busy',
-                }),
-                t('op.' + m)),
-              mode === m ? React.createElement('div', { style: descStyle }, t('op.' + m + 'Desc')) : null,
-            ))) : null,
-          mode && mode !== 'branch'
-            ? React.createElement('label', { key: 'ack', style: optStyle },
-                React.createElement('input', {
-                  type: 'checkbox', checked: acknowledged, disabled: state === 'busy',
-                  onChange: (e) => setAcknowledged(e.target.checked),
-                }),
-                t(mode === 'revert' ? 'ack.revert' : mode === 'restore' ? 'ack.restore' : 'ack.delete'))
-            : null,
+          opsPanel,
         ])
       }
 
@@ -591,14 +566,14 @@ window.__ModuleLoader__.load({
       }, React.createElement(BranchIcon))
     }
 
-    // 官方图标适配：0.2.0 primitives 的 IconClock/IconTrash 与原生操作行同款；
+    // 官方图标适配：0.2.0 primitives 的 IconClock 与原生操作行同款；
     // require 失败（0.1.x 或裁剪环境）回退内联 SVG，槽在 0.1.x 本就不存在，仅防御。
+    // 0.9.0：移除 IconTrash —— 消息级删除按钮从未渲染（删除只在对话框里），
+    // 专家核查确认 IconTrash/TrashFallback 零渲染点，是死代码。
     var IconClock = null
-    var IconTrash = null
     try {
       const P = require('@deepseek-ai/dsh-client-ui-primitives')
       IconClock = P && P.IconClockOutlineRegular
-      IconTrash = P && P.IconTrashOutlineRegular
     } catch { /* fallback below */ }
     if (!IconClock) IconClock = function ClockFallback() {
       // 官方 IconClockOutlineArtwork 1:1 路径（ Regular = 1px stroke）
@@ -614,14 +589,6 @@ window.__ModuleLoader__.load({
     if (!IconQuote) IconQuote = function QuoteFallback() {
       return React.createElement('svg', { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true, stroke: 'currentColor', strokeWidth: 1 },
         React.createElement('path', { d: 'M3 6.5A3.5 3.5 0 0 1 6.5 3H7v1.5h-.5A2 2 0 0 0 4.5 6.5V7H7v3.5H3V6.5ZM9 6.5A3.5 3.5 0 0 1 12.5 3H13v1.5h-.5A2 2 0 0 0 10.5 6.5V7H13v3.5H9V6.5Z' }))
-    }
-    if (!IconTrash) IconTrash = function TrashFallback() {
-      // 官方 IconTrashOutlineArtwork 1:1 路径
-      return React.createElement('svg', { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true, stroke: 'currentColor', strokeWidth: 1 },
-        React.createElement('path', { d: 'M1.28149 3.88831H14.7187' }),
-        React.createElement('path', { d: 'M5.41602 3.88833V2.47962C5.41602 2.29282 5.52492 2.11366 5.71876 1.98157C5.9126 1.84948 6.17551 1.77527 6.44964 1.77527H9.55053C9.82466 1.77527 10.0876 1.84948 10.2814 1.98157C10.4752 2.11366 10.5841 2.29282 10.5841 2.47962V3.88833' }),
-        React.createElement('path', { d: 'M3.29749 5.10193L4.06585 13.0192C4.10899 13.4595 4.48223 13.7942 4.92504 13.7942H11.0751C11.5179 13.7942 11.8912 13.4595 11.9343 13.0192L12.7027 5.10193' }),
-        React.createElement('path', { d: 'M6.27637 7.51831V11.1829M9.72378 7.51831V11.1829' }))
     }
 
     // --- 0.3.0 assistant-actions 官方槽：每条 AI 消息旁的原生回撤按钮 ------------
@@ -961,12 +928,21 @@ window.__ModuleLoader__.load({
           .then((r) => (r.ok ? r.json() : null))
           .then((d) => {
             // 宿主会把 <system-reminder> / runtime context 等也记为 role=user 的行，
-            // DOM 里并不渲染成"我的消息"块 —— 必须滤掉，否则按序配对会错位（0.7.0 根因）。
-            const injected = (sn) => /^<system-reminder|current\s+runtime\s+context|^<system-Reminder/i.test(sn)
+            // DOM 里并不渲���成"我的消息"块 —— 必须滤掉，否则按序配对会错位（0.7.0 根因）。
+            //
+            // 0.9.0 两个实机 bug（浏览器实测：4 个按钮 data-mops-seq 全为 null，点击必失败）：
+            //  ① 正则跑在 norm() 之后的串上，而 norm 是 replace(/\s+/g,'') —— 删掉**全部**空白，
+            //     `current\s+runtime\s+context` 永远匹配不上 → runtime-context 伪行漏进配对。
+            //     修法：injected() 改判**原始 snippet**。
+            //  ② 过滤了 `m.visible !== false`，但宿主聊天视图**不施��**遮蔽模型，照常渲染
+            //     被回滚遮蔽的消息 → 配对候选与 DOM 块零交集。
+            //     修法：DOM 配对必须覆盖全部 user 行（含遮蔽态）。
+            //     注意：对话框的「可回滚目标」列表仍应过滤 visible（那是另一套语义）。
+            const injected = (raw) => /^<system-reminder|current\s+runtime\s+context|^<system-Reminder/i.test(String(raw || ''))
             const rows = ((d && d.messages) || [])
-              .filter((m) => m && m.role === 'user' && m.visible !== false)
-              .map((m) => ({ seq: m.seq, sn: norm(m.snippet) }))
-              .filter((r) => r.sn && !injected(r.sn))
+              .filter((m) => m && m.role === 'user')
+              .map((m) => ({ seq: m.seq, sn: norm(m.snippet), raw: String(m.snippet == null ? '' : m.snippet) }))
+              .filter((r) => r.sn && !injected(r.raw))
             rowsCache = { sid: sid, rows: rows, at: Date.now() }
             return rows
           })
@@ -981,20 +957,49 @@ window.__ModuleLoader__.load({
         const add = (el) => { if (el && !seen.has(el)) { seen.add(el); out.push(el) } }
         const rows = Array.from(document.querySelectorAll('[class*="xzv4MW_actions"]'))
         for (const r of rows) {
-          const block = r.closest('[data-chat-flow-kind="user"]') || r.closest('[class*="Sixlwa_userRow"]') || r.parentElement
-          // 只取用户消息：块文本需能对应到 user 行（排除助理消息的动作行）
-          if (block && /Sixlwa_userRow|Sixlwa_userStack|Sixlwa_bubble/.test(block.innerHTML.slice(0, 4000))) add(block)
+          const block = r.closest('[data-chat-flow-kind="user"]')
+            || r.closest('[class*="_userRow"], [class*="_userStack"], [class*="_bubble"]')
+            || r.parentElement
+          // 0.9.0：只按**稳定属性** + hash-immune 类名后缀判定，不再匹配 CSS-module
+          // 生成的前缀（`Sixlwa_*`）。dsh 0.2.0-rc.2 的哈希已变为 `EvIC1a_flowItem`，
+          // 旧前缀正则把所有块都滤掉 → anchors 为空 → 按钮拿不到 seq → 点击必失败。
+          //
+          // ⚠️ 不要把 `_flowItem` 当兜底：那是**通用**流块，官方把 branch 按钮��放在
+          // `data-chat-flow-kind="turn-tail"` 的 _flowItem 里（实测会把 turn-tail 当成
+          // 用户消息，给它挂上回滚按钮）。只用 user 属性 + user 类名后缀。
+          if (block) {
+            const flow = block.getAttribute('data-chat-flow-kind')
+            const isUser = flow === 'user' || /_userRow|_userStack|_bubble/.test(block.className || '')
+            if (isUser) add(block)
+          }
         }
         // 回退：属性锚点
         for (const k of document.querySelectorAll('[data-chat-flow-kind="user"]')) add(k)
         return out
       }
+      // 0.9.0：把配对结果反映到按钮可用性上。
+      // 配不上（data-mops-unmatched）→ 禁用 + 说明原因，绝不留装饰按钮。
+      var syncEnabled = (block, btn) => {
+        if (!btn) return
+        const ok = block.getAttribute('data-mops-seq')
+        if (ok) {
+          btn.disabled = false
+          btn.title = __t('slot.revert')
+          btn.removeAttribute('data-mops-unmatched')
+        } else {
+          btn.disabled = true
+          btn.title = __t('slot.revertUnmatched')
+          btn.setAttribute('data-mops-unmatched', '1')
+        }
+      }
       var assignSeqs = (sid, rows) => {
         if (!rows) return
         const blocks = userAnchors()
         let ri = 0
+        var missed = 0
         for (const b of blocks) {
           b.removeAttribute('data-mops-seq')
+          b.removeAttribute('data-mops-unmatched')
           const head = norm((b.innerText || '').slice(0, 240))
           let hit = -1
           for (let j = ri; j < rows.length; j++) {
@@ -1003,8 +1008,20 @@ window.__ModuleLoader__.load({
             if (a && b && (head.includes(a) || rows[j].sn.includes(b))) { hit = j; break }
           }
           if (hit >= 0) { b.setAttribute('data-mops-seq', String(rows[hit].seq)); ri = hit + 1 }
+          syncEnabled(b, b.querySelector && b.querySelector('.mopsUserRevert'))
+          if (false) {
+            // 0.9.0：配不上就**如实标记**而不是留一个点了才报错的装饰按钮。
+            // 已知局限：配对是前 40 字子串包含，模型自己写的摘要与宿主渲染文本
+            // 措辞漂移（实测 playwright/playright）就会失配。
+            missed++
+            b.setAttribute('data-mops-unmatched', '1')
+          }
         }
+        return missed
       }
+      // 按钮可用性在 assignSeqs 内部**同步**更新（与打标同一次循环）——
+      // 之前放在 fetch 回调里做事后全局扫描，会与 DOM 注入/重排竞态，导致
+      // 块已打上 seq 而按钮仍是禁用态（实测：block seq=[8,54]，按钮 disabled=true）。
       var ensureAssign = (sid) => fetchRows(sid).then((rows) => assignSeqs(sid, rows))
       // 0.7.0：点击时先**同步完成**配对（打标是异步 fetch 的结果，
       // 早先点在未打标的按钮上会静默失败 = 用户反馈的"点了没用"）。
