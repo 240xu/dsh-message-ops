@@ -24,7 +24,7 @@
 
 import { zstdCompressSync } from "node:zlib";
 import { open as openFile, truncate as truncateFile, stat as statFile } from "node:fs/promises";
-import { isSessionId, sessionIdVariants, findSessionDirs, readSessionFile, readSessionFileAsync, listMessages, computeShadowed, messageText } from "./session-file.js";
+import { isSessionId, sessionIdVariants, findSessionDirs, readSessionFile, readSessionFileAsync, listMessages, computeShadowed, messageText, turnBounds } from "./session-file.js";
 import { restoreNoticeText, planRevertFromEvents, planDeleteFromEvents, nextSeqFrom, buildMarkerEvent, buildRestoreNoticeEvent, buildReplayEvent, planNoticeWindow, noticeWindowPreamble, noticeWindowPostamble,
   OpsError, planRevert, planDelete, planRestore, applyRestore, applySurfaceReplace,
   restoreProgress, pendingRestoreTurns,
@@ -277,6 +277,15 @@ async function opsList(targetCtx, sessionId) {
     const t = messageText(e);
     if (t && t.trim()) seqText.set(e.seq, t.trim().replace(/\s+/g, " ").slice(0, 80));
   }
+  // 0.9.1：**reverted** = opencode 语义「回撤边界及其后」。
+  //
+  // ⚠️ 不能用 `visible` 当隐藏判据 —— `visible` 是「是否在模型 surface 上」，
+  // 而 tool/call / turn/* / model/* **根本不是 surface 节点**（SURFACE_TYPES 只有
+  // system|user|developer|assistant/message 与 tool/result），它们永远 visible=false。
+  // 照抄会把**所有**工���调用行永久藏掉（实测 3/3 全被误藏）。
+  //
+  // 正确口径：每个活跃回撤标记的 range.start 之后的全部 seq 都算已回撤
+  // —— 这正是 opencode 的 `messages.slice(0, boundaryIndex)`（边界自己也不显示）。
   for (const m of messages) {
     if (!m || m.marker !== true) continue;
     const prog = restoreProgress(events, m.seq);
@@ -288,6 +297,34 @@ async function opsList(targetCtx, sessionId) {
       preview: seqText.get(t.turnSeq) || ('#' + t.turnSeq),
     }));
   }
+
+  // 0.9.1：**reverted** = opencode 语义「回撤边界及其后」。
+  //
+  // ⚠️ 不能用 `visible` 当隐藏判据 —— `visible` 是「是否在模型 surface 上」，
+  // 而 tool/call / turn/* / model/* **根本不是 surface 节点**（SURFACE_TYPES 只有
+  // system|user|developer|assistant/message 与 tool/result），它们永远 visible=false。
+  // 照抄会把**所有**工具调用行永久藏掉（实测 3/3 全被误藏）。
+  //
+  // 正确口径：每个**未恢复**的回撤标记 range.start 之后的全部 seq 都算已回撤 ——
+  // 这正是 opencode 的 `messages.slice(0, boundaryIndex)`（边界自己也不显示）。
+  const revertFences = messages
+    .filter((m) => m && m.marker === true && m.restoreComplete === false
+      && m.range && typeof m.range.start === 'number')
+    .map((m) => m.range.start);
+  for (const m of messages) {
+    m.reverted = typeof m.seq === 'number' && revertFences.some((start) => m.seq >= start);
+  }
+  // 0.9.1：回合页脚/过程条的 node-key id 就是 turn 号，而它们**不是消息**，
+  // 无法用「首个带 turn 字段的消息」定位（该 turn 内可能一条消息都没有，
+  // 实测 turn 2 就映射不到）。这里直接给 turn/start 的 seq 映射表。
+  const bounds = turnBounds(events);
+  // 用 **turn/end 的 seq** 而不是 turn/start：回撤边界常落在某个 turn **内部**
+  // （实测边界 seq 54 在 turn 2 的 [51..62] 之间）。用起始 seq 会漏判该回合的页脚，
+  // 用结束 seq 则「边界之前完全在前」的回合自然落选。
+  const turnEndSeq = {};
+  for (const [turn, seq] of bounds.ends) turnEndSeq[turn] = seq;
+  for (const [turn, seq] of bounds.starts) if (!(turn in turnEndSeq)) turnEndSeq[turn] = seq;
+
   return {
     ok: true,
     session: { id: header.id, createdAt: header.createdAt, parentSession: header.parentSession ?? null },
@@ -295,6 +332,8 @@ async function opsList(targetCtx, sessionId) {
     runningSource: __runningSource,
     total: messages.length,
     visibleCount,
+    turnEndSeq,
+    revertFences,
     messages,
   };
 }

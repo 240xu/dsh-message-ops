@@ -484,3 +484,72 @@ opencode 实测：展开行 = 每条被遮蔽消息一行，点行**只恢复该
 
 `surfaceOp: replace` 的 notice **不会**渲染成对话行（`dsh-client-ui-chat/lib/client.js:9370`
 只渲染 `surfaceOp==="append"`），这是设计如此 —— 回撤提示由输入框上方的贴条负责。
+
+---
+
+## 0.9.1 / 0.9.2 · 回滚「真的生效了」
+
+### 问题：回滚对用户是无效的（0.9.0 及以前）
+
+浏览器实测发现：点回滚后 **dock 计数变了，但消息在界面上���行没变**。
+
+根因（源码 + 实测双重证实）：**dsh 刻意把「模型可见」和「人类 transcript」分成两套**。
+`surface.d.ts:51-63` 明写：
+
+> *Append-origin events are that transcript's durable source material; **replacement copies stay model-only**.*
+
+即 `surfaceOp: {op:'replace'}` 只折叠**模型 surface**（实测 393→13 节点，模型侧确实生效），
+但前端 transcript **不施加遮蔽**，被遮蔽消息照常渲染且完全可见 —— 连我们的 replace
+marker 自身都不渲染（`systemMessageDefinition.buildViewNode` 对 `surfaceOp !== 'append'`
+直接 `return null`，`dsh-client-ui-chat/lib/client.js:9370`）。
+
+所以之前那句「回滚已完成」是**误判**：只验了日志写入与 dock 计数，没验用户眼���。
+
+### 解法：渲染层按 node-key 精确映射
+
+每一行渲染节点带 `data-chat-node-key`，形态 `<len>:<kind><id>`，而 `<id>` 就是日志事件的字段：
+
+| 行 kind | `<id>` | 查表 |
+|---|---|---|
+| `user` / `steering` | messageId | `byMessageId` |
+| `assistant-step` | `<turn>:<step>` | `byTurnStep` |
+| `tool-call` | callId | `byCallId` |
+| `turn-tail` / `turn-process` / `turn-error` | turn 号 | `byTurn` ← **turn/end 的 seq** |
+| `developer-message` | messageId | `byMessageId` |
+
+配合服务端的 `revertFences` / `turnEndSeq`，客户端做**精确查表 + fence 比较**，
+命中则 `row.setAttribute('hidden', 'until-found')`。
+
+`hidden="until-found"` 与宿主 `useSearchableHidden` 同款：Ctrl+F 仍能搜到，
+且宿主的分页锚点选择器 `[data-chat-paging-anchor]:not(:empty):not([hidden])`
+会自动跳过，滚动恢复不受影响。
+
+### 三个踩过的坑（都有回归测试锁住）
+
+1. **不能用 `visible` 当隐藏判据**。`visible` 是「是否在模型 surface 上」，而
+   `tool/call` / `turn/*` / `model/*` **根本不是 surface 节点**，它们永远 `visible=false`
+   —— 照抄会把**所有**工具调用行永久藏掉（实测 3/3 全被误藏）。
+   正确口径是 `reverted`（= opencode 的「边界及其后」：`messages.slice(0, boundaryIndex)`）。
+2. **回合页脚不是消息**，锚到 `turn/end` 的 seq，永远不在 `reverted` 集合里，
+   所以判据必须**直接对 fence 数组比较**。
+   且要用 `turn/end` 而非 `turn/start` —— 回撤边界常落在某个 turn **内部**。
+3. **旧的 40 字符前缀包含匹配**实测 4 条错 2 条（「继续」命中「继续，…」），
+   已整体删除，改为 node-key 查表。
+
+### 实测结果
+
+```
+回滚后： hidden 5（user + turn-process×2 + turn-tail×2）
+        被回滚消息 disappears from DOM ✅
+        该轮之后的助手回答也消失 ✅
+        更早的消息完好 ✅
+恢复后： hidden 0，dock 消失，消息全部回来 ✅
+查表命中率： unresolved 0 / mismatch 0 / hiddenButNotReverted 0 ✅
+```
+
+### 已知限制
+
+- **restore 是「重放」语义**（dsh 无 unshadow 原语，见 README 上文的机制说明），
+  所以「恢复后再回滚」的复合场景下，重放副本的行可能不被识别为 user 行。
+- `restore` 后界面需要触发刷新才更新（已接 `__refreshSurface` 钩子 + MutationObserver，
+  但极少数情况下仍需重载页面）。

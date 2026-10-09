@@ -143,7 +143,12 @@ window.__ModuleLoader__.load({
     var __sessionsSvc = null
     var __inputActions = null // 0.4.0: 从 session 槽捕获（InputActions.setDraft → composer 回填）
     var __uiWorkspace = null
-    var __currentSessionId = null   // 0.6.0：会话视图会话 id（RevertDock/MsgSlotActions 刷新）
+    var __currentSessionId = null
+    // 0.9.1：视图重建后刷新 transcript 可见性的钩子。
+    // 之前 restore 路径里直接调 scan()，但 scan 定义在注入器的闭包里，
+    // dock 组件根本取不到 —— `typeof scan === 'function'` 静默跳过了，
+    // 结果「恢复后消息回来了但仍被藏 / dock 计数不变」，必须重载页面才对。
+    var __refreshSurface = null   // 0.6.0：会话视图会话 id（RevertDock/MsgSlotActions 刷新）
     // messageId→seq 索引缓存（每会话一次拉取；0.3.0 assistant-actions 槽用）
     var __seqIndexCache = new Map()
     // messageId→全文缓存（0.5.0 消息引用用）
@@ -840,6 +845,12 @@ window.__ModuleLoader__.load({
             try {
               if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(sessionId)
             } catch { /* fallthrough */ }
+            // 0.9.1：重放的消息带**新 seq**，被恢复的行必须解除 hidden，
+            // 同时 dock 的权威 marker 列表要重拉。
+            try { window.dispatchEvent(new Event(CHANGED_EVENT)) } catch { /* non-browser */ }
+            // 0.9.1：重放的消息带**新 seq**，被恢复的行必须解除 hidden；
+            // 同时 dock 的 marker 列表要按权威数据重算（restoreComplete 会变 true）。
+            for (const delay of [150, 700, 1600]) setTimeout(() => { if (__refreshSurface) __refreshSurface(sessionId) }, delay)
             const fresh = await fetch('/api/message-ops/messages?sessionId=' + encodeURIComponent(sessionId)).then((r) => (r.ok ? r.json() : null)).catch(() => null)
             if (fresh && fresh.ok) setMarkers(activeMarkers(fresh.messages || []))
           })
@@ -923,7 +934,7 @@ window.__ModuleLoader__.load({
       var rowsCache = { sid: null, rows: null, at: 0 }
       var norm = (x) => String(x || '').replace(/\s+/g, '')
       var fetchRows = (sid) => {
-        if (rowsCache.sid === sid && rowsCache.rows && Date.now() - rowsCache.at < 8000) return Promise.resolve(rowsCache.rows)
+        if (rowsCache.sid === sid && rowsCache.rows && Date.now() - rowsCache.at < 8000) return Promise.resolve(rowsCache)
         return fetch('/api/message-ops/messages?sessionId=' + encodeURIComponent(sid))
           .then((r) => (r.ok ? r.json() : null))
           .then((d) => {
@@ -943,11 +954,154 @@ window.__ModuleLoader__.load({
               .filter((m) => m && m.role === 'user')
               .map((m) => ({ seq: m.seq, sn: norm(m.snippet), raw: String(m.snippet == null ? '' : m.snippet) }))
               .filter((r) => r.sn && !injected(r.raw))
-            rowsCache = { sid: sid, rows: rows, at: Date.now() }
-            return rows
+            // 0.9.1：同时产出 node-key 查表索引（隐藏 transcript 用）
+            const idx = buildIndex(d)
+            rowsCache = { sid: sid, rows: rows, idx: idx, at: Date.now() }
+            return rowsCache
           })
-          .catch(() => rowsCache.sid === sid ? rowsCache.rows : null)
+          .catch(() => (rowsCache.sid === sid ? rowsCache : null))
       }
+
+      // ═══ 0.9.1 宿主 node-key ↔ 日志 seq 的精确映射 ═══════════════════════════
+      //
+      // 背景（浏览器实测 + 源码核实）：dsh 的 transcript **刻意不做 surface 折叠**。
+      // 官方 surface.d.ts:51-63 明写 "replacement copies stay model-only" ——
+      // 我们写的 surfaceOp replace 只折叠**模型 surface**（实测 393→13 节点），
+      // 被遮蔽的消息在人类 transcript 里**照常渲染且完全可见**，连 marker 本身
+      // 都不渲染（systemMessageDefinition 对 surfaceOp !== 'append' 直接 return null）。
+      // 所以要让回滚「看得见」，只能在渲染层处理。
+      //
+      // 好消息：每一行的 `data-chat-node-key` 形如 `<len>:<kind><id>`，而 <id>
+      // 就是日志事件的字段（user → messageId、assistant-step → `<turn>:<step>`、
+      // tool-call → callId、turn-* → turn 号），客户端本来就已经建了
+      // messageId → seq 索引（__seqIndexCache）。**精确查表，零启发式。**
+      //
+      // 旧实现用「40 字符前缀包含匹配」配对 DOM 与日志，实测 4 条里错 2 条
+      // （"继续" 命中了 "继续，…"），已整体删除。
+      var parseNodeKey = (k) => {
+        var m = /^(\d+):/.exec(k || '');
+        if (!m) return null;
+        var digits = m[1].length;
+        var kindLen = Number(m[1]);
+        var start = digits + 1;
+        if (!Number.isSafeInteger(kindLen) || kindLen <= 0 || k.length < start + kindLen) return null;
+        return { kind: k.slice(start, start + kindLen), id: k.slice(start + kindLen) };
+      };
+
+      /**
+       * 从 /api/message-ops/messages 的响应构建全部查表。
+       * 三条铁律：① 索引只认唯一 id；② 缺数据一律返回 undefined（调用方保持可见）；
+       *           ③ visible 集合只收显式 true。
+       */
+      var buildIndex = (payload) => {
+        var list = (payload && payload.messages) || []
+        // 0.9.1：回合页脚/过程条不是消息，用 turn/end 的 seq 定位（边界常落在 turn 内部，
+        // 用 turn/start 会漏判该回合的页脚）
+        var turnEnd = (payload && payload.turnEndSeq) || null;
+        var byMessageId = new Map();
+        var byTurnStep = new Map();
+        var byCallId = new Map();
+        var byTurn = new Map();
+        var visible = new Set();
+        var reverted = new Set();
+        var dupMessageId = 0
+        var dupByMessageId = new Map();
+        // 回合页脚/过程条锚到 turn/end 的 seq —— 那是**非消息**事件，永远不会出现在
+        // reverted 集合里，所以隐藏判据必须直接对 fence 比较，不能用集合成员。
+        var fences = Array.isArray(payload && payload.revertFences)
+          ? payload.revertFences.filter(function (n) { return Number.isSafeInteger(n); })
+          : [];
+        for (var i = 0; i < list.length; i++) {
+          var m = list[i];
+          if (!m || typeof m.seq !== 'number') continue;
+          if (m.id != null) {
+            var k = String(m.id);
+            // restore 是「重放」语义 → 原件与副本可能同 id 并存。
+            // 0.9.1：不再「保留最早」，而是收集**全部** seq，隐藏判据取「任一 seq 越过
+            // fence」。回放副本才是当前 surface 上的那条，用最早的 seq 判会让
+            // 「恢复后再回滚」漏藏（实测 fence=70、副本 seq=70、原件 seq=54）。
+            if (byMessageId.has(k)) {
+              dupMessageId++
+              const arr = dupByMessageId.get(k) || [byMessageId.get(k)]
+              arr.push(m.seq)
+              dupByMessageId.set(k, arr)
+              byMessageId.set(k, m.seq)   // 指向最新的
+            } else { byMessageId.set(k, m.seq) }
+            byMessageId.set(k, m.seq);
+          }
+          if (m.type === 'assistant/message' && m.turn != null && m.step != null) {
+            byTurnStep.set(m.turn + ':' + m.step, m.seq);
+          }
+          if (m.type === 'tool/call' && m.id != null) byCallId.set(String(m.id), m.seq);
+          if (m.turn != null && !byTurn.has(String(m.turn))) byTurn.set(String(m.turn), m.seq);
+          if (m.visible === true) visible.add(m.seq);
+          // 0.9.1：reverted 才是「该藏」的口径（见 index.js 的注释：visible 会误藏
+          // 所有非 surface 事件行，如 tool/call）
+          if (m.reverted === true) reverted.add(m.seq);
+        }
+        // turnEnd 优先：它对「该 turn 内一条消息都没有」的情况仍然有效
+        if (turnEnd) for (const k in turnEnd) if (Object.prototype.hasOwnProperty.call(turnEnd, k)) byTurn.set(k, turnEnd[k])
+        return { byMessageId, dupByMessageId, byTurnStep, byCallId, byTurn, visible, reverted, fences, dupMessageId, total: list.length };
+      };
+
+      /** node-key → { seq, all }（all = 同 id 的全部 seq，处理 restore 重放副本）。 */
+      var seqOfNodeKey = (key, idx) => {
+        var parsed = parseNodeKey(key);
+        if (!parsed || !idx) return null;
+        var id = parsed.id;
+        switch (parsed.kind) {
+          case 'input-message':            // user / steering / turn-trigger
+          case 'developer-message':
+          case 'trajectory-note': {
+            const hit = idx.byMessageId.get(id)
+            if (hit === undefined) return null
+            return { seq: hit, all: idx.dupByMessageId.get(id) || [hit] }
+          }
+          case 'assistant-step': {
+            const hit = idx.byTurnStep.get(id)
+            return hit === undefined ? null : { seq: hit, all: [hit] }
+          }
+          case 'tool-call': {
+            const hit = idx.byCallId.get(id)
+            return hit === undefined ? null : { seq: hit, all: [hit] }
+          }
+          case 'turn-tail':
+          case 'turn-process':
+          case 'turn-error':
+          case 'turn-max-tokens':
+          case 'model-retry': {
+            const hit = idx.byTurn.get(id)
+            return hit === undefined ? null : { seq: hit, all: [hit] }
+          }
+          default:
+            return null;                  // compaction / command / workflow-run 等不参与
+        }
+      };
+
+      /**
+       * 把 transcript 行按模型 surface 可见性打上 hidden。
+       * 用 `hidden="until-found"`（与宿主 useSearchableHidden 同款）：Ctrl+F 仍能搜到，
+       * 且宿主的分页锚点选择器 `[data-chat-paging-anchor]:not(:empty):not([hidden])`
+       * 会自动跳过这些行，滚动恢复不受影响。
+       *
+       * ⚠️ `seq == null` ⇒ **移除 hidden**（保持可见）。把「查不到」当成「被遮蔽」
+       *   是唯一会误藏用户内容的路径。
+       */
+      var applySurfaceVisibility = (root, idx) => {
+        if (!idx) return { hidden: 0, unresolved: 0, shown: 0 };
+        var rows = (root || document).querySelectorAll('[data-chat-node-key]');
+        var hidden = 0, unresolved = 0, shown = 0;
+        for (var i = 0; i < rows.length; i++) {
+          var row = rows[i];
+          var seq = seqOfNodeKey(row.getAttribute('data-chat-node-key'), idx);
+          if (seq === null) { unresolved++; row.removeAttribute('hidden'); continue; }
+          var isReverted = idx.fences.length ? idx.fences.some(function (f) { return seq >= f; }) : idx.reverted.has(seq)
+          if (isReverted) { hidden++; row.setAttribute('hidden', 'until-found'); }
+          else { shown++; row.removeAttribute('hidden'); }
+        }
+        return { hidden, unresolved, shown };
+      };
+
       // 用户消息锚点：优先官方 Sixlwa_userRow（含 .xzv4MW_actions），回退 flow-kind 属性
       // 锚点 = 每条用户消息自己的容器（一个块只算一次）：
       // 从官方动作行 .xzv4MW_actions 反查最近的消息容器，最贴近"一条消息"的粒度。
@@ -992,37 +1146,33 @@ window.__ModuleLoader__.load({
           btn.setAttribute('data-mops-unmatched', '1')
         }
       }
-      var assignSeqs = (sid, rows) => {
-        if (!rows) return
-        const blocks = userAnchors()
-        let ri = 0
-        var missed = 0
-        for (const b of blocks) {
+      var assignSeqs = (sid, cache) => {
+        const idx = cache && cache.idx
+        if (!idx) return
+        // 0.9.1：node-key 查表，替代旧的 40 字符前缀包含匹配（实测 4 条错 2 条）
+        for (const b of userAnchors()) {
           b.removeAttribute('data-mops-seq')
           b.removeAttribute('data-mops-unmatched')
-          const head = norm((b.innerText || '').slice(0, 240))
-          let hit = -1
-          for (let j = ri; j < rows.length; j++) {
-            const a = (rows[j].sn || '').slice(0, 40)
-            const b = (head || '').slice(0, 40)
-            if (a && b && (head.includes(a) || rows[j].sn.includes(b))) { hit = j; break }
-          }
-          if (hit >= 0) { b.setAttribute('data-mops-seq', String(rows[hit].seq)); ri = hit + 1 }
-          syncEnabled(b, b.querySelector && b.querySelector('.mopsUserRevert'))
-          if (false) {
-            // 0.9.0：配不上就**如实标记**而不是留一个点了才报错的装饰按钮。
-            // 已知局限：配对是前 40 字子串包含，模型自己写的摘要与宿主渲染文本
-            // 措辞漂移（实测 playwright/playright）就会失配。
-            missed++
+          const hit = seqOfNodeKey(b.getAttribute('data-chat-node-key'), idx)
+          const seq = hit === null ? null : hit.seq
+          if (seq === null || seq === undefined) {
             b.setAttribute('data-mops-unmatched', '1')
+            syncEnabled(b, b.querySelector && b.querySelector('.mopsUserRevert'))
+            continue
           }
+          b.setAttribute('data-mops-seq', String(seq))
+          syncEnabled(b, b.querySelector && b.querySelector('.mopsUserRevert'))
         }
-        return missed
       }
       // 按钮可用性在 assignSeqs 内部**同步**更新（与打标同一次循环）——
       // 之前放在 fetch 回调里做事后全局扫描，会与 DOM 注入/重排竞态，导致
       // 块已打上 seq 而按钮仍是禁用态（实测：block seq=[8,54]，按钮 disabled=true）。
-      var ensureAssign = (sid) => fetchRows(sid).then((rows) => assignSeqs(sid, rows))
+      // 按钮可用性与 transcript 隐藏都在这里统一落地（同一批数据，避免竞态）
+      var ensureAssign = (sid) => fetchRows(sid).then((cache) => {
+        assignSeqs(sid, cache)
+        if (cache && cache.idx) applySurfaceVisibility(document, cache.idx)
+        return cache
+      })
       // 0.7.0：点击时先**同步完成**配对（打标是异步 fetch 的结果，
       // 早先点在未打标的按钮上会静默失败 = 用户反馈的"点了没用"）。
       var runUserRevert = (btn, block) => {
@@ -1032,15 +1182,15 @@ window.__ModuleLoader__.load({
         Promise.resolve()
           .then(() => ensureAssign(sid))
           .then(() => fetchRows(sid))
-          .then((rows) => {
+          .then((cache) => {
+          const rows = cache && cache.rows
+          // 0.9.1：seq 来自 node-key 精确查表，**不再**做文本前缀匹配验证
+          // （旧的前缀包含匹配实测 4 条错 2 条 —— "继续" 命中 "继续，…"）。
           const seq = Number(block.getAttribute('data-mops-seq'))
-          const head = norm((block.innerText || '').slice(0, 240))
           const row = rows && rows.find((r) => r.seq === seq)
-          const a2 = (row && row.sn || '').slice(0, 40)
-          const b2 = (head || '').slice(0, 40)
-          if (!row || !head || !(head.includes(a2) || row.sn.includes(b2))) {
+          if (!row) {
             ensureAssign(sid)
-            notifyDone(__t('errorPrefix') + 'revert target verification failed', 'error')
+            notifyDone(__t('errorPrefix') + (__t('revert.unresolved') || 'revert target verification failed'), 'error')
             return
           }
           btn.disabled = true
@@ -1058,6 +1208,10 @@ window.__ModuleLoader__.load({
               try {
                 if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(sid)
               } catch { /* 视图重建失败不阻断 */ }
+              // 0.9.1：视图重建后重新拉权威可见性并隐藏被遮蔽的行。
+              // openSession 会重挂 DOM，旧节点上的 hidden 属性随之失效，必须重刷。
+              if (rowsCache) rowsCache.at = 0
+              for (const delay of [150, 700, 1600]) setTimeout(() => { if (__refreshSurface) __refreshSurface(sid) }, delay)
             })
             .catch((reason) => {
               notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
@@ -1089,13 +1243,22 @@ window.__ModuleLoader__.load({
         host.appendChild(btn)
         return btn
       }
+      __refreshSurface = (sid) => {
+        const id = sid || __currentSessionId
+        if (!id) return
+        if (rowsCache) rowsCache.at = 0            // 强制重取权威数据
+        try { fetchRows(id).then((cache) => { if (cache && cache.idx) applySurfaceVisibility(document, cache.idx) }) } catch { /* noop */ }
+      }
       var scan = () => {
         try {
           const sid = __currentSessionId
           if (!sid) return
           const blocks = userAnchors()
           for (const b of blocks) ensureBtn(b)
-          if (blocks.some((b) => !b.hasAttribute('data-mops-seq'))) ensureAssign(sid)
+          // 0.9.1：**始终**刷新（原先只在按钮未打标时刷）——
+          // 打标后 transcript 再变化（openSession 重建 / 分页 / restore 重放）
+          // 就再也不会重算隐藏，导致「界面停在旧状态，必须重载页面才对」。
+          ensureAssign(sid)
         } catch { /* 注入失败不影响会话 */ }
       }
       // 触发：hover / 滚动 / DOM 变化 / 变更事件

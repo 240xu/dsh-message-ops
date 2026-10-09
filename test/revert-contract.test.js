@@ -15,8 +15,8 @@ import { zstdCompressSync } from 'node:zlib'
 import { createRequire } from 'node:module'
 import { join, dirname } from 'node:path'
 
-import { decodeFrames, parseRows } from '/data/data/com.termux/files/home/dsh-plugins-src/dsh-seqguard/lib/seqcore.js'
-import { officialValidate } from '/data/data/com.termux/files/home/dsh-plugins-src/dsh-seqguard/lib/v4gate.mjs'
+import { decodeFrames, parseRows } from '/data/data/com.termux/files/home/dsh-plugins-src/sessionfix/lib/seqcore.js'
+import { officialValidate } from '/data/data/com.termux/files/home/dsh-plugins-src/sessionfix/lib/v4gate.mjs'
 import {
   planNoticeWindow, noticeWindowPreamble, noticeWindowPostamble,
   buildMarkerEvent, buildRestoreNoticeEvent, buildReplayEvent, planRestore, restoreProgress,

@@ -164,6 +164,29 @@ export function newSessionId() {
 }
 
 /** 从事件流提取消息级列表（user/assistant/system message + tool/call 摘要）。 */
+/**
+ * turn 号 → 该 turn 首/末事件 seq 的映射。
+ *
+ * 0.9.1：宿主把「回合页脚/过程条/错误」渲染成 node-key 为 `9:turn-tail<turn>` /
+ * `12:turn-process<turn>` / `10:turn-error<turn>` 的行 —— 它们的 id 就是 turn 号，
+ * 不带 seq。回滚边界落在某个 turn 之后时，这些行也必须一起藏，否则会留下
+ * 「孤立的分支/复制按钮」，视觉上像"只回滚了一半"。
+ *
+ * @returns {{starts: Map<number, number>, ends: Map<number, number>}}
+ */
+export function turnBounds(events) {
+  const starts = new Map();
+  const ends = new Map();
+  for (const e of events) {
+    if (!e || typeof e.seq !== "number") continue;
+    const t = e.data && e.data.turn;
+    if (!Number.isSafeInteger(t)) continue;
+    if (e.type === "turn/start") starts.set(t, e.seq);
+    else if (e.type === "turn/end") ends.set(t, e.seq);
+  }
+  return { starts, ends };
+}
+
 export function listMessages(events) {
   const messages = [];
   for (const e of events) {
@@ -193,13 +216,18 @@ export function listMessages(events) {
           ? e.data.restoresSeq : null,
         time: e.time ?? null,
         turn: (e.data && e.data.turn) ?? null,
+        // 0.9.1：assistant 节点的宿主 node-key 是 `14:assistant-step<turn>:<step>`，
+        // 没有 step 就无法把渲染行映射回日志 seq → 回滚时助手回答藏不掉。
+        step: (e.data && e.data.step) ?? null,
       });
     } else if (e.type === "tool/call") {
       const d = e.data || {};
       const name = d.name || (d.call && d.call.name) || "tool";
       messages.push({
         seq: e.seq, type: "tool/call", role: "tool", snippet: `[tool] ${name}`,
-        time: e.time ?? null, turn: d.turn ?? null,
+        time: e.time ?? null, turn: d.turn ?? null, step: d.step ?? null,
+        // 0.9.1：工具节点的宿主 node-key 是 `9:tool-call<callId>`
+        id: d.callId ?? null,
       });
     }
   }
