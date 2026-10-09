@@ -553,3 +553,49 @@ marker 自身都不渲染（`systemMessageDefinition.buildViewNode` 对 `surface
   所以「恢复后再回滚」的复合场景下，重放副本的行可能不被识别为 user 行。
 - `restore` 后界面需要触发刷新才更新（已接 `__refreshSurface` 钩子 + MutationObserver，
   但极少数情况下仍需重载页面）。
+
+---
+
+## 0.9.3 · `/undo` —— 复刻 opencode 的招牌交互
+
+「我说的那句话不对」→ 打 `/undo` → 消息从 transcript 消失 + **原文回填输入框**。
+
+走**官方斜杠管线**（`ctx.inputTriggers.registerSource`），不自己劫持键盘，
+所以菜单分组、搜索、Enter 裁决、composer 状态机全由宿主负责。
+
+```js
+ctx.inject(['inputTriggers'], (sub) => {
+  doRegisterUndoSlash(ctx, sub.inputTriggers || sub)   // ⚠️ 见下方坑 2
+})
+```
+
+### 注册路径踩过的四个坑
+
+1. **`candidates` 必须返回 Promise**。宿主在 `InputTriggerController.fetchCandidates`
+   里直接 `source.candidates(...).then(...)`，同步返回数���会抛
+   `source.candidates(...).then is not a function`，**整个菜单静默失效**。
+2. **cordis `inject` 回调收到的是「注入命名空间」，服务在其同名字段下**
+   （与本文件 `sub.uiWorkspace || sub` 同模式）。把 `sub` 直接当服务用会抛
+   `cannot get property "registerSource" without inject`。
+3. **`rowsCache` 是注入器闭包私有的**（`installUserRevertInjector()` 内）。
+   `/undo` 的 `onPick` 在模块级作用域，直接引用会 ReferenceError，
+   表现为「点菜单毫无反应」。需要 `__peekRowsCache()` 出口。
+4. **`__currentSessionId` 来自 DOM dataset，可能带 `session-` 前缀**，
+   而 API 只要裸 uuid → 请求静默失败。
+
+### 目标必须挑 surface 上的那条
+
+`restore` 是「重放」语义 → 原件被遮蔽、副本带**新 seq** 落在日志尾部。
+无脑取最后一条会挑到副本，而副本不在模型 surface 上，服务端以
+`surface replace: start seq N not found in surface` 拒绝（实测）。
+回滚的前提就是「目标在 surface 上」，所以先筛 `visible`。
+
+### 实测
+
+```
+composer 输入 /und → 官方菜单出现「回滚上一条消息 undo 移除最后一条用户消息，原文回填输入框」
+点击 → 目标 = seq 8（surface 上的那条，不是重放副本）
+      → 转��成功，dock 计数 13
+      → 原文「分配几个子代理把模型广场的模型价格什么的做好…」回填进 composer ✅
+      → transcript：24 行中 22 行 hidden，被回滚消息从正文消失 ✅
+```

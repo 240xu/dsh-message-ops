@@ -136,6 +136,13 @@ window.__ModuleLoader__.load({
       'slot.quote': 'Quote to composer',
       'quote.done': 'Quoted into composer',
       'quote.unavailable': 'Quote unavailable (composer locked or no full text)',
+      'undo.label': '回滚上一条消息',
+      'undo.desc': '移除最后一条用户消息，原文回填输入框',
+      'undo.done.undo': '已回滚上一条消息',
+      'undo.done.redo': '已恢复上一条被回滚的消息',
+      'undo.none': '没有可回滚的消息',
+      'redo.label': '恢复上一条被回滚的消息',
+      'redo.desc': '把回滚掉的消息重新放回对话',
       'menu.ops': 'Message ops',
     }
 
@@ -148,7 +155,11 @@ window.__ModuleLoader__.load({
     // 之前 restore 路径里直接调 scan()，但 scan 定义在注入器的闭包里，
     // dock 组件根本取不到 —— `typeof scan === 'function'` 静默跳过了，
     // 结果「恢复后消息回来了但仍被藏 / dock 计数不变」，必须重载页面才对。
-    var __refreshSurface = null   // 0.6.0：会话视图会话 id（RevertDock/MsgSlotActions 刷新）
+    var __refreshSurface = null
+    // 0.9.3：注入器闭包内 rowsCache 的只读出口。
+    // rowsCache 声明在 installUserRevertInjector() 内（闭包私有），而 /undo 的
+    // onPick 在模块级作用域 —— 直接引用会 ReferenceError，表现为点菜单毫无反应。
+    var __peekRowsCache = null   // 0.6.0：会话视图会话 id（RevertDock/MsgSlotActions 刷新）
     // messageId→seq 索引缓存（每会话一次拉取；0.3.0 assistant-actions 槽用）
     var __seqIndexCache = new Map()
     // messageId→全文缓存（0.5.0 消息引用用）
@@ -932,6 +943,7 @@ window.__ModuleLoader__.load({
       if (window.__MOPS_USER_REVERT_INSTALLED) return
       window.__MOPS_USER_REVERT_INSTALLED = true
       var rowsCache = { sid: null, rows: null, at: 0 }
+      __peekRowsCache = () => rowsCache
       var norm = (x) => String(x || '').replace(/\s+/g, '')
       var fetchRows = (sid) => {
         if (rowsCache.sid === sid && rowsCache.rows && Date.now() - rowsCache.at < 8000) return Promise.resolve(rowsCache)
@@ -952,7 +964,7 @@ window.__ModuleLoader__.load({
             const injected = (raw) => /^<system-reminder|current\s+runtime\s+context|^<system-Reminder/i.test(String(raw || ''))
             const rows = ((d && d.messages) || [])
               .filter((m) => m && m.role === 'user')
-              .map((m) => ({ seq: m.seq, sn: norm(m.snippet), raw: String(m.snippet == null ? '' : m.snippet) }))
+              .map((m) => ({ seq: m.seq, sn: norm(m.snippet), raw: String(m.snippet == null ? '' : m.snippet), fullText: m.fullText ?? null, visible: m.visible !== false }))
               .filter((r) => r.sn && !injected(r.raw))
             // 0.9.1：同时产出 node-key 查表索引（隐藏 transcript 用）
             const idx = buildIndex(d)
@@ -1093,9 +1105,15 @@ window.__ModuleLoader__.load({
         var hidden = 0, unresolved = 0, shown = 0;
         for (var i = 0; i < rows.length; i++) {
           var row = rows[i];
-          var seq = seqOfNodeKey(row.getAttribute('data-chat-node-key'), idx);
-          if (seq === null) { unresolved++; row.removeAttribute('hidden'); continue; }
-          var isReverted = idx.fences.length ? idx.fences.some(function (f) { return seq >= f; }) : idx.reverted.has(seq)
+          // ⚠️ seqOfNodeKey 返回 `{ seq, all }`（all = 同 id 的全部 seq，
+          //    处理 restore 重放副本），不是标量。曾经在多 seq 改造时漏改这里，
+          //    导致 `{...} >= f` 恒为 false → **静默一个都不藏，也不报错**。
+          var hit = seqOfNodeKey(row.getAttribute('data-chat-node-key'), idx);
+          if (hit === null) { unresolved++; row.removeAttribute('hidden'); continue; }
+          var cands = (hit.all && hit.all.length) ? hit.all : [hit.seq];
+          var isReverted = idx.fences.length
+            ? cands.some(function (q) { return idx.fences.some(function (f) { return q >= f; }); })
+            : cands.some(function (q) { return idx.reverted.has(q); });
           if (isReverted) { hidden++; row.setAttribute('hidden', 'until-found'); }
           else { shown++; row.removeAttribute('hidden'); }
         }
@@ -1396,6 +1414,147 @@ window.__ModuleLoader__.load({
       } catch { /* namespace already registered: keep existing copy */ }
     }
 
+
+    // ═══ 0.9.3 /undo —— opencode 招牌交互 ═════════════════════════════════════
+    //
+    // 「我说的那句话不对」→ 一个命令 → 消息从 transcript 消失 + 原文回输入框。
+    // 走**官方斜杠命令管线**（`ctx.inputTriggers.registerSource`），不自己劫持键盘，
+    // 因此：菜单分组、搜索、Enter 裁决、composer 状态机全部由宿主负责。
+    //
+    // 契约（dsh-client-ui-input-trigger/lib/types/client/contract.d.ts）：
+    //   registerSource({ trigger:'/', name, candidates(session,req), onPick(pick),
+    //                     matchEnter?(session,line,signal,envelope) })
+    //   PickOutcome = {claim} | {insert} | {text,continue?} | 'handled' | undefined
+    //   undefined = 「不是我的」，交回管线；'handled' = 已消费，**不要**当成消���发出去。
+    var UNDO_CANDIDATES = [
+      { name: 'undo', value: 'undo', icon: 'undo' },
+      { name: 'redo', value: 'redo', icon: 'redo' },
+    ]
+    var __undoSourceName = 'message-ops'
+
+    /**
+     * 找到当前会话里最后一条**可回滚**的用户消息。
+     *
+     * ⚠️ 必须挑 surface 上的那一条。`restore` 是「重放」语义 → 原件被遮蔽、副本带**新 seq**
+     * 落在日志尾部。若无脑取最后一条，就会挑到那个副本，而副本不在模型 surface 上，
+     * 服务端会以 `surface replace: start seq N not found in surface` 拒绝（实测）。
+     * 回滚的前提就是「目标在 surface 上」，所以先筛 visible。
+     */
+    var lastRevertable = () => {
+      const cache = __peekRowsCache ? __peekRowsCache() : null
+      if (!cache || !Array.isArray(cache.rows)) return null
+      for (var i = cache.rows.length - 1; i >= 0; i--) {
+        var r = cache.rows[i]
+        if (r && r.seq != null && r.visible) return r
+      }
+      return null
+    }
+
+    /** 执行 undo/redo。返回 true 表示确实动过盘。 */
+    /** __currentSessionId 来自 DOM dataset，可能带 `session-` 前缀；API 只要裸 uuid。 */
+    var bareSessionId = (id) => String(id || '').replace(/^session-/, '')
+    var runUndoRedo = (kind) => {
+      const sid = bareSessionId(__currentSessionId)
+      if (!sid) return false
+      const target = lastRevertable()
+      if (!target) {
+        notifyDone(__t('undo.none') || '没有可回滚的消息', 'error')
+        return false
+      }
+      const verb = kind === 'redo' ? 'restore' : 'revert'
+      fetch('/api/message-ops/' + verb, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: sid, seq: target.seq }),
+      })
+        .then(async (res) => {
+          let data = {}
+          try { data = await res.json() } catch { /* keep {} */ }
+          if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status))
+          notifyDone(kind === 'redo' ? __t('undo.done.redo') : __t('undo.done.undo'))
+          // opencode 语义：回滚后**原文回输入框**，用户可改后重发
+          if (kind !== 'redo' && target.fullText && __inputActions && typeof __inputActions.setDraft === 'function') {
+            try { __inputActions.setDraft(target.fullText) } catch { /* 回填失败不阻断 */ }
+          }
+          try { window.dispatchEvent(new Event(CHANGED_EVENT)) } catch { /* non-browser */ }
+          try {
+            if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(sid)
+          } catch { /* 视图重建失败不阻断 */ }
+          if (__peekRowsCache) { const c = __peekRowsCache(); if (c) c.at = 0 }
+          for (const delay of [150, 700, 1600]) setTimeout(() => { if (__refreshSurface) __refreshSurface(sid) }, delay)
+        })
+        .catch((reason) => {
+          notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
+        })
+      return true
+    }
+
+    /** 注册 /undo /redo 到官方斜杠管线。服务缺失时安静 no-op。 */
+    var __undoRegistered = false
+    var doRegisterUndoSlash = (ctx, it) => {
+      if (__undoRegistered || !it || typeof it.registerSource !== 'function') return
+      __undoRegistered = true
+      try {
+        ctx.effect(() => it.registerSource({
+          trigger: '/',
+          name: __undoSourceName,
+          order: 20,
+          showGroupTitle: true,
+          // ⚠️ 必须返回 **Promise**：宿主在 InputTriggerController.fetchCandidates 里
+          //    直接 `source.candidates(...).then(...)`，同步返回数组会抛
+          //    `source.candidates(...).then is not a function`，整个菜单静默失效。
+          candidates: async (session, req) => {
+            const q = String((req && req.query) || '').trim().toLowerCase()
+            return UNDO_CANDIDATES
+              .filter((c) => !q || c.name.includes(q))
+              .map((c) => ({
+                name: c.name,
+                icon: c.icon,
+                label: c.name === 'undo'
+                  ? (__t('undo.label') || '回滚上一条消息')
+                  : (__t('redo.label') || '恢复上一条被回滚的消息'),
+                description: c.name === 'undo'
+                  ? (__t('undo.desc') || '移除最后一条用户消息，原文回填输入框')
+                  : (__t('redo.desc') || '把回滚掉的消息重新放回对话'),
+                value: c.value,
+              }))
+          },
+          onPick: (pick) => {
+            const v = pick && pick.candidate && pick.candidate.value
+            if (v !== 'undo' && v !== 'redo') return undefined
+            runUndoRedo(v)
+            return 'handled'
+          },
+          // Enter 直接执行：`/undo` 不必先在菜单里选中
+          matchEnter: (session, line) => {
+            const t = String(line || '').trim().toLowerCase()
+            if (t !== '/undo' && t !== '/redo') return undefined
+            runUndoRedo(t === '/redo' ? 'redo' : 'undo')
+            return 'handled'
+          },
+        }))
+      } catch (e) {
+        __undoRegistered = false
+        if (window.__MOPS_DEBUG) console.warn('[message-ops] /undo 注册失败:', e)
+      }
+    }
+
+    var registerUndoSlash = (ctx) => {
+      // ⚠️ cordis 的 inject 回调**第一个参数是服务本身**，不是 ctx。
+      //    早先写成 `registerUndoSlash(sub.ctx || sub)` → 在服务对象上找 .get
+      //    必然是 undefined → 静默不注册（表现为 /undo 根本不出现）。
+      const it = typeof ctx.get === 'function' ? ctx.get('inputTriggers') : null
+      if (it) { doRegisterUndoSlash(ctx, it); return }
+      try {
+        // ⚠️ cordis inject 回调收到的是**注入命名空间**，服务在其同名字段下
+        //    （与本文件 `ctx.inject(['uiWorkspace'], sub => sub.uiWorkspace || sub)` 同模式）。
+        //    直接把 sub 当服务用会抛 `cannot get property "registerSource" without inject`。
+        ctx.inject(['inputTriggers'], (sub) => {
+          doRegisterUndoSlash(ctx, sub && (sub.inputTriggers || sub))
+        })
+      } catch (e) {
+      }
+    }
+
     function apply(ctx) {
       __sessionsSvc = ctx.get('sessions')
       __uiWorkspace = typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : null
@@ -1405,6 +1564,7 @@ window.__ModuleLoader__.load({
       if (!__sessionsSvc) {
         ctx.inject(['sessions'], (sub) => { __sessionsSvc = sub.sessions })
       }
+      registerUndoSlash(ctx)
       adoptLocale(ctx.get('locale'), ctx)
       if (!__locale) {
         ctx.inject(['locale'], (sub) => {
