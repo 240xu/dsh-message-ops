@@ -641,3 +641,106 @@ composer 输入 /und → 官方菜单出现「回滚上一条消息 undo 移除�
 修复前：  正文几乎空白（截图）
 修复后：  113 行 → 可见 67 / 隐藏 46，可见字符 36,851
 ```
+
+---
+
+## 历史事故记录（从源码迁移）
+
+一次性事故复盘 / 已过时的实现说明，从 `src/*.js` 搬到这里。行号 = **基线 `cff530a`（0.10.0）的原行号**；源码处只留一行指针。
+
+**未搬（仍是当前约束，留在源码）**：`ops-core.js` 信任围栏三层论证、`buildReplayEvent` 的 turnStep 教训、`diskSurfaceNodes` vs `diskVisibleNodes`、`replaceShape` 写端拼写探测；`index.js` 的 `turnEndSeq` 定位注释（解释紧邻代码为何锚 turn/end 而非 turn/start，README「三个踩过的坑 #2」只有结论摘要）；`client.js` 的 `inputTriggers.registerSource` PickOutcome 契约、`afterWrite(rawSid)` 必须带 `session-` 前缀、`applySurfaceVisibility` 的 `seq == null ⇒ 移除 hidden`、不要把 `_flowItem` 当兜底、`injected` 正则「id 后必须跟得上具体形态 / 没证据就不猜」、`setDraft` 与藏行红线；`mcp-skill-hub` 的 `exports` / `return module.exports`。
+
+### #1 `src/client.js:2-14` · 客户端模块头（含已过时的「整页刷新」）
+
+```
+dsh-message-ops 客户端：会话头部按钮 + 共享操作对话框 + 侧栏行菜单项。
+
+一个对话框承载三种操作（回滚 / 删除 / 分支）：
+  - 拉取 GET /api/message-ops/messages 展示消息级列表（可见性已标注）
+  - 回滚/删除为破坏性操作：需勾选风险确认（回滚仍可通过再次发送恢复，
+    删除为遮蔽语义；日志永远 append-only，原事件保留）
+  - 分支为唯一非破坏操作：无需确认，成功后提示新会话 id 并刷新列表
+回滚/删除成功后整页刷新（surface 变化需要会话重渲染）。
+
+结构照抄 @huanlin/dsh-plugin-session-delete 的成熟模式：slots.inject
+延迟注册（宿主晚声明也不白屏）、locale 服务 zh/en、DOM 注入侧栏菜单。
+```
+
+> ⚠️ 「整页刷新」这句**已经过时**：0.5.7 起成功路径是
+> `notifyDone` + `emitChanged()` + `openSession()` + `150/700/1600ms` 三连
+> `__refreshSurface`，不再 `location.reload`。
+
+### #2 `src/client.js:1024-1025` · 0.6.0「absolute 覆盖压字」教训
+
+```
+0.6.0 的教训（用户实测反馈）：absolute 覆盖在气泡上 = 压住文字、布局乱；
+且 opacity:0 + :hover 在触屏上永远不显形（点不了）。
+```
+
+→ 0.7.0 的解法是把按钮 append 进官方动作行 `.xzv4MW_actions`，可见性继承宿主。
+
+### #3 `src/client.js:1074-1097` · `injected` 正则两轮事故 + 120 份日志普查
+
+**0.9.0 两个实机 bug**（浏览器实测：4 个按钮 `data-mops-seq` 全为 `null`，点击必失败）：
+
+```
+① 正则跑在 norm() 之后的串上，而 norm 是 replace(/\s+/g,'') —— 删掉**全部**空白，
+   `current\s+runtime\s+context` 永远匹配不上 → runtime-context 伪行漏进配对。
+   修法：injected() 改判**原始 snippet**。
+② 过滤了 `m.visible !== false`，但宿主聊天视图**不施加**遮蔽模型，照常渲染
+   被回滚遮蔽的消息 → 配对候选与 DOM 块零交集。
+   修法：DOM 配对必须覆盖全部 user 行（含遮蔽态）。
+   注意：对话框的「可回滚目标」列表仍应过滤 visible（那是另一套语义）。
+```
+
+**0.9.6 通知行污染**：
+
+```
+原先只排 system-reminder / runtime context 两种，但宿主把 `background job …`、
+`Agent … sent a message:`、`Background subagent … finished`、`[model changed: …]`
+也记成 role=user，于是 /undo 会把**通知行**当目标 —— 回滚范围与回填文本都变成
+通知内容（378 会话普查：38 个 10% 命中；实测 2188f4ac 目标是
+"Background subagent f09a18f6… finished…"，而用户那句在 seq829）。
+稳妥做法本该在服务端打 injected 标志，先在客户端补齐正则。
+```
+
+**120 份日志普查样本**（正则按真实样本收紧，不靠猜）：
+
+```
+ 256 × <system-reminder>…        128 × background job bash-358 (…
+  38 × [model changed: …         26 × Background subagent <uuid>
+  21 × Agent <uuid> sent a message:
+```
+
+### #4 `src/client.js:1250-1256` · 隐藏判据「revertFences → visible → shadowed」演进史
+
+```
+演进：revertFences 塌缩（离散区间→min，全藏）→ visible（模型 surface，
+live 路径下 tool/call 全藏）→ 现在的 shadowed（恒定、与会话活跃无关）。
+
+0.9.4 判据（当时）：**模型 surface**。此前用 revertFences 塌缩成
+`seq >= min(fences)`，在一个有 19 个**离散** marker 的会话里
+min fence=10 → seq>=10 全藏 → 4792/4793 全被隐藏 → 正文几乎空白
+（截图复现）。改用 visible 后与宿主 visibleCount 精确吻合。
+```
+
+结论（留在源码的一行）：**0.9.6 起藏行判据 = `shadowed`（replace 区间）**。
+
+### #5 `src/client.js:1753-1755` · 「5 个入口只有 2 个回填」
+
+```
+0.9.6 统一出口 —— 此前 5 个回滚/恢复入口里只有 2 个回填
+（对话框 :403 与 /undo :1495），悬停回滚按钮、AI 时钟按钮、dock Restore、
+/redo **全部不回填**，表现正是「回滚成功了但消息框是空的」。
+```
+
+### 已在本 README 其它章节（源码同步压缩成指针，未新增重复内容）
+
+| 源码位置（原行号） | 已有章节 |
+|---|---|
+| `src/client.js:404-408` 分支磁盘回落语义错误 | 「为什么不重复造轮子（0.9.0 的取舍）」 |
+| `src/client.js:1116-1131` node-key 映射背景长文（`surface.d.ts:51-63`、40 字符前缀事故） | 「0.9.1 / 0.9.2 · 回滚「真的生效了」」 |
+| `src/index.js:1-23` 模块头里的 0.9.0 分支/导出移除段 | 「为什么不重复造轮子（0.9.0 的取舍）」 |
+| `src/index.js:336-340` `revertFences` 塌缩复盘 | 「0.9.4 · 修「正文几乎空白」」 |
+| `src/ops-core.js:551-557` 0.5.7 磁盘路径复盘 | 「0.5.7 · 第四层根因：store-miss 会话的磁盘追加路径」 |
+

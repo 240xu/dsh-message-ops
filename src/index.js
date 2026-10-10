@@ -1,24 +1,8 @@
 /**
- * dsh-message-ops 服务端：消息回滚 / 消息删除 / 消息分支 / 导出 / 回滚恢复
- * 的 HTTP 路由 + Agent 工具 message_ops。
- *
- * 五操作一条龙（同名插件，一个注入点）：
- *   POST /api/message-ops/revert   回滚：surface replace 遮蔽 targetSeq..末尾
- *   POST /api/message-ops/delete   删除：surface replace 遮蔽单条 seq
- *   GET  /api/message-ops/messages 消息列表（磁盘真相 + 可见性标注）
- *   POST /api/message-ops/restore  回滚恢复：重放被遮蔽的 user/assistant 消息
- *
- * 回滚/删除走 DSH 原生 surface replace（append-only，日志完整可恢复；
- * 约束由引擎 assertProvenance 校验，违规如实上报 409）。
- * 运行中的会话一律拒绝（409），由用户先停止再操作。
- *
- * Agent 工具：action revert/delete/list/restore 共用 HTTP 同一套
- *
- * 分支与导出不属本插件：dsh 官方已有 session/fork（任意 atSeq，且会补 fork closers）
- * 与 /api/session.export（ZIP 归档）。0.9.0 移除了本插件的磁盘分支与 Markdown 导出 ——
- * 前者语义有偏差（缺 isSeeded / inheritedEventCount / closers），后者零 UI 入口。
- * 核心逻辑（src/ops-core.js）。工具注册是容错的——ctx 里没有 tools 服务、
- * 或 @deepseek-ai/dsh-tools 包不可解析时，只跳过工具注册，不影响 HTTP。
+ * dsh-message-ops 服务端：HTTP 路由（revert / delete / messages / restore）+ Agent
+ * 工具 message_ops，核心逻辑在 src/ops-core.js；工具注册容错（缺 services 只跳过）。
+ * 走 DSH 原生 surface replace（append-only，引擎 assertProvenance 校验，违规 409），
+ * 运行中的会话一律 409。分支/导出已归官方（0.9.0 移除），见 README「为什么不重复造轮子」。
  * @module dsh-message-ops
  */
 
@@ -333,11 +317,8 @@ async function buildDerived(logPath) {
     }));
   }
 
-  // 0.9.4：原先这里发 `revertFences`（= 未恢复 marker 的 range.start 列表）和
-  // 逐条 `m.reverted = seq >= 某个 fence`。**两样都已删除**，因为它们把 19 个
-  // **离散** marker 区间塌缩成「seq >= 最小值」，在一个会话里导致
-  // 4792/4793 条被判为已回滚 → 客户端全藏 → 正文几乎空白（截图复现）。
-  // 正确判据是 `m.visible`（模型 surface），实测与下面的 visibleCount 精确吻合。
+  // 0.9.4 撤掉 `revertFences` / `m.reverted`（离散区间塌缩成 seq>=min → 全藏）
+  // 的复盘见 README「0.9.4 · 修「正文几乎空白」」。
   // 0.9.1：回合页脚/过程条的 node-key id 就是 turn 号，而它们**不是消息**，
   // 无法用「首个带 turn 字段的消息」定位（该 turn 内可能一条消息都没有，
   // 实测 turn 2 就映射不到）。这里直接给 turn/start 的 seq 映射表。

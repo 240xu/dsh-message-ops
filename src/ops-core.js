@@ -516,11 +516,8 @@ export function isJsonContentType(req) {
 // ---------------------------------------------------------------------------
 // 0.5.7 · 磁盘路径（lazy-view 会话不进对象层时的回退）
 // ---------------------------------------------------------------------------
-// 实机第四层根因：视图打开 ≠ 对象层有会话（lazy-view 只读盘渲染）。官方服务端
-// 没有 retain/using 面，故 store-miss 时改为**直接向日志追加 zstd 帧**——与
-// 持久层 JsonlSessionPersistence.appendLines 等价（encode → open('a') →
-// write+sync+失败回滚），事件字段逐项镜像引擎写出的金标准（见 README0.5.7）。
-// 磁盘会话的视图本来就按帧重读，追加即可见；live 会话仍走引擎路径。
+// store-miss 时**直接向日志追加 zstd 帧**（字段逐项镜像引擎金标准），磁盘会话的
+// 视图按帧重读、追加即可见；live 会话仍走引擎路径。复盘见 README「0.5.7」。
 
 /** 事件类型是否为 surface 节点（message 类；step/end、turn/end 等结构性事件不是）。 */
 export function isSurfaceMessageType(type) {

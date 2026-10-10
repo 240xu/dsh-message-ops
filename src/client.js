@@ -1,16 +1,8 @@
 /* global window, document, fetch, navigator */
 /**
  * dsh-message-ops 客户端：会话头部按钮 + 共享操作对话框 + 侧栏行菜单项。
- *
- * 一个对话框承载三种操作（回滚 / 删除 / 分支）：
- *   - 拉取 GET /api/message-ops/messages 展示消息级列表（可见性已标注）
- *   - 回滚/删除为破坏性操作：需勾选风险确认（回滚仍可通过再次发送恢复，
- *     删除为遮蔽语义；日志永远 append-only，原事件保留）
- *   - 分支为唯一非破坏操作：无需确认，成功后提示新会话 id 并刷新列表
- * 回滚/删除成功后整页刷新（surface 变化需要会话重渲染）。
- *
- * 结构照抄 @huanlin/dsh-plugin-session-delete 的成熟模式：slots.inject
- * 延迟注册（宿主晚声明也不白屏）、locale 服务 zh/en、DOM 注入侧栏菜单。
+ * 一个对话框承载回滚 / 删除 / 分支三种操作；日志 append-only，遮蔽可恢复。
+ * 结构照抄 @huanlin/dsh-plugin-session-delete。事故复盘见 README「历史事故记录」#1。
  */
 window.__ModuleLoader__.load({
   id: '@240xu/dsh-message-ops',
@@ -393,11 +385,8 @@ window.__ModuleLoader__.load({
         setBusyMsg(t('busy.' + (mode === 'revert' || mode === 'delete' ? mode : 'branch')))
         setState('busy'); setError(null)
         if (mode === 'branch') {
-          // 0.9.0：分支**只走官方** sessions.fork({atSeq})。
-          // 原先有一条「官方失败 → 磁盘 applyBranch」的回落，但那个实现语义是错的：
-          // 它删掉 isSeeded（官方 fork 设 true）、不写 inheritedEventCount、
-          // 也不调 buildForkSeed 补 step/turn closers → 产出的子会话边界可能悬空。
-          // 官方 fork 失败通常意味着源会话正在运行，正确做法是拒绝而非绕过引擎写盘。
+          // 0.9.0：分支**只走官方** sessions.fork({atSeq})；失败即拒绝（源会话多半在
+          // 运行），不再回落写盘 —— 被删的磁盘 applyBranch 语义复盘见 README「为什么不重复造轮子」。
           const forkPath = pickForkPath(__sessionsSvc)
           if (forkPath.kind !== 'official') {
             setError(t('fork.unavailable'))
@@ -1011,11 +1000,9 @@ window.__ModuleLoader__.load({
     }
 
     // --- 0.7.0 用户消息「回滚」按钮（DOM 注入，挂在官方动作行内）-------------------
-    // 0.6.0 的教训（用户实测反馈）：absolute 覆盖在气泡上 = 压住文字、布局乱；
-    // 且 opacity:0 + :hover 在触屏上永远不显形（点不了）。
     // 官方用户消息的动作行 = .xzv4MW_actions（含 Copy，height28，位于消息下方 16px），
-    // 可见性由宿主 [data-actions-reveal] 控制。0.7.0：把按钮 append 进该行，
-    // 与 Copy 同级同层，可见性天然继承宿主动作行（不再自己玩 hover）。
+    // 可见性由宿主 [data-actions-reveal] 控制。把按钮 append 进该行、与 Copy 同级同层，
+    // 可见性天然继承宿主动作行（不再自己玩 hover）。0.6.0 的 absolute 覆盖教训见 README「历史事故记录」#2。
     function installUserRevertInjector() {
       if (window.__MOPS_USER_REVERT_INSTALLED) return
       window.__MOPS_USER_REVERT_INSTALLED = true
@@ -1059,28 +1046,11 @@ window.__ModuleLoader__.load({
         return fetchMessagesJson('/api/message-ops/messages?sessionId=' + encodeURIComponent(sid))
           .then((d) => {
             // 宿主会把 <system-reminder> / runtime context 等也记为 role=user 的行，
-            // DOM 里并不渲���成"我的消息"块 —— 必须滤掉，否则按序配对会错位（0.7.0 根因）。
-            //
-            // 0.9.0 两个实机 bug（浏览器实测：4 个按钮 data-mops-seq 全为 null，点击必失败）：
-            //  ① 正则跑在 norm() 之后的串上，而 norm 是 replace(/\s+/g,'') —— 删掉**全部**空白，
-            //     `current\s+runtime\s+context` 永远匹配不上 → runtime-context 伪行漏进配对。
-            //     修法：injected() 改判**原始 snippet**。
-            //  ② 过滤了 `m.visible !== false`，但宿主聊天视图**不施��**遮蔽模型，照常渲染
-            //     被回滚遮蔽的消息 → 配对候选与 DOM 块零交集。
-            //     修法：DOM 配对必须覆盖全部 user 行（含遮蔽态）。
-            //     注意：对话框的「可回滚目标」列表仍应过滤 visible（那是另一套语义）。
-            // 0.9.6：原先只排 system-reminder / runtime context 两种，
-            // 但宿主把 `background job …`、`Agent … sent a message:`、
-            // `Background subagent … finished`、`[model changed: …]` 也记成 role=user，
-            // 于是 /undo 会把**通知行**当目标 —— 回滚范围与回填文本都变成通知内容
-            // （378 会话普查：38 个 10% 命中；实测 2188f4ac 目标是
-            //  "Background subagent f09a18f6… finished…"，而用户那句在 seq829）。
+            // DOM 里并不渲染成"我的消息"块 —— 必须滤掉，否则按序配对会错位（0.7.0 根因）。
+            // 注意：对话框的「可回滚目标」列表仍应过滤 visible（那是另一套语义）。
             // 稳妥做法本该在服务端打 injected 标志，先在客户端补齐正则。
-            //
-            // 正则**按 120 份日志的真实样本**收紧，不靠猜：
-            //   256 × <system-reminder>…        128 × background job bash-358 (…
-            //    38 × [model changed: …         26 × Background subagent <uuid>
-            //    21 × Agent <uuid> sent a message:
+            // 判据一律用**原始 snippet**（norm() 删掉全部空白，正则必然失配）。
+            // 0.9.0 / 0.9.6 两轮事故复盘 + 120 份日志普查样本见 README「历史事故记录」#3。
             // 关键约束：id 后必须跟得上具体形态（[\w-]+ / [0-9a-f]{8}-），
             // 否则 `Background job 是我自己的问题` 这种真人输入会被误杀
             // （曾用 ^background job\b，测试当场抓到这个误杀）。
@@ -1100,21 +1070,9 @@ window.__ModuleLoader__.load({
       }
 
       // ═══ 0.9.1 宿主 node-key ↔ 日志 seq 的精确映射 ═══════════════════════════
-      //
-      // 背景（浏览器实测 + 源码核实）：dsh 的 transcript **刻意不做 surface 折叠**。
-      // 官方 surface.d.ts:51-63 明写 "replacement copies stay model-only" ——
-      // 我们写的 surfaceOp replace 只折叠**模型 surface**（实测 393→13 节点），
-      // 被遮蔽的消息在人类 transcript 里**照常渲染且完全可见**，连 marker 本身
-      // 都不渲染（systemMessageDefinition 对 surfaceOp !== 'append' 直接 return null）。
-      // 所以要让回滚「看得见」，只能在渲染层处理。
-      //
-      // 好消息：每一行的 `data-chat-node-key` 形如 `<len>:<kind><id>`，而 <id>
-      // 就是日志事件的字段（user → messageId、assistant-step → `<turn>:<step>`、
-      // tool-call → callId、turn-* → turn 号），客户端本来就已经建了
-      // messageId → seq 索引（__seqIndexCache）。**精确查表，零启发式。**
-      //
-      // 旧实现用「40 字符前缀包含匹配」配对 DOM 与日志，实测 4 条里错 2 条
-      // （"继续" 命中了 "继续，…"），已整体删除。
+      // dsh transcript 刻意不折叠（surface.d.ts:51-63 "replacement copies stay
+      // model-only"），回滚只能在渲染层按 `data-chat-node-key` 精确查表（零启发式）。
+      // 背景长文与「40 字符前缀匹配」事故见 README「0.9.1 / 0.9.2 · 回滚「真的生效了」」。
       var parseNodeKey = (k) => {
         var m = /^(\d+):/.exec(k || '');
         if (!m) return null;
@@ -1229,13 +1187,8 @@ window.__ModuleLoader__.load({
         var hidden = 0, unresolved = 0, shown = 0;
         for (var i = 0; i < rows.length; i++) {
           var row = rows[i];
-          // 0.9.6 判据：**replace 区间（shadowed）**。
-          // 演进：revertFences 塌缩（离散区间→min，全藏）→ visible（模型 surface，
-          // live 路径下 tool/call 全藏）→ 现在的 shadowed（恒定、与会话活跃无关）。
-          // 0.9.4 判据（见下）：**模型 surface**。此前用 revertFences 塌缩成
-          // `seq >= min(fences)`，在一个有 19 个**离散** marker 的会话里
-          // min fence=10 → seq>=10 全藏 → 4792/4793 全被隐藏 → 正文几乎空白
-          // （截图复现）。改用 visible 后与宿主 visibleCount 精确吻合。
+          // 0.9.6 藏行判据 = **replace 区间（shadowed）**；revertFences→visible→shadowed
+          // 演进史（含 4792/4793 全藏事故）见 README「历史事故记录」#4。
           var hit = seqOfNodeKey(row.getAttribute('data-chat-node-key'), idx);
           // 0.9.7（P2-1）幂等跳写：判据与执行时机**一字未改**，只在
           // 「目标状态 ≠ 当前状态」时才碰属性 —— 省掉全表几百次无效写。
@@ -1732,9 +1685,7 @@ window.__ModuleLoader__.load({
     /**
      * 回填 composer（opencode 语义：回滚后把被删掉的那句原文还给输入框）。
      *
-     * 0.9.6 统一出口 —— 此前 5 个回滚/恢复入口里只有 2 个回填
-     * （对话框 :403 与 /undo :1495），悬停回滚按钮、AI 时钟按钮、dock Restore、
-     * /redo **全部不回填**，表现正是「回滚成功了但消息框是空的」。
+     * 0.9.6 统一出口 —— 此前「5 个入口只有 2 个回填」的事故史见 README「历史事故记录」#5。
      *
      * 取文本规则：rowsCache 里 seq <= boundary 的最后一条带 fullText 的行。
      *   - /undo        → boundary 就是被回滚的那条用户消息 → 取到它自己 ✓
