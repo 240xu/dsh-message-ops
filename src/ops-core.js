@@ -432,10 +432,18 @@ export function restoreProgress(events, markerSeq) {
  * 0.8.0：贴条按行展示用 —— 列出该标记仍未重放的「轮」（一个 user 消息及其后
  * 到下一个 user 之前的 assistant 回复算一轮，对齐 opencode 按轮步进恢复）。
  *
+ * @param {Array} events 全量事件
+ * @param {number} markerSeq 标记事件 seq
+ * @param {{pendingSeqs:number[]}=} progress **可选**：调用方已经算好的
+ *   restoreProgress(events, markerSeq) 结果。原先这里内部再调一次
+ *   restoreProgress —— 对同一 marker 是 O(events) 的纯重复扫描（每次都要
+ *   全量遍历 + messageText 提取），而 opsList 对每个 marker 都要先算一遍
+ *   progress 再问「待恢复轮」，等于每标记白扫两遍。传入已算好的 prog 即可
+ *   省掉；不传则维持原行为（内部自算），既有调用方/测试不受影响。
  * @returns {Array<{ turnSeq:number, seqs:number[] }>} 按 seq 升序
  */
-export function pendingRestoreTurns(events, markerSeq) {
-  const prog = restoreProgress(events, markerSeq);
+export function pendingRestoreTurns(events, markerSeq, progress = null) {
+  const prog = progress || restoreProgress(events, markerSeq);
   if (!prog || prog.pendingSeqs.length === 0) return [];
   const list = Array.isArray(events) ? events : [];
   const bySeq = new Map();

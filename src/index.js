@@ -24,7 +24,7 @@
 
 import { zstdCompressSync } from "node:zlib";
 import { open as openFile, truncate as truncateFile, stat as statFile } from "node:fs/promises";
-import { isSessionId, sessionIdVariants, findSessionDirs, readSessionFile, readSessionFileAsync, listMessages, computeShadowed, messageText, turnBounds } from "./session-file.js";
+import { isSessionId, sessionIdVariants, findSessionDirs, readSessionFileAsync, listMessages, computeShadowed, messageText, turnBounds } from "./session-file.js";
 import { restoreNoticeText, planRevertFromEvents, planDeleteFromEvents, nextSeqFrom, buildMarkerEvent, buildRestoreNoticeEvent, buildReplayEvent, planNoticeWindow, noticeWindowPreamble, noticeWindowPostamble,
   OpsError, planRevert, planDelete, planRestore, applyRestore, applySurfaceReplace,
   restoreProgress, pendingRestoreTurns,
@@ -254,35 +254,59 @@ function pickSessionDir(sessionId) {
   return dirs[0];
 }
 
-async function opsList(targetCtx, sessionId) {
-  if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
-  const { logPath } = pickSessionDir(sessionId);
+// ---------------------------------------------------------------------------
+// 文件派生缓存（P0-1）：mtime+size 失效 · 在途去重 · LRU 16
+// ---------------------------------------------------------------------------
+//
+// GET /api/message-ops/messages 的成本约 95% 落在「只依赖日志文件」的那一段
+// （zstd 解压 + JSON.parse + listMessages + computeShadowed + marker 恢复进度 +
+// turn 边界）。实测最大会话（10.8MB / 1611 帧 / 15178 事件 / 5038 消息 / 19 marker）
+// 单次 0.9~1.6s，且 3 并发 = 3 倍纯 CPU 打水漂（没有任何共享缓存）。
+//
+// 设计：
+//  - key = logPath（append-only 日志，一个会话一份文件）。
+//  - 失效 = 读取**之前** stat 拿 mtimeMs + size，与条目不符就重算。
+//    读中被追加 → mtime/size 必然变化 → 下一次请求自动重算（自愈一个追加
+//    周期）；revert/delete/restore 的 diskAppend 落盘后同样靠这一条自动失效，
+//    写路径无需手动清缓存。
+//  - 在途去重 = 条目里存的是 Promise：并发请求 stat 到同一份 mtime+size
+//    时共享同一个 Promise（3 并发 → 1 次真实计算）。计算失败则删除条目，
+//    **不缓存 rejection**（否则一次瞬时错误会粘到文件下次变化为止）。
+//  - LRU 上限 16：Map 插入序即 LRU 序，命中 delete+set 提到队尾，超限删
+//    队首。388 份日志成本高度集中在 top 1%，16 条足够。
+//  - **绝不缓存 raw events**（实测 114MB/次的短命堆分配，388 会话不可控）。
+//    缓存的是**派生结果**：header / messages / shadowed / turnEndSeq /
+//    marker 进度 —— 量级 = 响应体（最大约 1.8MB）× 16，上限几十 MB。
+//
+// **刻意不进缓存、每请求重算**（放进缓存就是 0.9.6 那类事故）：
+//  - m.visible             ← 依赖 live.surface.nodes（live 会话的 surface 会变）。
+//    陈旧的 visible 会让 /undo 的 lastRevertable() 挑到**不在 surface 上**的
+//    seq → 服务端 409、回填错目标。判据语义见 opsList 里的 0.9.6 注释块。
+//  - running/runningSource ← agents 注册表（status 随时在变）。
+//  - visibleCount          ← 由 visible 派生，同上。
+//  - m.shadowed            ← 判据恒为 computeShadowed（纯文件派生，与 live 无关，
+//    0.9.6 起藏行判据就是它而不是 visible）；但**写在每请求的浅拷贝上**，
+//    缓存对象本身永不被改写 —— 跨请求零串扰。
+const DERIVED_CACHE_MAX = 16;
+const derivedCache = new Map(); // logPath -> { mtimeMs, size, promise }
+
+/**
+ * 真实计算：读日志 → 消息列表 → 遮蔽集 → marker 恢复进度 → turn 边界。
+ * 返回的对象归缓存所有，**调用方不得原地修改**（opsList 用浅拷贝后再挂
+ * visible / shadowed 这两个每请求字段）。
+ */
+async function buildDerived(logPath) {
   // 大日志的逐帧解压走异步让出路径，避免阻塞 GUI 事件循环（评审 P1）。
   const { header, events } = await readSessionFileAsync(logPath);
   const messages = listMessages(events);
   const shadowed = computeShadowed(events);
-  const live = resolveSession(targetCtx, sessionId);
-  const visibleNodes = live && live.surface && Array.isArray(live.surface.nodes) ? new Set(live.surface.nodes) : null;
-  let visibleCount = 0;
-  for (const m of messages) {
-    m.visible = visibleNodes ? visibleNodes.has(m.seq) : !shadowed.has(m.seq);
-    // 0.9.6：**shadowed 与 visible 是两套语义，不能混用。**
-    //
-    // visible = 「是否在**模型 surface** 上」—— 两条路径还不一致：
-    //   live     → live.surface.nodes（tool/call 根本不是 surface 节点 → 恒 false）
-    //   fallback → !computeShadowed(seq)
-    // 拿它做 transcript 藏行判据会把整页工具行全藏（实测 157 行藏 152 行）。
-    //
-    // shadowed = 「是否落在任一 replace 区间内」—— 这才是「回滚掉的东西」，
-    // 且**与会话是否活跃无关**，恒由 computeShadowed(events) 算出。
-    // transcript 藏行必须用它；visible 只留给「可回滚目标」（lastRevertable）。
-    m.shadowed = shadowed.has(m.seq);
-    if (m.visible) visibleCount++;
-  }
   // 0.8.0 按轮步进：为每个回撤/删除标记附恢复进度与"待恢复轮"。
   // 一次建 seq→text 索引，避免每标记全量扫文本（性能评审点）。
-  const seqText = new Map();
-  for (const e of events) {
+  // P3 惰性：无 marker 的会话（语料 388 份里 360+）整段跳过 —— 既不建
+  // seqText 索引，也不扫一遍 events（seqText 为 null 时下面两处都短路：
+  // 本循环直接跳过，marker 循环体也一次都不会执行）。
+  const seqText = messages.some((m) => m.marker === true) ? new Map() : null;
+  for (const e of seqText ? events : []) {
     if (!e || typeof e.seq !== "number") continue;
     if (e.type !== "user/message" && e.type !== "assistant/message") continue;
     const t = messageText(e);
@@ -302,7 +326,7 @@ async function opsList(targetCtx, sessionId) {
     const prog = restoreProgress(events, m.seq);
     if (!prog) { m.restoreComplete = false; m.pendingTurns = []; continue; }
     m.restoreComplete = prog.complete;
-    m.pendingTurns = pendingRestoreTurns(events, m.seq).map((t) => ({
+    m.pendingTurns = pendingRestoreTurns(events, m.seq, prog).map((t) => ({
       upTo: t.seqs[t.seqs.length - 1],
       count: t.seqs.length,
       preview: seqText.get(t.turnSeq) || ('#' + t.turnSeq),
@@ -324,6 +348,61 @@ async function opsList(targetCtx, sessionId) {
   const turnEndSeq = {};
   for (const [turn, seq] of bounds.ends) turnEndSeq[turn] = seq;
   for (const [turn, seq] of bounds.starts) if (!(turn in turnEndSeq)) turnEndSeq[turn] = seq;
+  return { header, messages, shadowed, turnEndSeq };
+}
+
+/**
+ * 取文件派生结果（带缓存）。见上方「文件派生缓存」注释块：stat 在读取**前**
+ * 打，mtimeMs+size 不符即重算；同 key 的在途请求共享同一个 Promise。
+ */
+async function loadDerived(logPath) {
+  const st = await statFile(logPath);
+  const hit = derivedCache.get(logPath);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
+    derivedCache.delete(logPath);
+    derivedCache.set(logPath, hit); // LRU touch（Map 插入序 = LRU 序）
+    return hit.promise;
+  }
+  const entry = { mtimeMs: st.mtimeMs, size: st.size, promise: buildDerived(logPath) };
+  derivedCache.delete(logPath);
+  derivedCache.set(logPath, entry);
+  while (derivedCache.size > DERIVED_CACHE_MAX) {
+    derivedCache.delete(derivedCache.keys().next().value);
+  }
+  // 失败不粘住：读错/半截文件只影响本次，下次 stat 仍会重试。
+  entry.promise.catch(() => {
+    if (derivedCache.get(logPath) === entry) derivedCache.delete(logPath);
+  });
+  return entry.promise;
+}
+
+async function opsList(targetCtx, sessionId) {
+  if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
+  const { logPath } = pickSessionDir(sessionId);
+  // 文件派生段（读日志 → 消息 → 遮蔽集 → marker 进度 → turn 边界）走缓存：
+  // key = logPath、失效看读前 stat 的 mtimeMs+size，见 loadDerived 注释。
+  const { header, messages: baseMessages, shadowed, turnEndSeq } = await loadDerived(logPath);
+  // 每请求**浅拷贝**一份再挂 per-request 字段：缓存对象永不被改写，
+  // 并发请求之间零串扰（浅拷 5038 个小对象约 1~2ms）。
+  const messages = baseMessages.map((m) => ({ ...m }));
+  const live = resolveSession(targetCtx, sessionId);
+  const visibleNodes = live && live.surface && Array.isArray(live.surface.nodes) ? new Set(live.surface.nodes) : null;
+  let visibleCount = 0;
+  for (const m of messages) {
+    m.visible = visibleNodes ? visibleNodes.has(m.seq) : !shadowed.has(m.seq);
+    // 0.9.6：**shadowed 与 visible 是两套语义，不能混用。**
+    //
+    // visible = 「是否在**模型 surface** 上」—— 两条路径还不一致：
+    //   live     → live.surface.nodes（tool/call 根本不是 surface 节点 → 恒 false）
+    //   fallback → !computeShadowed(seq)
+    // 拿它做 transcript 藏行判据会把整页工具行全藏（实测 157 行藏 152 行）。
+    //
+    // shadowed = 「是否落在任一 replace 区间内」—— 这才是「回滚掉的东西」，
+    // 且**与会话是否活跃无关**，恒由 computeShadowed(events) 算出。
+    // transcript 藏行必须用它；visible 只留给「可回滚目标」（lastRevertable）。
+    m.shadowed = shadowed.has(m.seq);
+    if (m.visible) visibleCount++;
+  }
 
   return {
     ok: true,
@@ -336,6 +415,9 @@ async function opsList(targetCtx, sessionId) {
     messages,
   };
 }
+
+/** 测试钩子（非公开 API）：直接驱动 list 与文件派生缓存。 */
+export const _internals = { opsList, loadDerived, derivedCache };
 
 async function opsCommit(targetCtx, mode, sessionId, seq) {
   if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
