@@ -24,7 +24,6 @@
     ".": "./src/index.js",
     "./client": "./src/client.js",
     "./session-file": "./src/session-file.js",
-    "./branch": "./src/branch.js",
     "./package.json": "./package.json",
     "./ops-core": "./src/ops-core.js"
   },

@@ -103,8 +103,6 @@ window.__ModuleLoader__.load({
       'op.branchDesc': '复制所选消息（含）之前的全部事件为新会话（原会话不变，非破坏操作）。',
       'slot.revert': '回滚到此条',
       'slot.revertUnmatched': '在日志里定位不到这条消息的 seq（通常是模型写的摘要与渲染文本偏差过大）——请改用「消息操作」对话框。',
-      'slot.delete': '删除此条',
-      'slot.branch': '从此分支',
       'toast.openNew': '打开新会话',
       'fork.official': '分支完成：新会话 {id}',
       'fork.unavailable': '官方分支不可用：通常是因为会话正在运行，请先停止会话后重试。分支功能由 dsh 内置的 session/fork 提供。',
@@ -116,9 +114,7 @@ window.__ModuleLoader__.load({
       'busy.revert': '回滚中…',
       'busy.delete': '删除中…',
       'busy.branch': '分支中…',
-      'done.branch': '分支完成：新会话 {id}（列表刷新后可见）',
       'done.restore': '恢复完成：重放 {n} 条，跳过不可重放 {s} 条',
-      'busy.restore': '恢复中…',
       'done.revert': '回滚完成，刷新页面后生效',
       'done.delete': '删除完成，刷新页面后生效',
       'action.reload': '刷新页面',
@@ -166,8 +162,6 @@ window.__ModuleLoader__.load({
       'op.branchDesc': 'Copies everything up to and including the picked message into a new session (original untouched, non-destructive).',
       'slot.revert': 'Revert to here',
       'slot.revertUnmatched': 'Cannot locate this message seq in the log (usually the model-written summary drifted too far from the rendered text) — use the Message ops dialog instead.',
-      'slot.delete': 'Delete this message',
-      'slot.branch': 'Branch from here',
       'toast.openNew': 'Open new session',
       'fork.official': 'Branched (official fork): new session {id}',
       'fork.unavailable': 'Built-in branch unavailable — usually because the session is running. Stop it and retry. Branching is provided by the dsh built-in session/fork.',
@@ -179,9 +173,7 @@ window.__ModuleLoader__.load({
       'busy.revert': 'Reverting…',
       'busy.delete': 'Deleting…',
       'busy.branch': 'Branching…',
-      'done.branch': 'Branched: new session {id} (visible after list refresh)',
       'done.restore': 'Restored: replayed {n}, skipped non-replayable {s}',
-      'busy.restore': 'Restoring…',
       'done.revert': 'Reverted; reload to apply',
       'done.delete': 'Deleted; reload to apply',
       'action.reload': 'Reload page',
@@ -943,11 +935,9 @@ window.__ModuleLoader__.load({
             try {
               if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(sessionId)
             } catch { /* fallthrough */ }
-            // 0.9.1：重放的消息带**新 seq**，被恢复的行必须解除 hidden，
-            // 同时 dock 的权威 marker 列表要重拉。
+            // 0.9.1：重放的消息带**新 seq**，被恢复的行必须解除 hidden；dock 的
+            // marker 列表要按权威数据重算（restoreComplete 会变 true）后重拉。
             emitChanged()
-            // 0.9.1：重放的消息带**新 seq**，被恢复的行必须解除 hidden；
-            // 同时 dock 的 marker 列表要按权威数据重算（restoreComplete 会变 true）。
             for (const delay of [150, 700, 1600]) setTimeout(() => { if (__refreshSurface) __refreshSurface(sessionId) }, delay)
             const fresh = await fetchMessagesJson('/api/message-ops/messages?sessionId=' + encodeURIComponent(sessionId)).catch(() => null)
             if (fresh && fresh.ok) setMarkers(activeMarkers(fresh.messages || []))
@@ -1086,10 +1076,6 @@ window.__ModuleLoader__.load({
             // （378 会话普查：38 个 10% 命中；实测 2188f4ac 目标是
             //  "Background subagent f09a18f6… finished…"，而用户那句在 seq829）。
             // 稳妥做法本该在服务端打 injected 标志，先在客户端补齐正则。
-            // 0.9.6：原先只排 system-reminder / runtime context 两种，但宿主把通知也
-            // 记成 role=user，/undo 会把**通知行**当目标 —— 回滚范围与回填文本都变成
-            // 通知内容（378 会话普查 38 个 10% 命中；实测 2188f4ac 目标是
-            // "Background subagent f09a18f6… finished…"，用户那句其实在 seq829）。
             //
             // 正则**按 120 份日志的真实样本**收紧，不靠猜：
             //   256 × <system-reminder>…        128 × background job bash-358 (…
@@ -1141,9 +1127,8 @@ window.__ModuleLoader__.load({
 
       /**
        * 从 /api/message-ops/messages 的响应构建全部查表。
-       * 三条铁律：① 索引只认唯一 id；② 缺数据一律返回 undefined（调用方保持可见）；
-       *           ③ visible 集合只收显式 true。
-       */
+        * 两条铁律：① 索引只认唯一 id；② 缺数据一律返回 undefined（调用方保持可见）。
+        */
       var buildIndex = (payload) => {
         var list = (payload && payload.messages) || []
         // 0.9.1：回合页脚/过程条不是消息，用 turn/end 的 seq 定位（边界常落在 turn 内部，
@@ -1153,10 +1138,8 @@ window.__ModuleLoader__.load({
         var byTurnStep = new Map();
         var byCallId = new Map();
         var byTurn = new Map();
-        var visible = new Set();          // 在模型 surface 上（仅用于「可回滚目标」）
         var shadowed = new Set();         // 落在 replace 区间内 = 已被回滚（transcript 藏行判据）
         var visibleTurns = new Set();     // 含至少一条**未被遮蔽**消息的 turn 号（回合 chrome）
-        var dupMessageId = 0
         var dupByMessageId = new Map();
         for (var i = 0; i < list.length; i++) {
           var m = list[i];
@@ -1168,7 +1151,6 @@ window.__ModuleLoader__.load({
             // fence」。回放副本才是当前 surface 上的那条，用最早的 seq 判会让
             // 「恢复后再回滚」漏藏（实测 fence=70、副本 seq=70、原件 seq=54）。
             if (byMessageId.has(k)) {
-              dupMessageId++
               const arr = dupByMessageId.get(k) || [byMessageId.get(k)]
               arr.push(m.seq)
               dupByMessageId.set(k, arr)
@@ -1180,15 +1162,15 @@ window.__ModuleLoader__.load({
           }
           if (m.type === 'tool/call' && m.id != null) byCallId.set(String(m.id), m.seq);
           if (m.turn != null && !byTurn.has(String(m.turn))) byTurn.set(String(m.turn), m.seq);
-          if (m.visible === true) visible.add(m.seq);
-          // 0.9.6：藏行判据改用 shadowed（replace 区间），**不用** visible（模型 surface）。
-          // visible 在 live 路径下对 tool/call 恒 false → 会把整页工具行全藏。
+          // 0.9.6：藏行判据用 shadowed（replace 区间），**不用** m.visible（模型 surface）。
+          // visible 在 live 路径下对 tool/call 恒 false → 拿它当判据会把整页工具行全藏，
+          // 故这里连集合都不建（判据样本见 test/surface-visibility.test.js）。
           if (m.shadowed === true) shadowed.add(m.seq);
           else if (m.turn != null) visibleTurns.add(String(m.turn));
         }
         // turnEnd 优先：它对「该 turn 内一条消息都没有」的情况仍然有效
         if (turnEnd) for (const k in turnEnd) if (Object.prototype.hasOwnProperty.call(turnEnd, k)) byTurn.set(k, turnEnd[k])
-        return { byMessageId, dupByMessageId, byTurnStep, byCallId, byTurn, visible, shadowed, visibleTurns, dupMessageId, total: list.length };
+        return { byMessageId, dupByMessageId, byTurnStep, byCallId, byTurn, shadowed, visibleTurns, total: list.length };
       };
 
       /** node-key → { seq, all }（all = 同 id 的全部 seq，处理 restore 重放副本）。 */

@@ -496,10 +496,7 @@ async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq, discard) {
   const { events } = await readSessionFileAsync(logPath);
   // 0.8.0（B1 修复）：步进恢复必须排除先前轮次已重放的源 seq，
   // 否则每轮从区间头重放 → 消息副本成倍出现。
-  // 0.8.2：空闲会话（实测 340/364）没有打开的 turn/step → 用自足的**合成 turn**
-  // 承载 notice，而不是拒绝。引擎 append-only 插不进已有 step，但合成一整个 turn 合法
-  //��已对官方校验闸实测：append 型 / 单节点 replace / 多节点 replace 全 PASS，遮蔽受保护头正确拒绝）。
-  // 带 reason:"message-ops"，UI 与审计可识别，不与真实模型轮次混淆。
+  // 合成 turn 承载 notice 的完整理由见 opsCommit() 处（0.8.2，实测 340/364 空闲会话）。
   const win = planNoticeWindow(events);
   const progress = restoreProgress(events, restoreSeq);
   const plan = planRestore(events, restoreSeq, upToSeq, progress ? progress.restoredSeqs : null);
