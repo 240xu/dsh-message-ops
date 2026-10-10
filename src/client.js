@@ -141,6 +141,7 @@ window.__ModuleLoader__.load({
       'undo.done.undo': '已回滚上一条消息',
       'undo.done.redo': '已恢复上一条被回滚的消息',
       'undo.none': '没有可回滚的消息',
+      'undo.none.redo': '没有可恢复的回滚',
       'redo.label': '恢复上一条被回滚的消息',
       'redo.desc': '把回滚掉的消息重新放回对话',
       'menu.ops': 'Message ops',
@@ -1454,40 +1455,75 @@ window.__ModuleLoader__.load({
     /** 执行 undo/redo。返回 true 表示确实动过盘。 */
     /** __currentSessionId 来自 DOM dataset，可能带 `session-` 前缀；API 只要裸 uuid。 */
     var bareSessionId = (id) => String(id || '').replace(/^session-/, '')
-    var runUndoRedo = (kind) => {
+    /** 写盘成功后的统一收尾：通知、刷新、重放隐藏。 */
+    var afterWrite = (sid, okMsg) => {
+      notifyDone(okMsg)
+      try { window.dispatchEvent(new Event(CHANGED_EVENT)) } catch { /* non-browser */ }
+      try {
+        if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(sid)
+      } catch { /* 视图重建失败不阻断 */ }
+      if (__peekRowsCache) { const c = __peekRowsCache(); if (c) c.at = 0 }
+      for (const delay of [150, 700, 1600]) setTimeout(() => { if (__refreshSurface) __refreshSurface(sid) }, delay)
+    }
+
+    /**
+     * /undo —— 回滚最后一条**在模型 surface 上**的用户消息，原文回填输入框。
+     * 目标必须是 surface 上的那条：restore 是「重放」语义，副本带新 seq 落在日志
+     * 尾部但不在 surface 上，服务端会以 `surface replace: start seq N not found in surface` 拒绝。
+     */
+    var runUndo = () => {
       const sid = bareSessionId(__currentSessionId)
       if (!sid) return false
       const target = lastRevertable()
-      if (!target) {
-        notifyDone(__t('undo.none') || '没有可回滚的消息', 'error')
-        return false
-      }
-      const verb = kind === 'redo' ? 'restore' : 'revert'
-      fetch('/api/message-ops/' + verb, {
+      if (!target) { notifyDone(__t('undo.none') || '没有可回滚的消息', 'error'); return false }
+      fetch('/api/message-ops/revert', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ sessionId: sid, seq: target.seq }),
       })
         .then(async (res) => {
-          let data = {}
-          try { data = await res.json() } catch { /* keep {} */ }
+          const data = await res.json().catch(() => ({}))
           if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status))
-          notifyDone(kind === 'redo' ? __t('undo.done.redo') : __t('undo.done.undo'))
+          afterWrite(sid, __t('undo.done.undo'))
           // opencode 语义：回滚后**原文回输入框**，用户可改后重发
-          if (kind !== 'redo' && target.fullText && __inputActions && typeof __inputActions.setDraft === 'function') {
+          if (target.fullText && __inputActions && typeof __inputActions.setDraft === 'function') {
             try { __inputActions.setDraft(target.fullText) } catch { /* 回填失败不阻断 */ }
           }
-          try { window.dispatchEvent(new Event(CHANGED_EVENT)) } catch { /* non-browser */ }
-          try {
-            if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(sid)
-          } catch { /* 视图重建失败不阻断 */ }
-          if (__peekRowsCache) { const c = __peekRowsCache(); if (c) c.at = 0 }
-          for (const delay of [150, 700, 1600]) setTimeout(() => { if (__refreshSurface) __refreshSurface(sid) }, delay)
         })
-        .catch((reason) => {
-          notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
-        })
+        .catch((reason) => notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error'))
       return true
     }
+
+    /**
+     * /redo —— 恢复**最新一条未恢复的 marker**。
+     *
+     * ⚠️ 0.9.5 修正：先前把 `lastRevertable()`（用户**消息** seq）传给 /restore，
+     * 但 `opsRestore` 走 `planRestore(events, restoreSeq)` —— 它要的是 **marker seq**
+     * （dock 传的 row.seq 就来自 activeMarkers）。传消息 seq 会找不到 marker 空转。
+     */
+    var runRedo = () => {
+      const sid = bareSessionId(__currentSessionId)
+      if (!sid) return false
+      fetch('/api/message-ops/messages?sessionId=' + encodeURIComponent(sid))
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (!d || !d.ok) throw new Error((d && d.error) || 'messages unavailable')
+          const markers = activeMarkers(d.messages || [])
+          if (!markers.length) { notifyDone(__t('undo.none.redo') || '没有可恢复的回滚', 'error'); return null }
+          const mk = markers[markers.length - 1]     // 最新一条未恢复标记
+          return fetch('/api/message-ops/restore', {
+            method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionId: sid, seq: mk.seq }),
+          }).then(async (res) => {
+            const data = await res.json().catch(() => ({}))
+            if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status))
+            afterWrite(sid, __t('undo.done.redo'))
+          })
+        })
+        .catch((reason) => notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error'))
+      return true
+    }
+
+    var runUndoRedo = (kind) => (kind === 'redo' ? runRedo() : runUndo())
 
     /** 注册 /undo /redo 到官方斜杠管线。服务缺失时安静 no-op。 */
     var __undoRegistered = false

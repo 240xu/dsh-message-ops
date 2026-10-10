@@ -1,6 +1,6 @@
 {
   "name": "@240xu/dsh-message-ops",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "description": "DSH web 插件：消息级回滚 / 删除 / 恢复（补 dsh 官方没有的部分）。分支与导出用官方内置能力。",
   "type": "module",
   "license": "MIT",
