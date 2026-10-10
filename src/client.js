@@ -1014,15 +1014,10 @@ window.__ModuleLoader__.load({
         var byTurnStep = new Map();
         var byCallId = new Map();
         var byTurn = new Map();
-        var visible = new Set();
-        var reverted = new Set();
+        var visible = new Set();          // 在模型 surface 上的 seq
+        var visibleTurns = new Set();     // 含至少一条可见消息的 turn 号
         var dupMessageId = 0
         var dupByMessageId = new Map();
-        // 回合页脚/过程条锚到 turn/end 的 seq —— 那是**非消息**事件，永远不会出现在
-        // reverted 集合里，所以隐藏判据必须直接对 fence 比较，不能用集合成员。
-        var fences = Array.isArray(payload && payload.revertFences)
-          ? payload.revertFences.filter(function (n) { return Number.isSafeInteger(n); })
-          : [];
         for (var i = 0; i < list.length; i++) {
           var m = list[i];
           if (!m || typeof m.seq !== 'number') continue;
@@ -1039,21 +1034,20 @@ window.__ModuleLoader__.load({
               dupByMessageId.set(k, arr)
               byMessageId.set(k, m.seq)   // 指向最新的
             } else { byMessageId.set(k, m.seq) }
-            byMessageId.set(k, m.seq);
           }
           if (m.type === 'assistant/message' && m.turn != null && m.step != null) {
             byTurnStep.set(m.turn + ':' + m.step, m.seq);
           }
           if (m.type === 'tool/call' && m.id != null) byCallId.set(String(m.id), m.seq);
           if (m.turn != null && !byTurn.has(String(m.turn))) byTurn.set(String(m.turn), m.seq);
-          if (m.visible === true) visible.add(m.seq);
-          // 0.9.1：reverted 才是「该藏」的口径（见 index.js 的注释：visible 会误藏
-          // 所有非 surface 事件行，如 tool/call）
-          if (m.reverted === true) reverted.add(m.seq);
+          if (m.visible === true) {
+            visible.add(m.seq);
+            if (m.turn != null) visibleTurns.add(String(m.turn));
+          }
         }
         // turnEnd 优先：它对「该 turn 内一条消息都没有」的情况仍然有效
         if (turnEnd) for (const k in turnEnd) if (Object.prototype.hasOwnProperty.call(turnEnd, k)) byTurn.set(k, turnEnd[k])
-        return { byMessageId, dupByMessageId, byTurnStep, byCallId, byTurn, visible, reverted, fences, dupMessageId, total: list.length };
+        return { byMessageId, dupByMessageId, byTurnStep, byCallId, byTurn, visible, visibleTurns, dupMessageId, total: list.length };
       };
 
       /** node-key → { seq, all }（all = 同 id 的全部 seq，处理 restore 重放副本）。 */
@@ -1067,15 +1061,15 @@ window.__ModuleLoader__.load({
           case 'trajectory-note': {
             const hit = idx.byMessageId.get(id)
             if (hit === undefined) return null
-            return { seq: hit, all: idx.dupByMessageId.get(id) || [hit] }
+            return { kind: parsed.kind, seq: hit, all: idx.dupByMessageId.get(id) || [hit] }
           }
           case 'assistant-step': {
             const hit = idx.byTurnStep.get(id)
-            return hit === undefined ? null : { seq: hit, all: [hit] }
+            return hit === undefined ? null : { kind: parsed.kind, seq: hit, all: [hit] }
           }
           case 'tool-call': {
             const hit = idx.byCallId.get(id)
-            return hit === undefined ? null : { seq: hit, all: [hit] }
+            return hit === undefined ? null : { kind: parsed.kind, seq: hit, all: [hit] }
           }
           case 'turn-tail':
           case 'turn-process':
@@ -1083,7 +1077,9 @@ window.__ModuleLoader__.load({
           case 'turn-max-tokens':
           case 'model-retry': {
             const hit = idx.byTurn.get(id)
-            return hit === undefined ? null : { seq: hit, all: [hit] }
+            // 这类是**回合 chrome**，id 就是 turn 号 —— 判据要按「这个 turn 还有
+            // 没有可见消息」而不是按 seq，因为 turn/end 本身多半不在 surface 上。
+            return hit === undefined ? null : { kind: parsed.kind, seq: hit, all: [hit], turn: id }
           }
           default:
             return null;                  // compaction / command / workflow-run 等不参与
@@ -1105,16 +1101,21 @@ window.__ModuleLoader__.load({
         var hidden = 0, unresolved = 0, shown = 0;
         for (var i = 0; i < rows.length; i++) {
           var row = rows[i];
-          // ⚠️ seqOfNodeKey 返回 `{ seq, all }`（all = 同 id 的全部 seq，
-          //    处理 restore 重放副本），不是标量。曾经在多 seq 改造时漏改这里，
-          //    导致 `{...} >= f` 恒为 false → **静默一个都不藏，也不报错**。
+          // 0.9.4 判据（见下）：**模型 surface**。此前用 revertFences 塌缩成
+          // `seq >= min(fences)`，在一个有 19 个**离散** marker 的会话里
+          // min fence=10 → seq>=10 全藏 → 4792/4793 全被隐藏 → 正文几乎空白
+          // （截图复现）。改用 visible 后与宿主 visibleCount 精确吻合。
           var hit = seqOfNodeKey(row.getAttribute('data-chat-node-key'), idx);
           if (hit === null) { unresolved++; row.removeAttribute('hidden'); continue; }
-          var cands = (hit.all && hit.all.length) ? hit.all : [hit.seq];
-          var isReverted = idx.fences.length
-            ? cands.some(function (q) { return idx.fences.some(function (f) { return q >= f; }); })
-            : cands.some(function (q) { return idx.reverted.has(q); });
-          if (isReverted) { hidden++; row.setAttribute('hidden', 'until-found'); }
+          var shouldHide;
+          if (hit.turn !== undefined) {
+            // 回合 chrome：这个 turn 还有可见消息就露出来
+            shouldHide = !idx.visibleTurns.has(String(hit.turn));
+          } else {
+            // 消息类：直接问「它在模型 surface 上吗」
+            shouldHide = !idx.visible.has(hit.seq);
+          }
+          if (shouldHide) { hidden++; row.setAttribute('hidden', 'until-found'); }
           else { shown++; row.removeAttribute('hidden'); }
         }
         return { hidden, unresolved, shown };

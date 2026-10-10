@@ -298,22 +298,11 @@ async function opsList(targetCtx, sessionId) {
     }));
   }
 
-  // 0.9.1：**reverted** = opencode 语义「回撤边界及其后」。
-  //
-  // ⚠️ 不能用 `visible` 当隐藏判据 —— `visible` 是「是否在模型 surface 上」，
-  // 而 tool/call / turn/* / model/* **根本不是 surface 节点**（SURFACE_TYPES 只有
-  // system|user|developer|assistant/message 与 tool/result），它们永远 visible=false。
-  // 照抄会把**所有**工具调用行永久藏掉（实测 3/3 全被误藏）。
-  //
-  // 正确口径：每个**未恢复**的回撤标记 range.start 之后的全部 seq 都算已回撤 ——
-  // 这正是 opencode 的 `messages.slice(0, boundaryIndex)`（边界自己也不显示）。
-  const revertFences = messages
-    .filter((m) => m && m.marker === true && m.restoreComplete === false
-      && m.range && typeof m.range.start === 'number')
-    .map((m) => m.range.start);
-  for (const m of messages) {
-    m.reverted = typeof m.seq === 'number' && revertFences.some((start) => m.seq >= start);
-  }
+  // 0.9.4：原先这里发 `revertFences`（= 未恢复 marker 的 range.start 列表）和
+  // 逐条 `m.reverted = seq >= 某个 fence`。**两样都已删除**，因为它们把 19 个
+  // **离散** marker 区间塌缩成「seq >= 最小值」，在一个会话里导致
+  // 4792/4793 条被判为已回滚 → 客户端全藏 → 正文几乎空白（截图复现）。
+  // 正确判据是 `m.visible`（模型 surface），实测与下面的 visibleCount 精确吻合。
   // 0.9.1：回合页脚/过程条的 node-key id 就是 turn 号，而它们**不是消息**，
   // 无法用「首个带 turn 字段的消息」定位（该 turn 内可能一条消息都没有，
   // 实测 turn 2 就映射不到）。这里直接给 turn/start 的 seq 映射表。
@@ -333,7 +322,6 @@ async function opsList(targetCtx, sessionId) {
     total: messages.length,
     visibleCount,
     turnEndSeq,
-    revertFences,
     messages,
   };
 }
