@@ -153,6 +153,27 @@ export function replayEventData(item, ts, version = 4) {
       source: messageSource("assistant", version),
       content: [{ type: "text", text: item.text }],
     },
+    // ⚠️ v4 契约 `stream: AssistantStreamRecord[]` **非可选**
+    // （SessionEventMap，见 dsh-agent-preset-registry/lib/typert.host.js:647）。
+    //
+    // 缺它的后果不是「格式闸拒绝」——格式闸对 stream 只有 Array.isArray 守卫，
+    // 会放行——而是**运行期炸在投影层**：
+    //   dsh-token-meter/lib/types/usage-projection.js:65  usageOf()
+    //     → data.usage === undefined 时回落到
+    //   dsh-llm/lib/index.js:1412  lastAssistantStreamChunk(stream, 'usage')
+    //     → `for (index = stream.length - 1; ...)` ← stream 是 undefined
+    //     → TypeError: Cannot read properties of undefined (reading 'length')
+    // 抛出点没有 try/catch：
+    //   - 历史加载  → dsh-session-query/lib/index.js:482 → UI「Failed to load history」→ **正文 0 行**
+    //   - 控制流基线 → dsh-api-session-controller/lib/index.js:1178 → 逸出 async* →
+    //     `[session-controller] control stream failed`（一个坏会话打死全站控制流）
+    //
+    // `stream: []` 是**已实测安全**的取值：
+    //   expandAssistantStream([]) → [] → assertCurrentAssistantStreams 里 timed.length===0 直接 continue，
+    //   跳过 content/usage/replayState 的 deepStrictEqual 校验；UI 走 message.content 渲染，不依赖 stream。
+    // ⚠️ 反面教材：不要写「半填充流」（如只放 message-end/usage chunk）——
+    //   一旦 timed.length !== 0，宿主要求 blocks()/usage/replayState 与 message 全部深等，做不全就是新的写坏。
+    stream: [],
   };
 }
 

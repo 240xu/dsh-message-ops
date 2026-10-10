@@ -703,6 +703,9 @@ window.__ModuleLoader__.load({
             try { data = await res.json() } catch { /* keep {} */ }
             if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status))
             notifyDone(t('done.revert'))
+            // 0.9.6：回填被删掉的那句用户原文（边界是 AI 消息时取它之前那条用户消息）。
+            // 此前这个入口完全不回填 —— 表现就是「回滚成功但消息框空着」。
+            refillComposer(sessionId, seq)
             revealSession()
             emitChanged()
           })
@@ -962,7 +965,27 @@ window.__ModuleLoader__.load({
             //     被回滚遮蔽的消息 → 配对候选与 DOM 块零交集。
             //     修法：DOM 配对必须覆盖全部 user 行（含遮蔽态）。
             //     注意：对话框的「可回滚目标」列表仍应过滤 visible（那是另一套语义）。
-            const injected = (raw) => /^<system-reminder|current\s+runtime\s+context|^<system-Reminder/i.test(String(raw || ''))
+            // 0.9.6：原先只排 system-reminder / runtime context 两种，
+            // 但宿主把 `background job …`、`Agent … sent a message:`、
+            // `Background subagent … finished`、`[model changed: …]` 也记成 role=user，
+            // 于是 /undo 会把**通知行**当目标 —— 回滚范围与回填文本都变成通知内容
+            // （378 会话普查：38 个 10% 命中；实测 2188f4ac 目标是
+            //  "Background subagent f09a18f6… finished…"，而用户那句在 seq829）。
+            // 稳妥做法本该在服务端打 injected 标志，先在客户端补齐正则。
+            // 0.9.6：原先只排 system-reminder / runtime context 两种，但宿主把通知也
+            // 记成 role=user，/undo 会把**通知行**当目标 —— 回滚范围与回填文本都变成
+            // 通知内容（378 会话普查 38 个 10% 命中；实测 2188f4ac 目标是
+            // "Background subagent f09a18f6… finished…"，用户那句其实在 seq829）。
+            //
+            // 正则**按 120 份日志的真实样本**收紧，不靠猜：
+            //   256 × <system-reminder>…        128 × background job bash-358 (…
+            //    38 × [model changed: …         26 × Background subagent <uuid>
+            //    21 × Agent <uuid> sent a message:
+            // 关键约束：id 后必须跟得上具体形态（[\w-]+ / [0-9a-f]{8}-），
+            // 否则 `Background job 是我自己的问题` 这种真人输入会被误杀
+            // （曾用 ^background job\b，测试当场抓到这个误杀）。
+            // 样本里没出现过的模式（已停止 / User feedback:）一律**不加** —— 没证据就不猜。
+            const injected = (raw) => /^<system-reminder|current\s+runtime\s+context|^<system-Reminder|^background job\s+[\w-]+|^Background subagent\s+[0-9a-f]{8}-|^Agent\s+[0-9a-f]{8}-|^\[model changed:/i.test(String(raw || ''))
             const rows = ((d && d.messages) || [])
               .filter((m) => m && m.role === 'user')
               .map((m) => ({ seq: m.seq, sn: norm(m.snippet), raw: String(m.snippet == null ? '' : m.snippet), fullText: m.fullText ?? null, visible: m.visible !== false }))
@@ -1015,8 +1038,9 @@ window.__ModuleLoader__.load({
         var byTurnStep = new Map();
         var byCallId = new Map();
         var byTurn = new Map();
-        var visible = new Set();          // 在模型 surface 上的 seq
-        var visibleTurns = new Set();     // 含至少一条可见消息的 turn 号
+        var visible = new Set();          // 在模型 surface 上（仅用于「可回滚目标」）
+        var shadowed = new Set();         // 落在 replace 区间内 = 已被回滚（transcript 藏行判据）
+        var visibleTurns = new Set();     // 含至少一条**未被遮蔽**消息的 turn 号（回合 chrome）
         var dupMessageId = 0
         var dupByMessageId = new Map();
         for (var i = 0; i < list.length; i++) {
@@ -1041,14 +1065,15 @@ window.__ModuleLoader__.load({
           }
           if (m.type === 'tool/call' && m.id != null) byCallId.set(String(m.id), m.seq);
           if (m.turn != null && !byTurn.has(String(m.turn))) byTurn.set(String(m.turn), m.seq);
-          if (m.visible === true) {
-            visible.add(m.seq);
-            if (m.turn != null) visibleTurns.add(String(m.turn));
-          }
+          if (m.visible === true) visible.add(m.seq);
+          // 0.9.6：藏行判据改用 shadowed（replace 区间），**不用** visible（模型 surface）。
+          // visible 在 live 路径下对 tool/call 恒 false → 会把整页工具行全藏。
+          if (m.shadowed === true) shadowed.add(m.seq);
+          else if (m.turn != null) visibleTurns.add(String(m.turn));
         }
         // turnEnd 优先：它对「该 turn 内一条消息都没有」的情况仍然有效
         if (turnEnd) for (const k in turnEnd) if (Object.prototype.hasOwnProperty.call(turnEnd, k)) byTurn.set(k, turnEnd[k])
-        return { byMessageId, dupByMessageId, byTurnStep, byCallId, byTurn, visible, visibleTurns, dupMessageId, total: list.length };
+        return { byMessageId, dupByMessageId, byTurnStep, byCallId, byTurn, visible, shadowed, visibleTurns, dupMessageId, total: list.length };
       };
 
       /** node-key → { seq, all }（all = 同 id 的全部 seq，处理 restore 重放副本）。 */
@@ -1102,6 +1127,9 @@ window.__ModuleLoader__.load({
         var hidden = 0, unresolved = 0, shown = 0;
         for (var i = 0; i < rows.length; i++) {
           var row = rows[i];
+          // 0.9.6 判据：**replace 区间（shadowed）**。
+          // 演进：revertFences 塌缩（离散区间→min，全藏）→ visible（模型 surface，
+          // live 路径下 tool/call 全藏）→ 现在的 shadowed（恒定、与会话活跃无关）。
           // 0.9.4 判据（见下）：**模型 surface**。此前用 revertFences 塌缩成
           // `seq >= min(fences)`，在一个有 19 个**离散** marker 的会话里
           // min fence=10 → seq>=10 全藏 → 4792/4793 全被隐藏 → 正文几乎空白
@@ -1110,11 +1138,13 @@ window.__ModuleLoader__.load({
           if (hit === null) { unresolved++; row.removeAttribute('hidden'); continue; }
           var shouldHide;
           if (hit.turn !== undefined) {
-            // 回合 chrome：这个 turn 还有可见消息就露出来
+            // 回合 chrome：本 turn 还有未被遮蔽的消息就露出
             shouldHide = !idx.visibleTurns.has(String(hit.turn));
           } else {
-            // 消息类：直接问「它在模型 surface 上吗」
-            shouldHide = !idx.visible.has(hit.seq);
+            // 消息/工具类：**是否落在 replace 区间内**（= 被回滚掉了）。
+            // ⚠️ 不能用 visible（模型 surface）——live 路径下 tool/call 恒不在 surface，
+            //    会把整页工具行全藏（实测 157 行藏 152 行）。
+            shouldHide = idx.shadowed.has(hit.seq);
           }
           if (shouldHide) { hidden++; row.setAttribute('hidden', 'until-found'); }
           else { shown++; row.removeAttribute('hidden'); }
@@ -1224,6 +1254,8 @@ window.__ModuleLoader__.load({
               try { data = await res.json() } catch { /* keep {} */ }
               if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status))
               notifyDone(__t('done.revert'))
+              // 0.9.6：统一回填出口 —— 这个入口原先也不回填
+              refillComposer(sid, row.seq)
               try { window.dispatchEvent(new Event(CHANGED_EVENT)) } catch { /* non-browser */ }
               try {
                 if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(sid)
@@ -1456,14 +1488,57 @@ window.__ModuleLoader__.load({
     /** __currentSessionId 来自 DOM dataset，可能带 `session-` 前缀；API 只要裸 uuid。 */
     var bareSessionId = (id) => String(id || '').replace(/^session-/, '')
     /** 写盘成功后的统一收尾：通知、刷新、重放隐藏。 */
-    var afterWrite = (sid, okMsg) => {
+    /**
+     * 写盘成功后的统一收尾。
+     *
+     * ⚠️ `rawSid` 必须是**带 `session-` 前缀**的 id：`uiWorkspace.openSession`
+     * 内部 `sessions.retain(bare)` 只认 `session-<uuid>`（manager.js resolveTarget），
+     * 传裸 uuid 会抛 `unknown session <bare>` —— 而外层 `catch { }` 静默吞掉，
+     * 结果「视图重建」这条路径**从来没生效过**，只剩 150/700/1600ms 的 DOM 打补丁。
+     * 本文件其它调用点（对话框 :403、:684、:858、:1229）传的都是带前缀的，
+     * 只有 /undo /redo 因为先 `bareSessionId` 而传错。
+     */
+    var afterWrite = (rawSid, okMsg) => {
       notifyDone(okMsg)
       try { window.dispatchEvent(new Event(CHANGED_EVENT)) } catch { /* non-browser */ }
       try {
-        if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(sid)
-      } catch { /* 视图重建失败不阻断 */ }
+        if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(rawSid)
+      } catch (e) {
+        if (window.__MOPS_DEBUG) console.warn('[message-ops] openSession failed:', e)
+      }
       if (__peekRowsCache) { const c = __peekRowsCache(); if (c) c.at = 0 }
-      for (const delay of [150, 700, 1600]) setTimeout(() => { if (__refreshSurface) __refreshSurface(sid) }, delay)
+      const bare = bareSessionId(rawSid)
+      for (const delay of [150, 700, 1600]) setTimeout(() => { if (__refreshSurface) __refreshSurface(bare) }, delay)
+    }
+
+    /**
+     * 回填 composer（opencode 语义：回滚后把被删掉的那句原文还给输入框）。
+     *
+     * 0.9.6 统一出口 —— 此前 5 个回滚/恢复入口里只有 2 个回填
+     * （对话框 :403 与 /undo :1495），悬停回滚按钮、AI 时钟按钮、dock Restore、
+     * /redo **全部不回填**，表现正是「回滚成功了但消息框是空的」。
+     *
+     * 取文本规则：rowsCache 里 seq <= boundary 的最后一条带 fullText 的行。
+     *   - /undo        → boundary 就是被回滚的那条用户消息 → 取到它自己 ✓
+     *   - AI 时钟按钮  → boundary 是 AI 消息 seq → 取到它之前那条用户消息 ✓
+     * 会话不匹配时直接放弃（不跨会话写，避免串台）。
+     */
+    var refillComposer = (rawSid, boundarySeq) => {
+      try {
+        const cache = __peekRowsCache ? __peekRowsCache() : null
+        if (!cache || !Array.isArray(cache.rows)) return false
+        const want = bareSessionId(rawSid)
+        if (bareSessionId(cache.sid) !== want) return false
+        const rows = cache.rows.filter((r) => r && typeof r.seq === 'number' && r.seq <= boundarySeq && r.fullText)
+        if (!rows.length) return false
+        if (!__inputActions || typeof __inputActions.setDraft !== 'function') return false
+        __inputActions.setDraft(rows[rows.length - 1].fullText)
+        return true
+      } catch (e) {
+        // 原来这里 `catch {}` 完全静默 —— 失败了连痕迹都没有，排查时看不到
+        console.warn('[message-ops] setDraft failed:', e)
+        return false
+      }
     }
 
     /**
@@ -1472,8 +1547,9 @@ window.__ModuleLoader__.load({
      * 尾部但不在 surface 上，服务端会以 `surface replace: start seq N not found in surface` 拒绝。
      */
     var runUndo = () => {
-      const sid = bareSessionId(__currentSessionId)
-      if (!sid) return false
+      const rawSid = __currentSessionId
+      const sid = bareSessionId(rawSid)
+      if (!sid) { notifyDone(__t('undo.none') || '没有可回滚的消息', 'error'); return false }
       const target = lastRevertable()
       if (!target) { notifyDone(__t('undo.none') || '没有可回滚的消息', 'error'); return false }
       fetch('/api/message-ops/revert', {
@@ -1483,11 +1559,8 @@ window.__ModuleLoader__.load({
         .then(async (res) => {
           const data = await res.json().catch(() => ({}))
           if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status))
-          afterWrite(sid, __t('undo.done.undo'))
-          // opencode 语义：回滚后**原文回输入框**，用户可改后重发
-          if (target.fullText && __inputActions && typeof __inputActions.setDraft === 'function') {
-            try { __inputActions.setDraft(target.fullText) } catch { /* 回填失败不阻断 */ }
-          }
+          refillComposer(rawSid, target.seq)   // 先回填，再重建视图（与对话框一致）
+          afterWrite(rawSid, __t('undo.done.undo'))
         })
         .catch((reason) => notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error'))
       return true

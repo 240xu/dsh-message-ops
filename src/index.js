@@ -266,6 +266,17 @@ async function opsList(targetCtx, sessionId) {
   let visibleCount = 0;
   for (const m of messages) {
     m.visible = visibleNodes ? visibleNodes.has(m.seq) : !shadowed.has(m.seq);
+    // 0.9.6：**shadowed 与 visible 是两套语义，不能混用。**
+    //
+    // visible = 「是否在**模型 surface** 上」—— 两条路径还不一致：
+    //   live     → live.surface.nodes（tool/call 根本不是 surface 节点 → 恒 false）
+    //   fallback → !computeShadowed(seq)
+    // 拿它做 transcript 藏行判据会把整页工具行全藏（实测 157 行藏 152 行）。
+    //
+    // shadowed = 「是否落在任一 replace 区间内」—— 这才是「回滚掉的东西」，
+    // 且**与会话是否活跃无关**，恒由 computeShadowed(events) 算出。
+    // transcript 藏行必须用它；visible 只留给「可回滚目标」（lastRevertable）。
+    m.shadowed = shadowed.has(m.seq);
     if (m.visible) visibleCount++;
   }
   // 0.8.0 按轮步进：为每个回撤/删除标记附恢复进度与"待恢复轮"。
@@ -424,7 +435,7 @@ async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq, discard) {
       const result = applyRestore(acq.session, plan, {
         flush: () => { flushSessions(targetCtx, acq.session); },
       });
-      for (const post of noticeWindowPostamble(winR)) acq.session.append(post.kind, post.data);
+      for (const post of noticeWindowPostamble(win)) acq.session.append(post.kind, post.data);
       return { ok: true, ...result, discarded: plan.discard === true, upToSeq: plan.upToSeq, restoredSourceSeqs: plan.replayable.map((i) => i.seq), range: { startSeq: plan.startSeq, endSeq: plan.endSeq } };
     } finally {
       acq.release();
