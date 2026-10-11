@@ -8,7 +8,7 @@
 
 import { zstdCompressSync } from "node:zlib";
 import { open as openFile, truncate as truncateFile, stat as statFile } from "node:fs/promises";
-import { isSessionId, sessionIdVariants, findSessionDirs, readSessionFileAsync, listMessages, computeShadowed, messageText, turnBounds } from "./session-file.js";
+import { isSessionId, sessionIdVariants, findSessionDirs, readSessionFileAsync, listMessages, computeShadowed, messageText, turnBounds, markCommitted } from "./session-file.js";
 import { restoreNoticeText, planRevertFromEvents, planDeleteFromEvents, nextSeqFrom, buildMarkerEvent, buildRestoreNoticeEvent, buildReplayEvent, planNoticeWindow, noticeWindowPreamble, noticeWindowPostamble,
   OpsError, planRevert, planDelete, planRestore, applyRestore, applySurfaceReplace,
   restoreProgress, pendingRestoreTurns,
@@ -316,6 +316,29 @@ async function buildDerived(logPath) {
       preview: seqText.get(t.turnSeq) || ('#' + t.turnSeq),
     }));
   }
+
+  // ── 0.10.1 marker 的 commit 语义（对齐 opencode）──────────────────────────
+  //
+  // 用户实测反馈：「我把消息改完发出去了，恢复弹窗还在，我不知道它让我恢复到哪去」。
+  // 根因是我们把「可撤销窗口」做成了常驻提示，而 opencode 不是这么设计的。
+  //
+  // opencode 的 session.revert 是**单个可清空字段**（不是 marker 列表）：
+  //   packages/core/src/session/session.ts:165
+  //     // Commit a staged revert only after preparation succeeds, before admitting new work.
+  //     if (session.revert) yield* SessionRevert.commit(bus, session)
+  //   → Session.prompt（用户发出下一条消息）时**自动 commit**
+  //   → projector: DELETE WHERE seq >= boundary.seq + revert: null
+  //   → UI affordance 消失（packages/app/.../use-session-commands.tsx:
+  //      disabled: !revertMessageID() —— 它压根没有常驻弹窗，只有会灰掉的 undo/redo 命令）
+  //   会 compact 时同样 commit（session.ts:251）。
+  //
+  // 我们是 append-only 日志，marker 落盘后永不消失 → 必须自己算「已提交」。
+  // 判据 = marker 之后出现**真实用户输入**：
+  //   source.kind === 'user'  是一等字段（全量实测 672 条），
+  //   注入行各有独立 kind（tool-jobs / agent-instructions / runtime-context /
+  //   subagent-settled / model-selection …），restore 重放副本是 plugin:@240xu/...，
+  //   三者天然可分 —— **不需要再写一遍 injected 正则**。
+  markCommitted(messages);
 
   // 0.9.4 撤掉 `revertFences` / `m.reverted`（离散区间塌缩成 seq>=min → 全藏）
   // 的复盘见 README「0.9.4 · 修「正文几乎空白」」。

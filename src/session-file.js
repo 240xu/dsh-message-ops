@@ -259,6 +259,45 @@ export function readReplaceOp(e) {
  * 从磁盘事件流推导「被遮蔽」seq 集合：后来发生的 surface replace 事件
  * 遮蔽 [startSeq..endSeq]（append-only：遮蔽仍在日志但不再可见）。
  */
+/**
+ * marker 的 commit 语义（0.10.1，对齐 opencode）。
+ *
+ * 用户反馈：「我把消息改完发出去了，恢复弹窗还在，我不知道它让我恢复到哪去」。
+ *
+ * opencode 的 session.revert 是**单个可清空字段**，不是 marker 列表：
+ *   core/src/session/session.ts:165
+ *     // Commit a staged revert only after preparation succeeds, before admitting new work.
+ *     if (session.revert) yield* SessionRevert.commit(bus, session)
+ *   即 **Session.prompt（用户发出下一条消息）时自动 commit**，projector 随后
+ *   `DELETE WHERE seq >= boundary.seq` 并把 `revert` 置 null；
+ *   UI 侧（app/.../use-session-commands.tsx）只有会灰掉的 undo/redo 命令：
+ *     disabled: !actions.session.data.revertMessageID()
+ *   —— 它**根本没有常驻弹窗**，状态一清零 affordance 就没意义了。
+ *   compact 时同样 commit（session.ts:251）。
+ *
+ * 我们是 append-only 日志，marker 落盘后永不消失，所以必须自己算「已提交」。
+ *
+ * 判据 = marker 之后出现**真实用户输入**（`source.kind === 'user'`）。
+ * 这是一等字段（全量实测 672 条），三类干扰天然可分、**无需重写 injected 正则**：
+ *   - 注入行      → tool-jobs / agent-instructions / runtime-context / skill-catalog
+ *                    / subagent-settled / model-selection / team-message …（各 41~172 条）
+ *   - 重放副本    → plugin:@240xu/dsh-message-ops（restore 写入）
+ *   - 真实输入    → user
+ *
+ * @param {Array<object>} messages  listMessages 的输出（会被就地打上 committed）
+ */
+export function markCommitted(messages) {
+  const realUserSeqs = [];
+  for (const m of messages) {
+    if (m && m.type === "user/message" && m.sourceKind === "user") realUserSeqs.push(m.seq);
+  }
+  for (const m of messages) {
+    if (!m || m.marker !== true) continue;
+    m.committed = realUserSeqs.some((seq) => seq > m.seq);
+  }
+  return messages;
+}
+
 export function computeShadowed(events) {
   const shadowed = new Set();
   for (const e of events) {

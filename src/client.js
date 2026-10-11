@@ -828,7 +828,14 @@ window.__ModuleLoader__.load({
       // （按 restoredSourceSeqs 进度算；旧 notice 无该字段 → 服务端视为整段已恢复）。
       // 旧的"行内 restoresSeq 集合"客户端判定已删除——按轮步进下部分恢复的标记
       // 也带 restoresSeq，旧逻辑会把它们误杀（实测：第一轮恢复后整条消失）。
-      return (msgs || []).filter((m) => m.marker && m.sourceKind !== 'compact-checkpoint' && m.restoreComplete !== true)
+      // 0.10.1：再排掉**已提交**的 marker —— 对齐 opencode
+      // （用户发出下一条真实消息后，opencode 在 Session.prompt 里自动
+      //  SessionRevert.commit() → revert:null → affordance 消失）。
+      // 我们是 append-only，marker 不会真消失，所以由服务端按
+      // 「marker 之后有无 source.kind==='user' 的真实输入」算出 committed。
+      return (msgs || []).filter((m) =>
+        m.marker && m.sourceKind !== 'compact-checkpoint'
+        && m.restoreComplete !== true && m.committed !== true)
     }
 
     function RevertDock(props) {
