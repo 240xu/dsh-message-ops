@@ -8,7 +8,7 @@ window.__ModuleLoader__.load({
   id: '@240xu/dsh-message-ops',
   factory: (require) => {
     const React = require('react')
-    const { useCallback, useEffect, useState } = React
+    const { useCallback, useEffect, useRef, useState } = React
     const { Modal } = require('@deepseek-ai/dsh-client-ui-primitives')
 
     const SLOT = 'conversation.session.header.actions'
@@ -849,6 +849,10 @@ window.__ModuleLoader__.load({
       const sessions = useSessions ? useSessions((s) => s) : undefined
       const summary = sessions && sessions.byId ? sessions.byId[sessionId] : undefined
       const running = summary ? summary.running === true : false
+      // F1 主路径：宿主 activity 信号（见下方 effect）；null = 无 useSessions 或尚无活动
+      const activityAt = summary && typeof summary.updatedAt === 'number' ? summary.updatedAt : null
+      const loadRef = useRef(() => {})
+      const lastActivityRef = useRef(activityAt)
       const [open, setOpen] = useState(false)
       const [markers, setMarkers] = useState(null) // 活跃回撤标记（已恢复的自动消失）
       const [shadowCount, setShadowCount] = useState(0) // 标记 range 内被遮蔽消息数（标题口径）
@@ -889,7 +893,13 @@ window.__ModuleLoader__.load({
         let alive = true
         const onChange = () => load()
         window.addEventListener(CHANGED_EVENT, onChange)
-        const load = () => fetchMessagesJson('/api/message-ops/messages?sessionId=' + encodeURIComponent(sessionId))
+        const load = () => {
+          // R1（复审实测）：fetchMessagesJson 有 MSG_COALESCE_MS=1000 共用窗——
+          // 既有 scan 观察器在 T+200ms 已取到**落盘批窗(200ms)之前**的旧响应，
+          // 本路径若不先失效 memo，会原样复用它 → committed 仍是 false → 弹窗不清。
+          // emitChanged() 自己就是先 invalidate 再发事件，这里同款红线。
+          invalidateMessagesMemo()
+          return fetchMessagesJson('/api/message-ops/messages?sessionId=' + encodeURIComponent(sessionId))
           .then((data) => {
             if (!alive || !data || !data.ok) return
             const msgs = data.messages || []
@@ -906,9 +916,38 @@ window.__ModuleLoader__.load({
             setShadowCount(seen.size)
           })
           .catch(() => {})
+        }
+
+        // F1（复审后重做）：宿主在 user/message(source.kind==='user') 时会
+        // `ctx.emit("api-session/activity", id, event.time)`
+        // （$B/dsh-api-session-controller/lib/index.js:2890-2896），客户端
+        // :3624 收到后抬高 summary.updatedAt（:3002 case "activity"）——
+        // 这是与服务端 markCommitted **完全同判据**的一等信号。
+        //
+        // 第一版用 MutationObserver 盯 DOM 属性，复审判定为次优：
+        //  - 判据靠近似（data-chat-flow-kind / 13:input-message 会命中注入行）
+        //  - 多挂第三个 body-subtree 观察器
+        //  - ready 门控在首拉失败时永久失效
+        // 本组件本就经 useSessions 读 summary（running 同源依赖），零新增依赖。
+        loadRef.current = load
         load()
-        return () => { alive = false; window.removeEventListener(CHANGED_EVENT, onChange) }
+
+        return () => {
+          alive = false
+          loadRef.current = () => {}
+          window.removeEventListener(CHANGED_EVENT, onChange)
+        }
       }, [sessionId])
+
+      // F1 主路径：宿主 activity 信号抬高 updatedAt → 重拉一次。
+      // lastActivityRef 让 mount 那次（与初始值相等）不触发，避免开会话双请求。
+      useEffect(() => {
+        if (activityAt == null) return
+        if (lastActivityRef.current === activityAt) return
+        lastActivityRef.current = activityAt
+        loadRef.current()
+      }, [activityAt])
+
 
       // items 变化自动折叠（opencode createEffect 同款；必须在早退之前——Hooks 规则）
       useEffect(() => { setOpen(false) }, [markers && markers.length, markers && markers[0] && markers[0].seq])
