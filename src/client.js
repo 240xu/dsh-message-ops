@@ -28,6 +28,14 @@ window.__ModuleLoader__.load({
     // 同一会话在此窗口内的请求共享同一个 promise；窗口**必须 < 1600ms**，
     // 否则「视图重建后重算隐藏」的 1600ms 兜底会被上一次响应吞掉。
     const MSG_COALESCE_MS = 1000
+    // R2：activity 信号后**延迟**重拉的时刻（ms），覆盖 200ms 落盘批窗 + fsync。
+    //
+    // 为什么是「延迟」而不是「立即 + 条件重试」：marker 真被 commit 时两种写法都能
+    // 收敛，但 activityAt 存在**伪变化**（首帧 store 未就绪 → 后被 lastPromptAt
+    // 投影折入抬高），伪变化时 marker 本来就清不掉 —— 条件重试会因「marker 未清空」
+    // 把整条链跑满。活体实测：条件重试开会话 6 次 GET（修基线后仍 4 次），
+    // 固定延迟 3 次。伪变化是每次开会话都会发生的常态，取可预期的固定代价。
+    const ACTIVITY_DELAYS = [350, 1400]
     var __messagesMemo = { url: null, at: 0, p: null, settled: false }
     var invalidateMessagesMemo = () => { __messagesMemo = { url: null, at: 0, p: null, settled: false } }
     const emitChanged = () => {
@@ -852,7 +860,7 @@ window.__ModuleLoader__.load({
       // F1 主路径：宿主 activity 信号（见下方 effect）；null = 无 useSessions 或尚无活动
       const activityAt = summary && typeof summary.updatedAt === 'number' ? summary.updatedAt : null
       const loadRef = useRef(() => {})
-      const lastActivityRef = useRef(activityAt)
+      const lastActivityRef = useRef(undefined) // undefined = 尚未建立基线（见下方 effect）
       const [open, setOpen] = useState(false)
       const [markers, setMarkers] = useState(null) // 活跃回撤标记（已恢复的自动消失）
       const [shadowCount, setShadowCount] = useState(0) // 标记 range 内被遮蔽消息数（标题口径）
@@ -903,10 +911,11 @@ window.__ModuleLoader__.load({
           .then((data) => {
             if (!alive || !data || !data.ok) return
             const msgs = data.messages || []
-            setMarkers(activeMarkers(msgs))
+            const act = activeMarkers(msgs)
+            setMarkers(act)
             // 0.5.2（P2）：标题口径 = 标记 range 内 visible=false 的去重 seq 数
             const seen = new Set()
-            for (const mk of activeMarkers(msgs)) {
+            for (const mk of act) {
               const start = mk.range && typeof mk.range.start === 'number' ? mk.range.start : mk.seq
               const end = mk.range && typeof mk.range.end === 'number' ? mk.range.end : start
               for (const m of msgs) {
@@ -915,7 +924,7 @@ window.__ModuleLoader__.load({
             }
             setShadowCount(seen.size)
           })
-          .catch(() => {})
+          .catch(() => -1)
         }
 
         // F1（复审后重做）：宿主在 user/message(source.kind==='user') 时会
@@ -939,13 +948,32 @@ window.__ModuleLoader__.load({
         }
       }, [sessionId])
 
-      // F1 主路径：宿主 activity 信号抬高 updatedAt → 重拉一次。
+      // F1 主路径：宿主 activity 信号抬高 updatedAt → 重拉。
       // lastActivityRef 让 mount 那次（与初始值相等）不触发，避免开会话双请求。
+      //
+      // R2（复审推翻原「闪一下」定性，实为**弹窗可能一直不消失**）：
+      //   宿主在 session.append 后**同步** emit api-session/activity
+      //   （$B/dsh-api-session-controller/lib/index.js:2890-2896），而落盘是
+      //   **异步批窗**（$B/dsh-session/lib/index.js:1406 "hot path never blocks
+      //   on I/O"；persistence-jsonl:187 buffered/batchTimer）。
+      //   我们的 GET 读磁盘 + derivedCache 按 mtimeMs+size 失效（index.js:376），
+      //   拉取链 ≈30-150ms **几乎必然早于落盘** → 服务端 markCommitted 看不到
+      //   新 user 消息 → committed 仍是 false。
+      //   而 updatedAt 每条消息只跳变一次、scan 走 fetchRows 碰不到 markers、
+      //   宿主输入也不发 CHANGED_EVENT —— **没有第二次触发**，弹窗会一直留到
+      //   下一条消息或一次插件写操作。这正是用户原话的病灶。
+      //   故：有界重试，直到 dock 清空或重试耗尽（每条消息最多 3 次 GET）。
       useEffect(() => {
         if (activityAt == null) return
+        // 建基线：首帧渲染时宿主 store 往往尚未就绪 → activityAt 先是 null 再被
+        // 填充成数值（或经 lastPromptAt 投影折入）。若把这次「null→值」当成新活动，
+        // 开会话就会白跑一条重试链 —— 活体实测 6 次 GET（本应 1 次）。
+        // 首个非空值只建立基线不触发（mount 那次 load 已经拉过）。
+        if (lastActivityRef.current === undefined) { lastActivityRef.current = activityAt; return }
         if (lastActivityRef.current === activityAt) return
         lastActivityRef.current = activityAt
-        loadRef.current()
+        const timers = ACTIVITY_DELAYS.map((d) => setTimeout(() => { loadRef.current() }, d))
+        return () => { for (let i = 0; i < timers.length; i++) clearTimeout(timers[i]) }
       }, [activityAt])
 
 

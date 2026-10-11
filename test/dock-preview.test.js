@@ -22,6 +22,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import url from 'node:url'
+import { zstdCompressSync } from 'node:zlib'
 
 const ROOT = path.resolve(path.dirname(url.fileURLToPath(import.meta.url)), '..')
 process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-msgops-preview-'))
@@ -136,11 +137,25 @@ test('F1: 宿主 activity 信号 → 重拉（复审后主路径）', () => {
   // 1) 存在以 activityAt 为依赖的 effect
   assert.match(rd, /\}, \[activityAt\]\)/, 'RevertDock 必须有依赖 [activityAt] 的 effect')
   // 2) 该 effect 调用 loadRef（首拉 effect 把 load 存进 ref）
-  const act = rd.match(/useEffect\(\(\) => \{[\s\S]{0,300}?\}, \[activityAt\]\)/)
+  const act = rd.match(/useEffect\(\(\) => \{[\s\S]{0,2500}?\}, \[activityAt\]\)/)
   assert.ok(act, '找不到 activityAt effect 本体')
   assert.match(act[0], /loadRef\.current\(\)/, 'activity effect 必须触发 loadRef')
   // 3) mount 不得双请求：首值相等时跳过
   assert.match(act[0], /lastActivityRef\.current === activityAt/, '缺少 mount 去重门控')
+  // 3a) 基线建立：首帧宿主 store 常未就绪（activityAt 先 null 后被填充），
+  //     若把「null→值」当成新活动，开会话会白跑重试链（活体实测 6 次 GET，本应 1 次）。
+  assert.match(act[0], /lastActivityRef\.current === undefined/, '缺少「首个非空值只建基线」门控')
+  assert.match(rd, /useRef\(undefined\)/, 'lastActivityRef 必须用 undefined 表示未建基线（用 activityAt 初值会漏判）')
+  // 3b) **M3 假锁补丁**：上一轮复审沙箱实测 —— 只断言 effect 调 loadRef.current()，
+  //     删掉 `loadRef.current = load` 这行赋值后 157 条仍全绿（effect 调的是
+  //     useRef(()=>{}) 的初始空函数 → 宿主 activity 永不重拉 → 用户 bug 原样回归）。
+  //     这里补锁赋值本身：ref 里装的必须真的是 load。
+  assert.match(rd, /loadRef\.current = load\b/, 'loadRef 必须被赋值为 load（否则 effect 调的是空函数）')
+  // 3c) **R2**：activity 同步发 / 落盘异步批窗 → 必须有界重试，否则首次拉到旧
+  //     派生缓存后**再无第二次触发**，弹窗一直留着（复审推翻了「闪一下」的定性）
+  assert.match(act[0], /ACTIVITY_DELAYS\.map\(/, 'activity 路径必须延迟重拉（R2：落盘批窗 200ms）')
+  assert.match(act[0], /clearTimeout/, '延迟定时器必须可清理（否则切会话后仍会对旧 sessionId 重拉）')
+  assert.match(act[0], /for \(let i = 0; i < timers\.length; i\+\+\) clearTimeout/, '必须清全部定时器')
   // 4) activityAt 来源是 summary.updatedAt（宿主 api-session/activity 抬高的那个字段）
   assert.match(rd, /summary && typeof summary\.updatedAt === 'number'/, 'activityAt 必须取自 summary.updatedAt')
 })
@@ -234,4 +249,60 @@ test('接线真锁: 注入行（非 kind:user）不得触发 commit', async () =
   const r = await opsList(ctxFor(), SID)
   const mk = r.messages.find((x) => x.marker === true)
   assert.equal(mk.committed, false, '注入行不得触发 commit')
+})
+
+// ------------------------------------------------- R2 前提：落盘后缓存失效
+//
+// R2（复审推翻原「闪一下」定性）：宿主 append 后**同步** emit activity
+// （$B/dsh-api-session-controller/lib/index.js:2890-2896），而落盘是**异步批窗**
+// （$B/dsh-session/lib/index.js:1406 "hot path never blocks on I/O"；
+// persistence-jsonl:187 buffered/batchTimer）。
+// 客户端 GET 读磁盘 + derivedCache 按 mtimeMs+size 失效（src/index.js:376），
+// 拉取链 ≈30-150ms **几乎必然早于落盘** → markCommitted 看不到新 user 消息 →
+// committed 仍是 false；而 updatedAt 每条消息只跳变一次，**没有第二次触发**。
+//
+// 本组锁住「重试能生效」的那个前提：**落盘发生后，派生缓存必须失效并翻转
+// committed**。若这条不成立，客户端重试多少次都没用。
+test('R2 前提: 落盘追加后派生缓存失效 → committed 翻转 true', async () => {
+  writeSession([
+    msg('user/message', 0, '旧问题', 'user'),
+    msg('assistant/message', 1, '旧回答'),
+    {
+      type: 'system/message', seq: 2, time: 1100,
+      surfaceOp: { op: 'replace', startSeq: 0, endSeq: 1 },
+      sourceEventSeqs: [0, 1],
+      data: { turn: 1, step: 1, message: { role: 'system', content: [{ type: 'text', text: '[消息回滚] 到 seq 1' }] } },
+    },
+  ])
+  const logPath = path.join(process.env.DSH_HOME, 'sessions', 'proj-prev', SID, 'session.v3.jsonl.zstd')
+
+  // 第一次：落盘前（模拟 activity 已到、批窗未刷）→ 派生缓存填的是未提交态
+  const before = await opsList(ctxFor(), SID)
+  assert.equal(before.messages.find((x) => x.marker === true).committed, false,
+    '落盘前应 committed=false（这正是 R2 的病灶）')
+
+  // 模拟批窗 flush：追加一帧真实用户输入（size 必变 → 缓存必然失效）
+  const jsonl = JSON.stringify(msg('user/message', 3, '改完重发的新消息', 'user')) + '\n'
+  fs.appendFileSync(logPath, zstdCompressSync(Buffer.from(jsonl, 'utf8')))
+
+  // 第二次：落盘后 → 缓存必须重算，committed 翻转
+  const after = await opsList(ctxFor(), SID)
+  assert.equal(after.messages.find((x) => x.marker === true).committed, true,
+    '落盘追加后 derivedCache 必须失效并把 committed 翻成 true —— 否则客户端重试无效')
+})
+
+test('R2 前提: 缓存确实在两次读之间被复用（不是每次都重读盘）', async () => {
+  // 若 opsList 每次都重读盘，上面那条就证明不了「缓存失效」这件事。
+  // 用 mtime+size 未变时的两次读断言结果恒等，间接确认命中缓存路径。
+  writeSession([
+    msg('user/message', 0, '问题', 'user'),
+    msg('assistant/message', 1, '回答'),
+  ])
+  const a = await opsList(ctxFor(), SID)
+  const b = await opsList(ctxFor(), SID)
+  assert.deepEqual(
+    a.messages.map((m) => [m.seq, m.type, m.committed === true]),
+    b.messages.map((m) => [m.seq, m.type, m.committed === true]),
+    'mtime+size 未变时两次读必须逐条恒等（否则 derivedCache 未生效，R2 前提不成立）',
+  )
 })
