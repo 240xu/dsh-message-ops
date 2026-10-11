@@ -116,6 +116,7 @@ window.__ModuleLoader__.load({
       'dock.collapse': '折叠回撤列表',
       'dock.shadowedN': '{n} 条已遮蔽',
       'dock.restore': '恢复',
+      'dock.restoreHint': '恢复为重放：消息将出现在会话末尾，不会回到原位',
       'dock.restoring': '恢复中…',
       'slot.quote': '引用到输入框',
       'quote.done': '已引用到输入框',
@@ -175,6 +176,7 @@ window.__ModuleLoader__.load({
       'dock.collapse': 'Collapse revert list',
       'dock.shadowedN': '{n} shadowed',
       'dock.restore': 'Restore',
+      'dock.restoreHint': 'Restores by replay: messages appear at the end of the session, not in their original place',
       'dock.restoring': 'Restoring…',
       'slot.quote': 'Quote to composer',
       'quote.done': 'Quoted into composer',
@@ -958,6 +960,11 @@ window.__ModuleLoader__.load({
         React.createElement('span', { className: 'mopsRdRowText' }, '#' + row.seq + ' · ' + (row.snippet || '')),
         React.createElement('button', {
           type: 'button', className: 'mopsRdRestore', disabled: restoring != null || running,
+          // 0.10.2 专家组评估结论：唯一「严重度=高」的真实缺口是 restore 为**重放**语义 ——
+          // 消息带新 seq 落到会话末尾，**不会回到原位**（引擎 SurfaceOp 只有 append/replace，
+          // 不存在解除遮蔽的原语）。用户点下去看到消息"搬家到底部"会以为出 bug，
+          // 所以把语义写在按钮上，别让人靠猜。
+          title: t('dock.restoreHint'),
           onClick: () => restoreRow(row),
         }, restoring === rowKey(row) ? t('dock.restoring') : t('dock.restore')),
       )

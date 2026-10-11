@@ -293,6 +293,13 @@ async function buildDerived(logPath) {
   for (const e of seqText ? events : []) {
     if (!e || typeof e.seq !== "number") continue;
     if (e.type !== "user/message" && e.type !== "assistant/message") continue;
+    // 0.10.2：**别把宿主注入行当恢复目标的预览文案**。
+    // 实测 dock 展开后 44 行预览里出现 `<system-reminder> Updated instructio…`、
+    // `Agent … sent a message`、`Background subagent … finished` —— 用户看到的
+    // 「将恢复到这条」根本不是他写的话，直接加剧「不知道恢复到哪去」的困惑
+    // （这条困惑正是 0.10.1 修 commit 生命周期的起因）。
+    // `sourceKind === 'user'` 是一等字段，只放真实用户输入；assistant 全放（模型输出非注入）。
+    if (e.type === "user/message" && ((e.data || {}).source || {}).kind !== "user") continue;
     const t = messageText(e);
     if (t && t.trim()) seqText.set(e.seq, t.trim().replace(/\s+/g, " ").slice(0, 80));
   }
@@ -313,7 +320,11 @@ async function buildDerived(logPath) {
     m.pendingTurns = pendingRestoreTurns(events, m.seq, prog).map((t) => ({
       upTo: t.seqs[t.seqs.length - 1],
       count: t.seqs.length,
-      preview: seqText.get(t.turnSeq) || ('#' + t.turnSeq),
+      // 0.10.2：轮起点常落在注入行上（system-reminder / 后台任务 / 子代理通知），
+      // 直接拿它当预览会显示「恢复到 <system-reminder>…」。改为在**该轮的 seq 集合里**
+      // 找第一条真实内容；一个都没有才退回 #seq（诚实显示序号，不编造文案）。
+      preview: t.seqs.reduce((hit, seq) => (hit != null ? hit : (seqText.has(seq) ? seqText.get(seq) : null)), null)
+        || ('#' + t.turnSeq),
     }));
   }
 
