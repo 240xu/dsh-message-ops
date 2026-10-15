@@ -56,8 +56,11 @@ function writeSession(events) {
   return logPath
 }
 
-function ctxFor() {
+function ctxFor({ log = null } = {}) {
   const session = { id: SID, surface: { nodes: [0, 1, 2, 3] } }
+  // log = 宿主内存事件日志（$B/dsh-session/lib/index.js:516 this.log）。
+  // 传 null 模拟「会话不在内存里 / 读不到」→ 必须退回磁盘派生语义。
+  if (log) session.log = log
   const sessions = { get: () => session, list: () => [session] }
   const agents = { get: () => ({ status: 'idle' }) }
   return { sessions, agents, get: (n) => (n === 'sessions' ? sessions : n === 'agents' ? agents : undefined) }
@@ -129,51 +132,49 @@ test('F7: 无 marker 的会话 → pendingTurns 空（seqText 短路，preview r
 
 test('F1: 宿主 activity 信号 → 重拉（复审后主路径）', () => {
   // ⚠️ 诚实标注：以下是**形状锁**（源码字符串），不是行为锁。client.js 是
-  // factory+require 包裹的 React 组件，node --test 无法执行，故客户端侧
-  // 只能锁「代码长这样」。**服务端行为**由下方 markCommitted 接线测试真锁。
-  // 第一版曾用 MutationObserver，复审判定为次优（判据近似、多挂第三个
-  // body-subtree 观察器、ready 门控在首拉失败时永久失效），已删除。
+  // factory+require 包裹的 React 组件，node --test 无法执行。服务端行为由
+  // 「(C) live.log 补算」那几条真实 opsList 测试背书。
   const rd = clientSrc.slice(clientSrc.indexOf('function RevertDock'))
-  // 1) 存在以 activityAt 为依赖的 effect
   assert.match(rd, /\}, \[activityAt\]\)/, 'RevertDock 必须有依赖 [activityAt] 的 effect')
-  // 2) 该 effect 调用 loadRef（首拉 effect 把 load 存进 ref）
   const act = rd.match(/useEffect\(\(\) => \{[\s\S]{0,2500}?\}, \[activityAt\]\)/)
   assert.ok(act, '找不到 activityAt effect 本体')
   assert.match(act[0], /loadRef\.current\(\)/, 'activity effect 必须触发 loadRef')
-  // 3) mount 不得双请求：首值相等时跳过
-  assert.match(act[0], /lastActivityRef\.current === activityAt/, '缺少 mount 去重门控')
-  // 3a) 基线建立：首帧宿主 store 常未就绪（activityAt 先 null 后被填充），
-  //     若把「null→值」当成新活动，开会话会白跑重试链（活体实测 6 次 GET，本应 1 次）。
-  assert.match(act[0], /lastActivityRef\.current === undefined/, '缺少「首个非空值只建基线」门控')
-  assert.match(rd, /useRef\(undefined\)/, 'lastActivityRef 必须用 undefined 表示未建基线（用 activityAt 初值会漏判）')
-  // 3b) **M3 假锁补丁**：上一轮复审沙箱实测 —— 只断言 effect 调 loadRef.current()，
-  //     删掉 `loadRef.current = load` 这行赋值后 157 条仍全绿（effect 调的是
-  //     useRef(()=>{}) 的初始空函数 → 宿主 activity 永不重拉 → 用户 bug 原样回归）。
-  //     这里补锁赋值本身：ref 里装的必须真的是 load。
-  assert.match(rd, /loadRef\.current = load\b/, 'loadRef 必须被赋值为 load（否则 effect 调的是空函数）')
-  // 3c) **R2**：activity 同步发 / 落盘异步批窗 → 必须有界重试，否则首次拉到旧
-  //     派生缓存后**再无第二次触发**，弹窗一直留着（复审推翻了「闪一下」的定性）
-  assert.match(act[0], /ACTIVITY_DELAYS\.map\(/, 'activity 路径必须延迟重拉（R2：落盘批窗 200ms）')
-  assert.match(act[0], /clearTimeout/, '延迟定时器必须可清理（否则切会话后仍会对旧 sessionId 重拉）')
-  assert.match(act[0], /for \(let i = 0; i < timers\.length; i\+\+\) clearTimeout/, '必须清全部定时器')
-  // 4) activityAt 来源是 summary.updatedAt（宿主 api-session/activity 抬高的那个字段）
+
+  // 3) 基线门控 —— **收紧到整条一行**（上一轮实测：只删掉句尾的 `return`
+  //    语义就断掉，而逐行断言仍绿 → 假锁 A11）。
+  assert.match(act[0],
+    /if \(lastActivityRef\.current === undefined\) \{ lastActivityRef\.current = activityAt; return \}/,
+    '「首个非空值只建基线」门控必须带 return（漏 return 会让 null→值 白拉一次）')
+  // 3a) 单调门：updatedAt 被压低再抬高时不得重复拉
+  assert.match(act[0], /activityAt <= lastActivityRef\.current/, '缺少单调门（refreshList 压低再抬高会重复拉）')
+  // 3b) 切会话必须重置基线（上一轮副作用审计实测：不重置 → 每次切会话固定 2 次浪费 GET）
+  assert.match(rd, /useEffect\(\(\) => \{ lastActivityRef\.current = undefined \}, \[sessionId\]\)/,
+    '切会话必须重置 activity 基线')
+  // 3c) **M3 补锁收紧**：上一轮实测把赋值塞进 `if (false) {}` 死分支仍绿（假锁 A10）。
+  //     用**行首缩进精确到 8 空格**约束它必须位于 effect 主体顶层。
+  assert.match(rd, /^ {8}loadRef\.current = load$/m, 'loadRef 必须赋值为 load，且位于 effect 主体顶层（非死分支/注释）')
+  assert.match(rd, /useRef\(undefined\)/, 'lastActivityRef 必须用 undefined 表示未建基线')
   assert.match(rd, /summary && typeof summary\.updatedAt === 'number'/, 'activityAt 必须取自 summary.updatedAt')
+
+  // 4) **A7 补锁**：`activeMarkers` 的**调用点**（不是定义体）。上一轮实测把
+  //    `const act = activeMarkers(msgs)` 换成 naive filter（不排 committed，
+  //    正是用户原话 bug 的客户端半边）仍 157 条全绿。
+  const eff = rd.match(/const load = \(\) => \{[\s\S]{0,2500}?\.catch\(\(\) => \{\}\)\n        \}/)
+  assert.ok(eff, '找不到 load 本体')
+  assert.match(eff[0], /const act = activeMarkers\(msgs\)/, 'load 必须用 activeMarkers(msgs) 过滤出活跃 marker')
+  assert.match(eff[0], /setMarkers\(act\)/, 'setMarkers 必须吃 activeMarkers 的结果（不能吃未过滤的 msgs）')
 })
 
 test('F1: load() 必须先失效 1000ms 共用窗（R1 —— 否则复用旧 settled 响应，弹窗不清）', () => {
-  // 复审实测：fetchMessagesJson 有 MSG_COALESCE_MS=1000；既有 scan 在 T+200ms
-  // 已取到「落盘批窗(200ms)之前」的旧响应，本路径若不先失效 memo 会原样复用
-  // → committed 仍是 false → 弹窗不清。emitChanged() 自己就是先 invalidate 再发事件。
   const rd = clientSrc.slice(clientSrc.indexOf('function RevertDock'))
   const load = rd.match(/const load = \(\) => \{[\s\S]{0,400}?fetchMessagesJson\(/)
   assert.ok(load, '找不到 dock 的 load 定义')
   const invalidateAt = load[0].indexOf('invalidateMessagesMemo()')
   const fetchAt = load[0].indexOf('fetchMessagesJson(')
   assert.ok(invalidateAt >= 0, 'load() 未调用 invalidateMessagesMemo')
-  assert.ok(invalidateAt < fetchAt, 'invalidateMessagesMemo 必须在 fetchMessagesJson **之前**（否则仍复用旧响应）')
-  // 观察器方案已删除，不得残留（否则是两套机制并存）
-  assert.ok(!/USER_NODE_SEL/.test(rd), '观察器选择器残留（应已由 activity 信号取代）')
-  assert.ok(!/ready = true/.test(rd), 'ready 门控残留（activity 信号方案不需要）')
+  assert.ok(invalidateAt < fetchAt, 'invalidateMessagesMemo 必须在 fetchMessagesJson **之前**')
+  assert.ok(!/USER_NODE_SEL/.test(rd), '观察器选择器残留')
+  assert.ok(!/ACTIVITY_DELAYS/.test(rd), '固定延迟已随 (C) 根治删除（延迟重拉不再是正确性依赖）')
 })
 
 // ---------------------------------------------------------------- F6
@@ -291,18 +292,69 @@ test('R2 前提: 落盘追加后派生缓存失效 → committed 翻转 true', a
     '落盘追加后 derivedCache 必须失效并把 committed 翻成 true —— 否则客户端重试无效')
 })
 
-test('R2 前提: 缓存确实在两次读之间被复用（不是每次都重读盘）', async () => {
-  // 若 opsList 每次都重读盘，上面那条就证明不了「缓存失效」这件事。
-  // 用 mtime+size 未变时的两次读断言结果恒等，间接确认命中缓存路径。
-  writeSession([
-    msg('user/message', 0, '问题', 'user'),
-    msg('assistant/message', 1, '回答'),
-  ])
-  const a = await opsList(ctxFor(), SID)
-  const b = await opsList(ctxFor(), SID)
-  assert.deepEqual(
-    a.messages.map((m) => [m.seq, m.type, m.committed === true]),
-    b.messages.map((m) => [m.seq, m.type, m.committed === true]),
-    'mtime+size 未变时两次读必须逐条恒等（否则 derivedCache 未生效，R2 前提不成立）',
-  )
+// ------------------------------------------------- (C) live.log 补算 committed
+//
+// R2 的根治（服务端侧）。宿主 append 后**同步** emit activity，落盘是**异步批窗**
+// （$B/dsh-session/lib/index.js:1406；persistence-jsonl:187，批窗 200ms）。
+// 磁盘派生 + derivedCache(mtime+size) 因此在批窗内是陈旧的 → markCommitted 看不到
+// 刚发出的 user 消息 → 弹窗不清。
+//
+// 根治：live Session 暴露内存日志 this.log（$B/dsh-session/lib/index.js:516），
+// 元素与磁盘事件同构（:1454-1459）→ opsList 用它补算 committed，客户端不再需要
+// 靠「延迟重拉」赌落盘已完成。
+//
+// **这组是行为锁**（走真实 opsList + 真实会话文件），不是源码字符串锁。
+
+const MARKER_SESSION = () => [
+  msg('user/message', 0, '旧问题', 'user'),
+  msg('assistant/message', 1, '旧回答'),
+  {
+    type: 'system/message', seq: 2, time: 1100,
+    surfaceOp: { op: 'replace', startSeq: 0, endSeq: 1 },
+    sourceEventSeqs: [0, 1],
+    data: { turn: 1, step: 1, message: { role: 'system', content: [{ type: 'text', text: '[消息回滚] 到 seq 1' }] } },
+  },
+]
+const liveUser = (seq, kind = 'user') => ({ type: 'user/message', seq, time: 2000, data: { source: { kind }, message: { role: 'user', content: [{ type: 'text', text: '改完重发' }] } } })
+const markerCommitted = (r) => r.messages.find((x) => x.marker === true).committed
+
+test('(C) 落盘批窗内：磁盘还没有新消息，但 live.log 有 → committed 必须 true', async () => {
+  writeSession(MARKER_SESSION())          // 磁盘上只有 marker，之后什么都没有
+  const r = await opsList(ctxFor({ log: [liveUser(3)] }), SID)
+  assert.equal(markerCommitted(r), true,
+    'live.log 里 marker 之后有真实用户输入 → 必须补算成 committed（这正是 R2 病灶的解药）')
+})
+
+test('(C) 无 live.log（会话不在内存 / 读不到）→ 退回磁盘语义 committed=false', async () => {
+  writeSession(MARKER_SESSION())
+  const r = await opsList(ctxFor(), SID)   // 不传 log
+  assert.equal(markerCommitted(r), false, '读不到 live.log 时必须退回磁盘派生值，不得凭空置 true')
+})
+
+test('(C) live.log 里只有注入行 / 重放副本 → 不得触发 commit', async () => {
+  writeSession(MARKER_SESSION())
+  const r = await opsList(ctxFor({ log: [liveUser(3, 'tool-jobs'), liveUser(4, 'plugin:@240xu/dsh-message-ops')] }), SID)
+  assert.equal(markerCommitted(r), false, '注入行与重放副本都不是「用户发了新消息」')
+})
+
+test('(C) live.log 陈旧（seq 都小于 marker）→ 不得触发 commit', async () => {
+  writeSession(MARKER_SESSION())
+  const r = await opsList(ctxFor({ log: [liveUser(0)] }), SID)
+  assert.equal(markerCommitted(r), false, 'live.log 不含 marker 之后的真实输入 → 不得置 true')
+})
+
+test('(C) 绝不污染派生缓存：补算后不带 live.log 再读，必须回到 false', async () => {
+  writeSession(MARKER_SESSION())
+  const hot = await opsList(ctxFor({ log: [liveUser(3)] }), SID)
+  assert.equal(markerCommitted(hot), true, '前置：带 live.log 时应为 true')
+  const cold = await opsList(ctxFor(), SID)
+  assert.equal(markerCommitted(cold), false,
+    'derivedCache 里的对象被改写了！这会让「本次活会话提交」泄漏到后续所有请求')
+})
+
+test('(C) live.log 乱序 / 重复 / 非事件项 → 不得抛错', async () => {
+  writeSession(MARKER_SESSION())
+  const noisy = [liveUser(5), null, { seq: 3 }, 'x', liveUser(3), liveUser(3)]
+  const r = await opsList(ctxFor({ log: noisy }), SID)
+  assert.equal(markerCommitted(r), true, '有 seq>2 的真实输入即应置 true')
 })

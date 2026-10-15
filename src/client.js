@@ -28,14 +28,6 @@ window.__ModuleLoader__.load({
     // 同一会话在此窗口内的请求共享同一个 promise；窗口**必须 < 1600ms**，
     // 否则「视图重建后重算隐藏」的 1600ms 兜底会被上一次响应吞掉。
     const MSG_COALESCE_MS = 1000
-    // R2：activity 信号后**延迟**重拉的时刻（ms），覆盖 200ms 落盘批窗 + fsync。
-    //
-    // 为什么是「延迟」而不是「立即 + 条件重试」：marker 真被 commit 时两种写法都能
-    // 收敛，但 activityAt 存在**伪变化**（首帧 store 未就绪 → 后被 lastPromptAt
-    // 投影折入抬高），伪变化时 marker 本来就清不掉 —— 条件重试会因「marker 未清空」
-    // 把整条链跑满。活体实测：条件重试开会话 6 次 GET（修基线后仍 4 次），
-    // 固定延迟 3 次。伪变化是每次开会话都会发生的常态，取可预期的固定代价。
-    const ACTIVITY_DELAYS = [350, 1400]
     var __messagesMemo = { url: null, at: 0, p: null, settled: false }
     var invalidateMessagesMemo = () => { __messagesMemo = { url: null, at: 0, p: null, settled: false } }
     const emitChanged = () => {
@@ -924,7 +916,7 @@ window.__ModuleLoader__.load({
             }
             setShadowCount(seen.size)
           })
-          .catch(() => -1)
+          .catch(() => {})
         }
 
         // F1（复审后重做）：宿主在 user/message(source.kind==='user') 时会
@@ -963,17 +955,17 @@ window.__ModuleLoader__.load({
       //   宿主输入也不发 CHANGED_EVENT —— **没有第二次触发**，弹窗会一直留到
       //   下一条消息或一次插件写操作。这正是用户原话的病灶。
       //   故：有界重试，直到 dock 清空或重试耗尽（每条消息最多 3 次 GET）。
+      useEffect(() => { lastActivityRef.current = undefined }, [sessionId])
       useEffect(() => {
         if (activityAt == null) return
         // 建基线：首帧渲染时宿主 store 往往尚未就绪 → activityAt 先是 null 再被
         // 填充成数值（或经 lastPromptAt 投影折入）。若把这次「null→值」当成新活动，
-        // 开会话就会白跑一条重试链 —— 活体实测 6 次 GET（本应 1 次）。
-        // 首个非空值只建立基线不触发（mount 那次 load 已经拉过）。
+        // 开会话就会白拉一次（活体实测曾达 6 次 GET）。首个非空值只建基线不触发。
         if (lastActivityRef.current === undefined) { lastActivityRef.current = activityAt; return }
-        if (lastActivityRef.current === activityAt) return
+        // 单调门：refreshList / 焦点刷新可能把 updatedAt 压低再抬高，不该重复拉。
+        if (activityAt <= lastActivityRef.current) return
         lastActivityRef.current = activityAt
-        const timers = ACTIVITY_DELAYS.map((d) => setTimeout(() => { loadRef.current() }, d))
-        return () => { for (let i = 0; i < timers.length; i++) clearTimeout(timers[i]) }
+        loadRef.current()
       }, [activityAt])
 
 

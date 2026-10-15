@@ -155,6 +155,49 @@ async function acquireSession(ctx, sessionId) {
 }
 
 let __runningSource = null; // 诊断：最近一次 isRunning 的判定来源
+/**
+ * 用**宿主内存日志**补算 marker's committed（0.10.5 · R2 的根治）。
+ *
+ * 问题：宿主在 session.append 后**同步** emit api-session/activity，而落盘是
+ * **异步批窗**（$B/dsh-session/lib/index.js:1406 "hot path never blocks on I/O"；
+ * persistence-jsonl:187 buffered/batchTimer，批窗 200ms）。opsList 读磁盘 +
+ * derivedCache 按 mtimeMs+size 失效（loadDerived:376），所以 activity 刚到时
+ * 几乎必然命中旧缓存 → markCommitted 看不到刚发出的 user 消息 → committed=false
+ * → dock 不清。客户端此前只能靠「延迟 350/1400ms 重拉」赌落盘已完成，
+ * 实测在 82% CPU 的 Android 上最坏 2×2.2s CPU + 2×248ms 卡顿，且 >1400ms 的
+ * 落盘没有第三次触发（残留缺口）。
+ *
+ * 根治：live Session 直接暴露内存事件日志 `this.log`
+ * （$B/dsh-session/lib/index.js:516），元素与磁盘事件**同构**
+ * （:1454-1459 `{type, seq, time, data, ...surfaceMetadata}`）→ 直接补算。
+ *
+ * 安全性（三重，都是构造上自洽的，不依赖隐式不变量）：
+ *  1. **只叠加**：只有「live.log 里存在 seq > marker.seq 的真实用户输入」才置
+ *     true；live.log 陈旧/读不到就什么都不做 → 自然退回 0.10.3 的磁盘语义。
+ *  2. **绝不动缓存**：调用点已对 baseMessages 做过每请求浅拷贝，这里只改副本。
+ *  3. **同判据**：`type==='user/message' && data.source.kind==='user'`，与
+ *     markCommitted、与宿主 activity 事件三者一致（注入行/重放副本天然不算）。
+ */
+function applyLiveCommitted(messages, live) {
+  const log = live && Array.isArray(live.log) ? live.log : null;
+  if (!log || log.length === 0) return false;
+  let realUserSeqs = null;
+  for (const e of log) {
+    if (!e || typeof e.seq !== "number" || e.type !== "user/message") continue;
+    if (((e.data || {}).source || {}).kind !== "user") continue;
+    (realUserSeqs || (realUserSeqs = [])).push(e.seq);
+  }
+  if (!realUserSeqs || realUserSeqs.length === 0) return false;
+  realUserSeqs.sort((a, b) => a - b);
+  let touched = 0;
+  for (const m of messages) {
+    if (m.marker !== true || typeof m.seq !== "number" || m.committed === true) continue;
+    // 存在 seq 更大的真实用户输入 → 已提交（与 markCommitted 的判据同形）
+    if (realUserSeqs[realUserSeqs.length - 1] > m.seq) { m.committed = true; touched++; }
+  }
+  return touched > 0;
+}
+
 function isRunning(ctx, sessionId) {
   // 0.5.4（实机三层根因第 3 层的最终修）：与宿主**官方同源**——
   // dsh-api-session-controller/lib/index.js ApiSessionList.summaryFor():
@@ -401,6 +444,9 @@ async function opsList(targetCtx, sessionId) {
   // 并发请求之间零串扰（浅拷 5038 个小对象约 1~2ms）。
   const messages = baseMessages.map((m) => ({ ...m }));
   const live = resolveSession(targetCtx, sessionId);
+  // R2 根治：磁盘派生可能还停在落盘批窗之前，用 live.log 补算 committed。
+  // 必须在 messages 浅拷贝之后（绝不改写 derivedCache 里的对象）。
+  applyLiveCommitted(messages, live);
   const visibleNodes = live && live.surface && Array.isArray(live.surface.nodes) ? new Set(live.surface.nodes) : null;
   let visibleCount = 0;
   for (const m of messages) {
