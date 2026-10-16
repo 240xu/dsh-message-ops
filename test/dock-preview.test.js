@@ -141,47 +141,35 @@ test('F7: 无 marker 的会话 → pendingTurns 空（seqText 短路，preview r
 
 // ---------------------------------------------------------------- F1
 
-test('F1: 宿主 activity 信号 → 重拉（复审后主路径）', () => {
-  // ⚠️ 诚实标注：以下是**形状锁**（源码字符串），不是行为锁。client.js 是
-  // factory+require 包裹的 React 组件，node --test 无法执行。服务端行为由
-  // 「(C) live.log 补算」那几条真实 opsList 测试背书。
+test('F1: dock 的 activity effect 必须是**单个**且以 sessRef 判「真切了会话」', () => {
+  // ⚠️ 诚实标注：以下是**形状锁**。真正执行 effect 的是下面的「effect 时序模拟」组。
+  // 形状锁存在的意义是：上一版把判定拆成两段 effect（重置 + 判定）且重置依赖带上
+  // activityAt，导致活动信号被 100% 吃掉 —— 而那版 176 条测试全绿。
+  // 形状锁在这里的作用是「快速失败」，语义正确性由时序模拟组保证。
   const rd = clientSrc.slice(clientSrc.indexOf('function RevertDock'))
-  assert.match(rd, /\}, \[activityAt\]\)/, 'RevertDock 必须有依赖 [activityAt] 的 effect')
-  const act = rd.match(/useEffect\(\(\) => \{[\s\S]{0,2500}?\}, \[activityAt\]\)/)
-  assert.ok(act, '找不到 activityAt effect 本体')
-  assert.match(act[0], /loadRef\.current\(\)/, 'activity effect 必须触发 loadRef')
-
-  // 3) 基线门控 —— **收紧到整条一行**（上一轮实测：只删掉句尾的 `return`
-  //    语义就断掉，而逐行断言仍绿 → 假锁 A11）。
-  // 3) 判定语义改由**行为测试**覆盖（见文件头的 loadActivityTransition），
-  //    这里只锁 effect 确实消费了该纯函数
-  assert.match(act[0], /activityTransition\(lastActivityRef\.current, activityAt\)/,
-    'effect 必须调用 activityTransition 纯函数（判定逻辑不得再内联）')
-  assert.match(act[0], /if \(step\.reload\) loadRef\.current\(\)/, '只有 reload=true 才触发 loadRef')
-  // 3b) 切会话重置基线。**R1（架构审计）**：原为 `= undefined`，但若切会话时
-  //     activityAt 不变（createdAt 同毫秒 / 都 null），下游 effect 依赖未变不执行
-  //     → 基线永远 undefined → **切会话后用户第一条消息被吞，无 reload**（原 bug 上移）。
-  //     必须重置到「当前」值而不是 undefined。
-  assert.match(rd, /useEffect\(\(\) => \{ lastActivityRef\.current = activityAt \}, \[sessionId, activityAt\]\)/,
-    '切会话必须把 activity 基线重置为**当前** activityAt（置 undefined 会吞掉切会话后的第一条消息）')
-  // 3b2) **R2（架构审计）**：无请求序号 → 并发 load 乱序响应会把 dock 打回去。
-  //      0.10.4 的延迟定时器事实上起到了串行化作用，删除后重叠概率上升。
-  assert.match(rd, /const reqSeqRef = useRef\(0\)/, '必须有请求序号 ref（防乱序响应覆盖 markers）')
-  assert.match(rd, /const reqSeq = \+\+reqSeqRef\.current/, 'load() 必须领取请求序号')
-  assert.match(rd, /if \(reqSeq !== reqSeqRef\.current\) return/, '只有最新请求的结果才允许落地')
-  // 3c) **M3 补锁收紧**：上一轮实测把赋值塞进 `if (false) {}` 死分支仍绿（假锁 A10）。
-  //     用**行首缩进精确到 8 空格**约束它必须位于 effect 主体顶层。
-  assert.match(rd, /^ {8}loadRef\.current = load$/m, 'loadRef 必须赋值为 load，且位于 effect 主体顶层（非死分支/注释）')
+  // 判定 + 切会话重置必须在**同一个** effect 里。上一版拆成两段、且重置段依赖带上
+  // activityAt → 同 commit 按序 flush → 重置抢先写基线 → 活动信号被吃掉（第四轮回归）。
+  const sessEffects = [...rd.matchAll(/\}, \[sessionId, activityAt\]\)/g)].map((m) => m[0])
+  assert.equal(sessEffects.length, 1,
+    `依赖 [sessionId, activityAt] 的 effect 必须只有 1 个（拆两段会让重置抢先、吃掉活动信号），实际 ${sessEffects.length}`)
+  assert.match(rd, /sessRef\.current !== sessionId/, '必须用 sessRef 判「真的切了会话」，而不是靠依赖数组')
+  assert.match(rd, /const sessRef = useRef\(sessionId\)/, 'sessRef 初值必须是当前 sessionId')
+  assert.match(rd, /activityTransition\(lastActivityRef\.current, activityAt\)/, 'effect 必须调用 activityTransition')
+  assert.match(rd, /if \(step\.reload\) loadRef\.current\(\)/, '只有 reload=true 才触发 loadRef')
+  // **M3 补锁**：时序模拟组喂的是 loadRef 桩，抓不到「ref 里装的根本不是 load」。
+  // 删掉这行赋值 → activity effect 调的是 useRef(()=>{}) 的初始空函数 →
+  // 活动信号永不触发重拉、用户 bug 原样回归（第二轮审计的实锤）。
+  assert.match(rd, /^ {8}loadRef\.current = load$/m,
+    'loadRef 必须被赋值为 load，且位于 effect 主体顶层（非死分支/注释）')
+  assert.match(rd, /const reqSeqRef = useRef\(0\)/, '必须有请求序号 ref')
+  assert.match(rd, /if \(reqSeq !== reqSeqRef\.current \|\| reqSeq <= landedSeqRef\.current\) return/,
+    '只有最新且未失败覆盖的请求才允许落地')
+  assert.match(rd, /landedSeqRef\.current = reqSeq/, '成功落地后必须记录序号（失败请求不得占用）')
   assert.match(rd, /useRef\(undefined\)/, 'lastActivityRef 必须用 undefined 表示未建基线')
   assert.match(rd, /summary && typeof summary\.updatedAt === 'number'/, 'activityAt 必须取自 summary.updatedAt')
-
-  // 4) **A7 补锁**：`activeMarkers` 的**调用点**（不是定义体）。上一轮实测把
-  //    `const act = activeMarkers(msgs)` 换成 naive filter（不排 committed，
-  //    正是用户原话 bug 的客户端半边）仍 157 条全绿。
-  const eff = rd.match(/const load = \(\) => \{[\s\S]{0,2500}?\.catch\(\(\) => \{\}\)\n        \}/)
-  assert.ok(eff, '找不到 load 本体')
-  assert.match(eff[0], /const act = activeMarkers\(msgs\)/, 'load 必须用 activeMarkers(msgs) 过滤出活跃 marker')
-  assert.match(eff[0], /setMarkers\(act\)/, 'setMarkers 必须吃 activeMarkers 的结果（不能吃未过滤的 msgs）')
+  // 上一版把错误的依赖数组 [sessionId, activityAt] 焊进了形状锁 —— 现在禁止再锁它
+  assert.ok(!/useEffect\(\(\) => \{ lastActivityRef\.current = activityAt \}, \[sessionId, activityAt\]\)/.test(rd),
+    '不得再有独立的「基线重置 effect」：它会在 activityAt 变化时抢先写基线、吃掉活动信号')
 })
 
 test('F1: load() 必须先失效 1000ms 共用窗（R1 —— 否则复用旧 settled 响应，弹窗不清）', () => {
@@ -193,7 +181,12 @@ test('F1: load() 必须先失效 1000ms 共用窗（R1 —— 否则复用旧 se
   assert.ok(invalidateAt >= 0, 'load() 未调用 invalidateMessagesMemo')
   assert.ok(invalidateAt < fetchAt, 'invalidateMessagesMemo 必须在 fetchMessagesJson **之前**')
   assert.ok(!/USER_NODE_SEL/.test(rd), '观察器选择器残留')
-  assert.ok(!/ACTIVITY_DELAYS/.test(rd), '固定延迟已随 (C) 根治删除（延迟重拉不再是正确性依赖）')
+  assert.ok(!/ACTIVITY_DELAYS/.test(rd), '固定延迟已随 (C) 根治删除')
+  // activeMarkers 调用点（A7）
+  const eff = rd.match(/const load = \(\) => \{[\s\S]{0,2500}?\.catch\(\(\) => \{\}\)\n        \}/)
+  assert.ok(eff, '找不到 load 本体')
+  assert.match(eff[0], /const act = activeMarkers\(msgs\)/, 'load 必须用 activeMarkers(msgs) 过滤活跃 marker')
+  assert.match(eff[0], /setMarkers\(act\)/, 'setMarkers 必须吃 activeMarkers 的结果')
 })
 
 // ---------------------------------------------------------------- F6
@@ -505,6 +498,7 @@ test('污染锁前提: 第二次读必须真的命中派生缓存（否则该锁
 // 第一次对客户端代码做行为断言。零新依赖（new Function 抽取，同 client-perf-locks）。
 
 const T = loadActivityTransition()
+// 时序模拟用同一个 T（与 6 条行为锁同一实现，杜绝两处漂移）
 
 test('行为锁: activityAt 首次出现 → 只建基线，不重拉（prev=undefined）', () => {
   assert.deepEqual(T(undefined, 1000), { reload: false, baseline: 1000 })
@@ -562,4 +556,111 @@ test('行为锁: R1 —— 切会话重置为「当前值」而非 undefined（�
   const after = T(bad, 400)
   assert.equal(after.baseline, 400, '旧写法下第一条消息只建基线')
   assert.equal(T(after.baseline, 500).reload, true, '要到第二条消息才恢复')
+})
+
+// ------------------------------------------- effect 时序模拟（第四轮回归的真防线）
+//
+// 第四轮架构复审抓到一个**我自己引入的严重回归**：R1 的修法把判定拆成
+// 「基线重置 effect」+「判定 effect」两段，且重置段的依赖数组带上了 activityAt。
+// React 同一次 commit 按声明顺序 flush → activityAt 一变，重置先把基线写成当前值
+// → 判定拿到 T(B,B) → next <= prev → **活动信号被 100% 吃掉，F1 主路径彻底哑火**。
+//
+// 而当时 176 条测试**全绿** —— 因为没有任何一条真的**执行**这两个 effect。
+// 本组用 React 语义（deps 浅比较 + 同 commit 按声明顺序 flush）模拟 effect 执行，
+// 直接对**源码里的 effect 体**跑，从而能在「接线错但纯函数对」时立刻变红。
+
+/** 从 src/client.js 里抽出 RevertDock 的 activity effect 体（依赖 activityTransition）。 */
+function extractDockActivityEffect() {
+  const start = clientSrc.indexOf('if (sessRef.current !== sessionId)')
+  assert.ok(start > 0, '找不到 dock activity effect 的切会话守卫')
+  // 找到该 effect 的结尾 `}, [sessionId, activityAt])`
+  const tail = clientSrc.indexOf('}, [sessionId, activityAt])', start)
+  assert.ok(tail > start, '找不到 dock activity effect 的结尾')
+  const body = clientSrc.slice(start, tail)
+  const fn = new Function('sessRef', 'lastActivityRef', 'sessionId', 'activityAt', 'loadRef', 'activityTransition',
+    `${body}\n  return true`)
+  return (refs) => fn(refs.sessRef, refs.lastActivityRef, refs.sessionId, refs.activityAt, refs.loadRef, T)
+}
+
+/**
+ * 按 React 语义跑一轮 effect：deps 浅比较决定是否重跑；重跑时按声明顺序执行。
+ * 返回本轮是否触发了 load。
+ */
+function runDockEffectSequence(steps) {
+  const sessRef = { current: steps[0].sessionId }
+  const lastActivityRef = { current: undefined }
+  const effect = extractDockActivityEffect()
+  let prevDeps = null
+  let loads = 0
+  const loadRef = { current: () => { loads++ } }
+  for (const step of steps) {
+    const deps = [step.sessionId, step.activityAt]
+    const changed = prevDeps === null || deps.length !== prevDeps.length ||
+      deps.some((d, i) => d !== prevDeps[i])
+    if (!changed) continue
+    prevDeps = deps
+    effect({ sessRef, lastActivityRef, sessionId: step.sessionId, activityAt: step.activityAt, loadRef })
+  }
+  return { loads, lastActivityRef: lastActivityRef.current, sessRef: sessRef.current }
+}
+
+test('时序: 挂载 → 首次 null→值（建基线）→ 不应重拉', () => {
+  const r = runDockEffectSequence([
+    { sessionId: 'A', activityAt: null },
+    { sessionId: 'A', activityAt: 1000 },
+  ])
+  assert.equal(r.loads, 0, '首次非空值只建基线，不得白拉（曾实测 6 次 GET）')
+  assert.equal(r.lastActivityRef, 1000, '基线应被推进到 1000')
+})
+
+test('时序: 用户发消息 → activityAt 跳变 → **必须重拉**', () => {
+  const r = runDockEffectSequence([
+    { sessionId: 'A', activityAt: null },
+    { sessionId: 'A', activityAt: 1000 },
+    { sessionId: 'A', activityAt: 2000 },
+  ])
+  assert.equal(r.loads, 1, '真实活动必须触发重拉 —— 这是第四轮回归时被吃掉的那一步')
+})
+
+test('时序: 连续两条消息 → 两次重拉', () => {
+  const r = runDockEffectSequence([
+    { sessionId: 'A', activityAt: null },
+    { sessionId: 'A', activityAt: 1000 },
+    { sessionId: 'A', activityAt: 2000 },
+    { sessionId: 'A', activityAt: 3000 },
+  ])
+  assert.equal(r.loads, 2, '每次真实跳变都要重拉')
+})
+
+test('时序: 单调门 —— activityAt 相等/变小 → 不重拉且基线不回退', () => {
+  const r = runDockEffectSequence([
+    { sessionId: 'A', activityAt: null },
+    { sessionId: 'A', activityAt: 2000 },
+    { sessionId: 'A', activityAt: 2000 },
+    { sessionId: 'A', activityAt: 1500 },
+  ])
+  assert.equal(r.loads, 0, '相等或变小不得重拉')
+  assert.equal(r.lastActivityRef, 2000, '基线必须保持高水位')
+})
+
+test('时序: 切会话 → 不重拉；切后第一条消息 → **必须重拉**（R1 原目标）', () => {
+  const r = runDockEffectSequence([
+    { sessionId: 'A', activityAt: null },
+    { sessionId: 'A', activityAt: 5000 },
+    // 切到 B，activityAt 恰好不变（同毫秒 createdAt / 都是 null）
+    { sessionId: 'B', activityAt: 5000 },
+    { sessionId: 'B', activityAt: 5100 },
+  ])
+  assert.equal(r.loads, 1, '切会话本身不重拉；切后第一条真实消息必须重拉')
+  assert.equal(r.sessRef, 'B', 'sessRef 应已更新为新会话')
+})
+
+test('时序: 切会话时 activityAt 变小 → 仍以新值为基线，下一条能重拉', () => {
+  const r = runDockEffectSequence([
+    { sessionId: 'A', activityAt: 9000 },
+    { sessionId: 'B', activityAt: 100 },
+    { sessionId: 'B', activityAt: 200 },
+  ])
+  assert.equal(r.loads, 1, '切到 updatedAt 更小的会话后，下一条消息仍须能重拉')
+  assert.equal(r.lastActivityRef, 200)
 })

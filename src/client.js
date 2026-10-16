@@ -880,7 +880,9 @@ window.__ModuleLoader__.load({
       // 两个并发 load（mount + activity，或 CHANGED + activity）时慢的那个可能后落，
       // setMarkers 会把已正确的 markers 覆盖回去 → dock 重新出现。
       // 0.10.4 的 350/1400ms 延迟事实上起到了串行化作用，删除后重叠概率上升。
-      const reqSeqRef = useRef(0) // undefined = 尚未建立基线（见下方 effect）
+      const reqSeqRef = useRef(0)
+      const sessRef = useRef(sessionId) // 真正的「切了会话」判据（R1 回归修复）
+      const landedSeqRef = useRef(0)     // 已成功落地的最大请求序号（R2：失败不回滚） // undefined = 尚未建立基线（见下方 effect）
       const [open, setOpen] = useState(false)
       const [markers, setMarkers] = useState(null) // 活跃回撤标记（已恢复的自动消失）
       const [shadowCount, setShadowCount] = useState(0) // 标记 range 内被遮蔽消息数（标题口径）
@@ -922,7 +924,7 @@ window.__ModuleLoader__.load({
         const onChange = () => load()
         window.addEventListener(CHANGED_EVENT, onChange)
         const load = () => {
-          const reqSeq = ++reqSeqRef.current
+          const reqSeq = ++reqSeqRef.current // 发起序号（防慢响应覆盖快响应）
           // R1（复审实测）：fetchMessagesJson 有 MSG_COALESCE_MS=1000 共用窗——
           // 既有 scan 观察器在 T+200ms 已取到**落盘批窗(200ms)之前**的旧响应，
           // 本路径若不先失效 memo，会原样复用它 → committed 仍是 false → 弹窗不清。
@@ -931,8 +933,13 @@ window.__ModuleLoader__.load({
           return fetchMessagesJson('/api/message-ops/messages?sessionId=' + encodeURIComponent(sessionId))
           .then((data) => {
             if (!alive || !data || !data.ok) return
-            // R2：只有最新一次请求的结果才允许落地（慢响应不得覆盖快响应）
-            if (reqSeq !== reqSeqRef.current) return
+            // R2：只有**最新发起且仍未被更新的请求**的结果才允许落地。
+            // 注意不能只看 reqSeq 是否等于当前发起序号 —— 后发请求若失败（fetchMessagesJson
+            // 对非 2xx / ok!==true 会 throw，被下面 catch 吞掉），它的序号已被占用，
+            // 先发那次**成功的**好响应就会被这里丢弃 → markers 停在旧值且无重试。
+            // 故另记一个「已落地序号」，失败不回滚它。
+            if (reqSeq !== reqSeqRef.current || reqSeq <= landedSeqRef.current) return
+            landedSeqRef.current = reqSeq
             const msgs = data.messages || []
             const act = activeMarkers(msgs)
             setMarkers(act)
@@ -992,16 +999,25 @@ window.__ModuleLoader__.load({
       // **用户切会话后的第一条消息撞上基线分支被吞，无任何 reload**（原 bug 上移一层）。
       // 重置到「当前」值：变了则基线=B（下游 B<=B 直接 return，不多拉）；
       // 没变则基线=null，下次真实跳变 `x <= null` 为 false → 正常 load。
-      // R1（架构审计）：重置到「当前」值而非 undefined —— 若切会话时 activityAt
-      // 不变（createdAt 同毫秒 / 都 null），下游 effect 依赖未变不执行，
-      // 基线会永远停在 undefined → **切会话后用户第一条消息被吞**（原 bug 上移一层）。
-      useEffect(() => { lastActivityRef.current = activityAt }, [sessionId, activityAt])
-      // 判定逻辑已抽成纯函数 activityTransition（可被行为测试执行，见其注释）
+      // ⚠️ 必须**只有一个** effect。上一版拆成「重置 + 判定」两段、且重置段的依赖
+      // 带上了 activityAt —— 同一次 commit 里 React 按声明顺序 flush，重置先把基线
+      // 写成当前值，判定再拿到 T(B,B) → next <= prev → **活动信号被 100% 吃掉**，
+      // F1 主路径彻底哑火（第四轮架构复审实跑抓出）。判据必须是「sessionId 真的
+      // 变了」（sessRef），而不是「依赖数组里出现了 activityAt」。
+      //
+      // R1 原目标同样要达成：切会话时基线重置为**新会话当前值**（而非 undefined）——
+      // 置 undefined 时若 activityAt 不变，下游不执行、基线永远 undefined，
+      // 切会话后用户第一条消息撞上「建基线」分支被吞。
       useEffect(() => {
+        if (sessRef.current !== sessionId) {
+          sessRef.current = sessionId
+          lastActivityRef.current = activityAt // 切会话：以新会话当前值为基线
+          return
+        }
         const step = activityTransition(lastActivityRef.current, activityAt)
         lastActivityRef.current = step.baseline
         if (step.reload) loadRef.current()
-      }, [activityAt])
+      }, [sessionId, activityAt])
 
 
       // items 变化自动折叠（opencode createEffect 同款；必须在早退之前——Hooks 规则）
