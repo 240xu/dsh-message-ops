@@ -840,6 +840,29 @@ window.__ModuleLoader__.load({
         && m.restoreComplete !== true && m.committed !== true)
     }
 
+    /**
+     * activity 信号 → 是否重拉的**纯决策**（0.10.6 · 测试性改造）。
+     *
+     * 为什么抽出来：三轮测试审计的结论是「客户端 F1 的锁全是形状锁」——整个
+     * useEffect 可以被注释掉而 164 条测试全绿（审计 W4 实测）。根因是判定逻辑
+     * 埋在 hook 里，node --test 无法执行。抽成纯函数后可用 `new Function` 抽出来
+     * **行为测试**（client-perf-locks.test.js:161 已有同款手法，零新依赖）。
+     *
+     * 语义（三态，返回「推进后的基线」让调用方无脑赋值）：
+     *   next == null        → 不动基线（宿主 store 还没就绪）
+     *   prev == undefined   → **建基线**。首帧渲染时 activityAt 常先是 null 再被
+     *                         填充（或经 lastPromptAt 投影折入），把这次「null→值」
+     *                         当成新活动会让开会话白拉一次（实测曾达 6 次 GET）
+     *   next <= prev        → 单调门，不动基线（refreshList 可能压低再抬高）
+     *   next >  prev        → 真活动：重拉并推进基线
+     */
+    function activityTransition(prev, next) {
+      if (next == null) return { reload: false, baseline: prev }
+      if (prev === undefined) return { reload: false, baseline: next }
+      if (next <= prev) return { reload: false, baseline: prev }
+      return { reload: true, baseline: next }
+    }
+
     function RevertDock(props) {
       const { sessionId, useSessions, inputActions } = props
       if (sessionId) __currentSessionId = sessionId
@@ -852,7 +875,12 @@ window.__ModuleLoader__.load({
       // F1 主路径：宿主 activity 信号（见下方 effect）；null = 无 useSessions 或尚无活动
       const activityAt = summary && typeof summary.updatedAt === 'number' ? summary.updatedAt : null
       const loadRef = useRef(() => {})
-      const lastActivityRef = useRef(undefined) // undefined = 尚未建立基线（见下方 effect）
+      const lastActivityRef = useRef(undefined)
+      // R2（审计）：invalidateMessagesMemo() 只丢 memo 引用、**不取消在途 fetch**。
+      // 两个并发 load（mount + activity，或 CHANGED + activity）时慢的那个可能后落，
+      // setMarkers 会把已正确的 markers 覆盖回去 → dock 重新出现。
+      // 0.10.4 的 350/1400ms 延迟事实上起到了串行化作用，删除后重叠概率上升。
+      const reqSeqRef = useRef(0) // undefined = 尚未建立基线（见下方 effect）
       const [open, setOpen] = useState(false)
       const [markers, setMarkers] = useState(null) // 活跃回撤标记（已恢复的自动消失）
       const [shadowCount, setShadowCount] = useState(0) // 标记 range 内被遮蔽消息数（标题口径）
@@ -894,6 +922,7 @@ window.__ModuleLoader__.load({
         const onChange = () => load()
         window.addEventListener(CHANGED_EVENT, onChange)
         const load = () => {
+          const reqSeq = ++reqSeqRef.current
           // R1（复审实测）：fetchMessagesJson 有 MSG_COALESCE_MS=1000 共用窗——
           // 既有 scan 观察器在 T+200ms 已取到**落盘批窗(200ms)之前**的旧响应，
           // 本路径若不先失效 memo，会原样复用它 → committed 仍是 false → 弹窗不清。
@@ -902,6 +931,8 @@ window.__ModuleLoader__.load({
           return fetchMessagesJson('/api/message-ops/messages?sessionId=' + encodeURIComponent(sessionId))
           .then((data) => {
             if (!alive || !data || !data.ok) return
+            // R2：只有最新一次请求的结果才允许落地（慢响应不得覆盖快响应）
+            if (reqSeq !== reqSeqRef.current) return
             const msgs = data.messages || []
             const act = activeMarkers(msgs)
             setMarkers(act)
@@ -955,17 +986,21 @@ window.__ModuleLoader__.load({
       //   宿主输入也不发 CHANGED_EVENT —— **没有第二次触发**，弹窗会一直留到
       //   下一条消息或一次插件写操作。这正是用户原话的病灶。
       //   故：有界重试，直到 dock 清空或重试耗尽（每条消息最多 3 次 GET）。
-      useEffect(() => { lastActivityRef.current = undefined }, [sessionId])
+      // R1（审计）：原为 `= undefined`，但若切会话时 activityAt **不变**
+      // （同毫秒 createdAt / 都为 null 且新会话 summary 未进 store），
+      // 下游 effect 的依赖未变 → 不执行 → 基线永远停在 undefined →
+      // **用户切会话后的第一条消息撞上基线分支被吞，无任何 reload**（原 bug 上移一层）。
+      // 重置到「当前」值：变了则基线=B（下游 B<=B 直接 return，不多拉）；
+      // 没变则基线=null，下次真实跳变 `x <= null` 为 false → 正常 load。
+      // R1（架构审计）：重置到「当前」值而非 undefined —— 若切会话时 activityAt
+      // 不变（createdAt 同毫秒 / 都 null），下游 effect 依赖未变不执行，
+      // 基线会永远停在 undefined → **切会话后用户第一条消息被吞**（原 bug 上移一层）。
+      useEffect(() => { lastActivityRef.current = activityAt }, [sessionId, activityAt])
+      // 判定逻辑已抽成纯函数 activityTransition（可被行为测试执行，见其注释）
       useEffect(() => {
-        if (activityAt == null) return
-        // 建基线：首帧渲染时宿主 store 往往尚未就绪 → activityAt 先是 null 再被
-        // 填充成数值（或经 lastPromptAt 投影折入）。若把这次「null→值」当成新活动，
-        // 开会话就会白拉一次（活体实测曾达 6 次 GET）。首个非空值只建基线不触发。
-        if (lastActivityRef.current === undefined) { lastActivityRef.current = activityAt; return }
-        // 单调门：refreshList / 焦点刷新可能把 updatedAt 压低再抬高，不该重复拉。
-        if (activityAt <= lastActivityRef.current) return
-        lastActivityRef.current = activityAt
-        loadRef.current()
+        const step = activityTransition(lastActivityRef.current, activityAt)
+        lastActivityRef.current = step.baseline
+        if (step.reload) loadRef.current()
       }, [activityAt])
 
 
@@ -1949,6 +1984,6 @@ window.__ModuleLoader__.load({
       installUserRevertInjector()
     }
 
-    return { apply, inject: ['slots'] }
+    return { apply, inject: ['slots'], __test: { activityTransition } }
   },
 })

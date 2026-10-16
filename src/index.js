@@ -179,21 +179,34 @@ let __runningSource = null; // 诊断：最近一次 isRunning 的判定来源
  *     markCommitted、与宿主 activity 事件三者一致（注入行/重放副本天然不算）。
  */
 function applyLiveCommitted(messages, live) {
+  // R4（审计）：388 份语料里 360+ 无 marker。原先无条件扫完整个 live.log 才 return，
+  // 是请求路径上一个无界的同步 O(log.length) 扫描（最大实测 15178 事件），且不像
+  // buildDerived 那样有 framesPerYield 让出点。先判「有没有需要补算的 marker」。
+  let pending = null;
+  for (const m of messages) {
+    if (m.marker === true && typeof m.seq === "number" && m.committed !== true) {
+      (pending || (pending = [])).push(m);
+    }
+  }
+  if (!pending) return false;
   const log = live && Array.isArray(live.log) ? live.log : null;
   if (!log || log.length === 0) return false;
-  let realUserSeqs = null;
+  // 只要**最大的**真实用户输入 seq：判据是「存在 seq > marker.seq」，用 max 即可，
+  // 不必建数组 + sort（扫描本身已 O(log.length)，别再叠 O(n log n)）。
+  let maxUserSeq = -1;
   for (const e of log) {
-    if (!e || typeof e.seq !== "number" || e.type !== "user/message") continue;
+    if (!e || typeof e.seq !== "number" || e.seq <= maxUserSeq) continue;
+    if (e.type !== "user/message") continue;
     if (((e.data || {}).source || {}).kind !== "user") continue;
-    (realUserSeqs || (realUserSeqs = [])).push(e.seq);
+    maxUserSeq = e.seq;
   }
-  if (!realUserSeqs || realUserSeqs.length === 0) return false;
-  realUserSeqs.sort((a, b) => a - b);
+  if (maxUserSeq < 0) return false;
+  // ⚠️ 遍历**全部** pending marker：审计实测「只补算第一个 + break」是存活突变，
+  // 而它对应一个真实 bug —— 用户连续回撤两次时第二个 marker 不被补算，
+  // 第二条 dock 行在发消息后不消失（正是用户原话的残留形态）。
   let touched = 0;
-  for (const m of messages) {
-    if (m.marker !== true || typeof m.seq !== "number" || m.committed === true) continue;
-    // 存在 seq 更大的真实用户输入 → 已提交（与 markCommitted 的判据同形）
-    if (realUserSeqs[realUserSeqs.length - 1] > m.seq) { m.committed = true; touched++; }
+  for (const m of pending) {
+    if (maxUserSeq > m.seq) { m.committed = true; touched++; }
   }
   return touched > 0;
 }

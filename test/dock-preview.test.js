@@ -34,6 +34,17 @@ const { opsList } = _internals
 const SID = 'session-00000000-1111-2222-3333-444444444444'
 
 const clientSrc = fs.readFileSync(path.join(ROOT, 'src', 'client.js'), 'utf8')
+
+/**
+ * 抽出 activityTransition 纯函数并**真正执行**它（0.10.6）。
+ * 手法沿用 client-perf-locks.test.js:161 的 `new Function` 抽取 —— 不引 react/jsdom。
+ * 这是本仓库第一组**客户端行为锁**：前两轮审计证明形状锁可被注释墙整体绕过（W4）。
+ */
+function loadActivityTransition() {
+  const m = clientSrc.match(/function activityTransition\(prev, next\) \{[\s\S]{0,900}?\n    \}/)
+  assert.ok(m, 'src/client.js 里找不到 activityTransition —— 判定逻辑必须保持为可抽取的纯函数')
+  return new Function(`${m[0]}\nreturn activityTransition`)()
+}
 const indexSrc = fs.readFileSync(path.join(ROOT, 'src', 'index.js'), 'utf8')
 
 function header() {
@@ -142,14 +153,22 @@ test('F1: 宿主 activity 信号 → 重拉（复审后主路径）', () => {
 
   // 3) 基线门控 —— **收紧到整条一行**（上一轮实测：只删掉句尾的 `return`
   //    语义就断掉，而逐行断言仍绿 → 假锁 A11）。
-  assert.match(act[0],
-    /if \(lastActivityRef\.current === undefined\) \{ lastActivityRef\.current = activityAt; return \}/,
-    '「首个非空值只建基线」门控必须带 return（漏 return 会让 null→值 白拉一次）')
-  // 3a) 单调门：updatedAt 被压低再抬高时不得重复拉
-  assert.match(act[0], /activityAt <= lastActivityRef\.current/, '缺少单调门（refreshList 压低再抬高会重复拉）')
-  // 3b) 切会话必须重置基线（上一轮副作用审计实测：不重置 → 每次切会话固定 2 次浪费 GET）
-  assert.match(rd, /useEffect\(\(\) => \{ lastActivityRef\.current = undefined \}, \[sessionId\]\)/,
-    '切会话必须重置 activity 基线')
+  // 3) 判定语义改由**行为测试**覆盖（见文件头的 loadActivityTransition），
+  //    这里只锁 effect 确实消费了该纯函数
+  assert.match(act[0], /activityTransition\(lastActivityRef\.current, activityAt\)/,
+    'effect 必须调用 activityTransition 纯函数（判定逻辑不得再内联）')
+  assert.match(act[0], /if \(step\.reload\) loadRef\.current\(\)/, '只有 reload=true 才触发 loadRef')
+  // 3b) 切会话重置基线。**R1（架构审计）**：原为 `= undefined`，但若切会话时
+  //     activityAt 不变（createdAt 同毫秒 / 都 null），下游 effect 依赖未变不执行
+  //     → 基线永远 undefined → **切会话后用户第一条消息被吞，无 reload**（原 bug 上移）。
+  //     必须重置到「当前」值而不是 undefined。
+  assert.match(rd, /useEffect\(\(\) => \{ lastActivityRef\.current = activityAt \}, \[sessionId, activityAt\]\)/,
+    '切会话必须把 activity 基线重置为**当前** activityAt（置 undefined 会吞掉切会话后的第一条消息）')
+  // 3b2) **R2（架构审计）**：无请求序号 → 并发 load 乱序响应会把 dock 打回去。
+  //      0.10.4 的延迟定时器事实上起到了串行化作用，删除后重叠概率上升。
+  assert.match(rd, /const reqSeqRef = useRef\(0\)/, '必须有请求序号 ref（防乱序响应覆盖 markers）')
+  assert.match(rd, /const reqSeq = \+\+reqSeqRef\.current/, 'load() 必须领取请求序号')
+  assert.match(rd, /if \(reqSeq !== reqSeqRef\.current\) return/, '只有最新请求的结果才允许落地')
   // 3c) **M3 补锁收紧**：上一轮实测把赋值塞进 `if (false) {}` 死分支仍绿（假锁 A10）。
   //     用**行首缩进精确到 8 空格**约束它必须位于 effect 主体顶层。
   assert.match(rd, /^ {8}loadRef\.current = load$/m, 'loadRef 必须赋值为 load，且位于 effect 主体顶层（非死分支/注释）')
@@ -357,4 +376,190 @@ test('(C) live.log 乱序 / 重复 / 非事件项 → 不得抛错', async () =>
   const noisy = [liveUser(5), null, { seq: 3 }, 'x', liveUser(3), liveUser(3)]
   const r = await opsList(ctxFor({ log: noisy }), SID)
   assert.equal(markerCommitted(r), true, '有 seq>2 的真实输入即应置 true')
+})
+
+// ------------------------------------------------- 第三轮审计点名的缺失覆盖
+//
+// 上一轮审计自写 19 条突变：**10 条存活**，其中两条对应真实缺陷。
+// 这里逐条补上。
+
+/**
+ * 两个 marker，且**两者之间没有真实用户输入**。
+ *
+ * ⚠️ 场景必须这样造：`applyLiveCommitted` 的 pending 只收 `committed !== true` 的
+ * marker。若两个 marker 之间夹着一条真实用户消息，磁盘侧的 `markCommitted` 就已把
+ * 前一个判为 true，pending 里只剩一个 —— 此时「只补算第一个 + break」**不可观测**
+ * （上一轮突变脚本正是被这个错误场景骗过，报了假存活）。只有「两 marker 相邻」时
+ * 两个才同时落在 pending 里，break 才会漏掉第二个。
+ */
+const twoMarkers = () => {
+  writeSession([
+    msg('user/message', 0, '旧问题', 'user'),
+    msg('assistant/message', 1, '旧回答'),
+    {
+      type: 'system/message', seq: 2, time: 1100,
+      surfaceOp: { op: 'replace', startSeq: 0, endSeq: 1 },
+      sourceEventSeqs: [0, 1],
+      data: { turn: 1, step: 1, message: { role: 'system', content: [{ type: 'text', text: '[消息回滚] 一' }] } },
+    },
+    // 紧接着第二个 marker：seq 3 是 system/message，不是用户输入
+    {
+      type: 'system/message', seq: 3, time: 1200,
+      surfaceOp: { op: 'replace', startSeq: 0, endSeq: 1 },
+      sourceEventSeqs: [0, 1],
+      data: { turn: 2, step: 1, message: { role: 'system', content: [{ type: 'text', text: '[消息回滚] 二' }] } },
+    },
+  ])
+}
+const allMarkers = (r) => r.messages.filter((x) => x.marker === true)
+
+test('C-b（真实 bug）: 连续回撤两次 → live.log 补算必须覆盖**全部** marker', async () => {
+  twoMarkers()
+  const r = await opsList(ctxFor({ log: [liveUser(9)] }), SID)
+  const ms = allMarkers(r)
+  assert.equal(ms.length, 2, '应有两个 marker')
+  assert.deepEqual(ms.map((m) => m.committed), [true, true],
+    '只补算第一个 + break 会让**第二条 dock 行在发消息后不消失** —— 用户原话的残留形态')
+})
+
+test('C-b 变体: 只补算第一个（break）时本测试必须红', async () => {
+  // 这条是 C-b 的对照：若实现只补第一个 marker，上面那条会红；本条锁住「数量」语义
+  twoMarkers()
+  const r = await opsList(ctxFor({ log: [liveUser(9)] }), SID)
+  assert.equal(allMarkers(r).filter((m) => m.committed === true).length, 2,
+    '两个 marker 都必须被补算')
+})
+
+test('C-o 单调性: 磁盘已判 committed=true 的 marker 不得被补算改回 false', async () => {
+  writeSession([
+    msg('user/message', 0, '旧问题', 'user'),
+    msg('assistant/message', 1, '旧回答'),
+    {
+      type: 'system/message', seq: 2, time: 1100,
+      surfaceOp: { op: 'replace', startSeq: 0, endSeq: 1 },
+      sourceEventSeqs: [0, 1],
+      data: { turn: 1, step: 1, message: { role: 'system', content: [{ type: 'text', text: '[消息回滚] 到 seq 1' }] } },
+    },
+    msg('user/message', 3, '改完重发的新消息', 'user'),   // 磁盘上就有 → markCommitted 已判 true
+  ])
+  // live.log 里**没有**更新的真实输入。补算必须让这个 true 原封不动。
+  const r = await opsList(ctxFor({ log: [{ type: 'user/message', seq: 0, data: { source: { kind: 'user' } } }] }), SID)
+  assert.equal(markerCommitted(r), true, 'committed 是只叠加的单调量，补算不得反向改写')
+
+  // 关键：把 pending 的构造也放开（committed===true 也进 pending），
+  // 此时「赋值而非条件置位」的写法就会把 true 抹成 false —— 必须红。
+  // （上一轮突变脚本报它存活，是因为 pending 只收 committed!==true，写法等价。）
+  const { _internals: I } = await import('../src/index.js')
+  const messages = r.messages.map((m) => ({ ...m }))
+  const applyMutated = (ms, live) => {
+    let maxUserSeq = -1
+    for (const e of live) {
+      if (e.type === 'user/message' && ((e.data || {}).source || {}).kind === 'user' && e.seq > maxUserSeq) maxUserSeq = e.seq
+    }
+    for (const m of ms) {
+      if (m.marker !== true || typeof m.seq !== 'number') continue
+      m.committed = maxUserSeq > m.seq            // ← 无条件赋值（被测的坏写法）
+    }
+  }
+  applyMutated(messages, [{ type: 'user/message', seq: 0, data: { source: { kind: 'user' } } }])
+  assert.equal(messages.find((m) => m.marker === true).committed, false,
+    '本用例证明「无条件赋值」在 pending 放开时确实会破坏单调性 —— 故它是等价变异，'
+    + '而 pending 的 committed!==true 过滤是承重前提（由 C-g 单独锁）')
+  void I
+})
+
+test('C-g 契约: 非 marker 行不得带 committed 字段', async () => {
+  twoMarkers()
+  const r = await opsList(ctxFor({ log: [liveUser(9)] }), SID)
+  const nonMarkers = r.messages.filter((m) => m.marker !== true)
+  assert.ok(nonMarkers.length > 0, '应存在非 marker 行')
+  for (const m of nonMarkers) {
+    assert.ok(!('committed' in m),
+      `非 marker 行 seq=${m.seq} 被写上了 committed —— applyLiveCommitted 的 marker 判据被破坏`)
+  }
+})
+
+test('R4 早退: 无 marker 的会话不得为了补算而扫 live.log', async () => {
+  writeSession([msg('user/message', 0, '普通会话', 'user'), msg('assistant/message', 1, '普通回答')])
+  const r = await opsList(ctxFor({ log: [liveUser(2), liveUser(3), liveUser(4)] }), SID)
+  assert.equal(r.messages.filter((m) => m.marker === true).length, 0, '无 marker 会话')
+  assert.equal(r.messages.filter((m) => 'committed' in m).length, 0, '无 marker 会话不应有任何 committed 写入')
+})
+
+test('污染锁前提: 第二次读必须真的命中派生缓存（否则该锁会静默空转）', async () => {
+  const { derivedCache } = _internals
+  writeSession(MARKER_SESSION())
+  await opsList(ctxFor({ log: [liveUser(3)] }), SID)     // 第一次：MISS → 填缓存
+  const before = derivedCache.size
+  await opsList(ctxFor(), SID)                            // 第二次：必须 HIT
+  assert.ok(derivedCache.size >= before, '派生缓存不应在第二次读后消失')
+  // 若两次读之间清空缓存，「补算后不带 live.log 再读回到 false」就会变成
+  // 「本来就没缓存所以没被污染」的同义反复 —— 这里把前提钉死。
+  assert.equal(derivedCache.size, before, '第二次读必须复用同一条缓存条目（LRU 上限 16，本测试只碰 1 个 key）')
+})
+
+// ------------------------------------------------- 客户端第一组行为锁
+//
+// 前两轮审计的结论：客户端 F1 全是形状锁，整段注释掉 164 条仍全绿（W4 实测）。
+// 这里把判定逻辑抽成纯函数 activityTransition 并**真正执行**它 —— 前三轮里
+// 第一次对客户端代码做行为断言。零新依赖（new Function 抽取，同 client-perf-locks）。
+
+const T = loadActivityTransition()
+
+test('行为锁: activityAt 首次出现 → 只建基线，不重拉（prev=undefined）', () => {
+  assert.deepEqual(T(undefined, 1000), { reload: false, baseline: 1000 })
+})
+
+test('行为锁: 基线后真实跳变 → 重拉并推进基线', () => {
+  assert.deepEqual(T(1000, 2000), { reload: true, baseline: 2000 })
+})
+
+test('行为锁: null → 值（store 就绪 / lastPromptAt 投影折入）→ 不重拉', () => {
+  // prev 仍是 undefined（从未见过非空值）时，这一步只该建基线
+  assert.deepEqual(T(undefined, 1234), { reload: false, baseline: 1234 })
+  // 已有基线后又来一个 null：不得清空基线、不得重拉
+  assert.deepEqual(T(2000, null), { reload: false, baseline: 2000 })
+})
+
+test('行为锁: 单调门 —— 相等或变小 → 不重拉，且**不得把基线推回去**', () => {
+  assert.deepEqual(T(2000, 2000), { reload: false, baseline: 2000 })
+  const back = T(2000, 1500)
+  assert.equal(back.reload, false, 'updatedAt 被压低时不得重拉')
+  assert.equal(back.baseline, 2000, '基线必须**保持高水位**，否则下一次普通跳变会被误判成大跳变')
+})
+
+test('行为锁: 连续多次跳变 → 每次都重拉', () => {
+  let base
+  const seen = []
+  for (const v of [10, 20, 30]) {
+    const r = T(base, v)
+    seen.push(r.reload)
+    base = r.baseline
+  }
+  assert.deepEqual(seen, [false, true, true], '首次建基线，后两次都应重拉')
+  assert.equal(base, 30)
+})
+
+test('行为锁: R1 —— 切会话重置为「当前值」而非 undefined（否则吞掉第一条消息）', () => {
+  // 重置是**直接赋值**：useEffect(() => { ref = activityAt }, [sessionId, activityAt])
+  const OLD_SESSION_BASE = 5000
+  const NEW_SESSION_ACTIVITY = 300
+
+  // ✅ 现行修法：重置到新会话当前的 activityAt
+  let good = OLD_SESSION_BASE
+  good = NEW_SESSION_ACTIVITY                      // 切会话时重置
+  assert.equal(T(good, 400).reload, true,
+    '切会话后的第一条真实消息必须能触发重拉')
+
+  // ❌ 旧写法（重置为 undefined）：若切会话时 activityAt **不变**，下游 effect 的
+  //    依赖未变 → 根本不执行 → 基线永远停在 undefined → 第一条消息撞上
+  //    「建基线」分支被吞，无任何 reload（原 bug 上移一层）。
+  let bad = OLD_SESSION_BASE
+  bad = undefined                                  // 旧写法
+  assert.equal(T(bad, 400).reload, false,
+    '这正是 R1 的 bug：置 undefined 时第一条消息被吞 —— 本断言锁住该差异')
+  // 且第二次才恢复（用户必须再发一条消息才会看到 dock 更新）
+  const after = T(bad, 400)
+  assert.equal(after.baseline, 400, '旧写法下第一条消息只建基线')
+  assert.equal(T(after.baseline, 500).reload, true, '要到第二条消息才恢复')
 })
