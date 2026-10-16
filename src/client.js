@@ -882,7 +882,7 @@ window.__ModuleLoader__.load({
       // 0.10.4 的 350/1400ms 延迟事实上起到了串行化作用，删除后重叠概率上升。
       const reqSeqRef = useRef(0)
       const sessRef = useRef(sessionId) // 真正的「切了会话」判据（R1 回归修复）
-      const landedSeqRef = useRef(0)     // 已成功落地的最大请求序号（R2：失败不回滚） // undefined = 尚未建立基线（见下方 effect）
+      const landedSeqRef = useRef(0) // 已成功落地的最大请求序号（R2：失败不回滚）
       const [open, setOpen] = useState(false)
       const [markers, setMarkers] = useState(null) // 活跃回撤标记（已恢复的自动消失）
       const [shadowCount, setShadowCount] = useState(0) // 标记 range 内被遮蔽消息数（标题口径）
