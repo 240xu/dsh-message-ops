@@ -2,3 +2,7 @@ node_modules/
 .e2e/*.png
 .e2e/crash*.txt
 .scratch/
+
+# npm pack 产物：绝不入库（审计 F2：0.10.2 的 tgz 被误提交，
+# 且它是 0.10.1 的构建产物 —— 名实不符，会误导 clone 的人）
+*.tgz
