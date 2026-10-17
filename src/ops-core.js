@@ -1,4 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash, createHmac, timingSafeEqual } from "node:crypto";
+
+/** OpsError 单点在 session-file.js（computeShadowed 护栏也在那里抛它）；此处转出保持既有导入面。 */
+export { OpsError } from "./session-file.js";
+import { OpsError } from "./session-file.js";
 /**
  * dsh-message-ops — 可复用操作核心（纯逻辑，无 HTTP、无 dsh-tools 依赖）。
  *
@@ -23,13 +27,7 @@ import { readReplaceOp, messageText, computeShadowed } from "./session-file.js";
 // 既有导入面兼容（ops-core 的 messageText 调用方不受影响）。
 export { messageText };
 
-/** 带语义状态码的操作错误（HTTP 直接映射，工具端转为失败文本）。 */
-export class OpsError extends Error {
-  constructor(message, status = 400) {
-    super(message);
-    this.status = status;
-  }
-}
+/** 带语义状态码的操作错误（单点已迁至 session-file.js，此处仅转出）。 */
 
 /** planRevert：回撤语义 = 遮蔽 targetSeq 及其之后全部可见节点（连续到末尾）。 */
 export function planRevert(surface, targetSeq) {
@@ -512,6 +510,183 @@ export function isJsonContentType(req) {
   const ct = headerOf(req && req.headers, "content-type") || "";
   return ct.split(";")[0].trim().toLowerCase() === "application/json";
 }
+
+// ---------------------------------------------------------------------------
+// 0.10.8 · web 前端鉴权对齐（GET 也要过宿主的浏览器认证门）
+// ---------------------------------------------------------------------------
+// 宿主侧实况（全局 dsh 0.2.0-rc.2 的 dsh-client-connection/lib/index.js）：
+//   admit(request)（:742-749）对每一条 /api 前缀请求（含 GET）都要求
+//   browserAuth 认证——根 token 只在 authorizeIndex 换 cookie：GET /<token>
+//   → 铸 HttpOnly+SameSite=Strict 的签名 cookie（名 = dsh-auth-<b64url(
+//   sha256(authority))>，载荷 v{1|2}.<b64url(json)>.<b64url(hmac-sha256)>
+//   secret 32 字节，存 credentials 记录 client-connection/browser-session）
+//   → 重定向 ./；此后每条 /api 都凭 cookie 过 admit，无 cookie → 401。
+//   前端取数是同源 fetch（默认凭证）——cookie 自动随行，**全程没有
+//   Authorization 头，也没有 ?token= 打到 /api**。
+// 插件路由此前只跑 isTrustedApiRequest（该围栏自述 "is not an auth layer"），
+// 同机无凭证进程 GET 即可整卷消息/全文（宿主同条件 401——审计缺口）。
+// 对齐修法（选型理由见报告）：前端本来就带 cookie → 围栏里**校验同款
+// cookie**；secret 经 credentials 服务的合法读法取（no-op modifyRecord，
+// 勿写勿落盘）；宿主无此服务 / 记录缺失或格式升级 → **降级回旧围栏语义**
+// 并告警（UI 永不因新校验而被 401，老版本宿主下行为不变）。
+// 非浏览器 GET（curl 等）从 200 变 401 = 与宿主对齐的有意行为变化。
+
+const AUTH_RECORD_KEY = "client-connection/browser-session";
+const AUTH_COOKIE_PREFIX = "dsh-auth-";
+const AUTH_STORED_SECRET_VERSION = 1;
+const AUTH_SECRET_BYTES = 32;
+
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
+
+function encodeBase64Url(value) {
+  return Buffer.from(value).toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+
+function decodeBase64Url(value) {
+  if (!BASE64URL_PATTERN.test(value) || value.length % 4 === 1) return undefined;
+  const padding = "=".repeat((4 - (value.length % 4)) % 4);
+  const decoded = Buffer.from(value.replaceAll("-", "+").replaceAll("_", "/") + padding, "base64");
+  return encodeBase64Url(decoded) === value ? decoded : undefined;
+}
+
+/** 宿主 requestAudience 的口径：HTTP 用 url.host；TLS 用 url.origin。插件
+ * 读不到监听面协议，两种拼写都试（名字与载荷 authority 用**同一个**拼写
+ * 配对校验，跨拼写伪造照样被拒）。 */
+function cookieAuthorityCandidates(hostHeader) {
+  try {
+    const url = new URL(`http://${hostHeader}`);
+    return [url.host, `https://${url.host}`];
+  } catch {
+    return [];
+  }
+}
+
+/** 宿主 cookieValue：按分号切段取**第一个**同名区的值（无解码语义）。 */
+function cookieValue(rawCookie, name) {
+  if (typeof rawCookie !== "string") return undefined;
+  for (const segment of rawCookie.split(";")) {
+    const at = segment.indexOf("=");
+    if (at === -1 || segment.slice(0, at).trim() !== name) continue;
+    return segment.slice(at + 1).trim();
+  }
+  return undefined;
+}
+
+/** 宿主 decodeCookie 的镜像：三段结构 + HMAC + 载荷形状（v1 浏览器 peer / v2 带操作者 id）。 */
+function decodeBrowserAuthCookie(value, secret) {
+  const parts = value.split(".");
+  const [version, body, encodedSignature] = parts;
+  if (parts.length !== 3 || (version !== "v1" && version !== "v2") || body === undefined || encodedSignature === undefined) return undefined;
+  const actualSignature = decodeBase64Url(encodedSignature);
+  if (actualSignature === undefined) return undefined;
+  const expectedSignature = createHmac("sha256", secret).update(body).digest();
+  if (actualSignature.length !== expectedSignature.length || !timingSafeEqual(actualSignature, expectedSignature)) return undefined;
+  const bodyBytes = decodeBase64Url(body);
+  if (bodyBytes === undefined) return undefined;
+  let decoded;
+  try { decoded = JSON.parse(bodyBytes.toString("utf8")); } catch { return undefined; }
+  if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return undefined;
+  if (decoded.version !== 1 && decoded.version !== 2) return undefined;
+  if (version !== `v${decoded.version}`) return undefined;
+  if (typeof decoded.authority !== "string" || decoded.authority === "") return undefined;
+  if (typeof decoded.issuedAt !== "number" || !Number.isSafeInteger(decoded.issuedAt)) return undefined;
+  if (typeof decoded.expiresAt !== "number" || !Number.isSafeInteger(decoded.expiresAt)) return undefined;
+  const payload = { version: decoded.version, authority: decoded.authority, issuedAt: decoded.issuedAt, expiresAt: decoded.expiresAt };
+  if (decoded.version === 1) return payload;
+  if (typeof decoded.id !== "string" || decoded.id.length === 0) return undefined;
+  return { ...payload, id: decoded.id };
+}
+
+/**
+ * 校验请求是否携带**有效**的宿主浏览器认证 cookie。
+ * @returns 载荷（通过）或 undefined（未认证）。返回值只当布尔用。
+ */
+export function browserAuthPayload(req, secret) {
+  if (secret == null) return undefined;
+  const host = headerOf(req && req.headers, "host");
+  if (host === undefined) return undefined;
+  const rawCookie = headerOf(req.headers, "cookie");
+  if (rawCookie === undefined) return undefined;
+  const now = Date.now();
+  for (const authority of cookieAuthorityCandidates(host)) {
+    const value = cookieValue(rawCookie, AUTH_COOKIE_PREFIX + encodeBase64Url(createHash("sha256").update(authority).digest()));
+    if (value === undefined) continue;
+    const payload = decodeBrowserAuthCookie(value, secret);
+    // payload.authority 与产生名字的同一个拼写配对（宿主同样的绑定语义）。
+    if (payload === undefined || payload.authority !== authority) continue;
+    // 宿主 authenticate(:555 附近) 的时效三条；expiresAt-issuedAt 的 maxAge
+    // 窗口不复制（host 可配 cookieMaxAgeDays，插件复制会误杀合法长龄 cookie）。
+    if (payload.issuedAt > now || payload.expiresAt <= now || payload.expiresAt <= payload.issuedAt) continue;
+    return payload;
+  }
+  return undefined;
+}
+
+/**
+ * 经 credentials 服务读宿主 BrowserAuth 签名 secret。**唯一读法**：
+ * no-op modifyRecord（mutate 返回 undefined = 记录未动、返回 current），
+ * 不落盘不经 argv。宿主无该成分 / 记录缺失 / 格式或长度不符 → null（降级）。
+ * @param {object|undefined} credentials ctx.get("credentials")
+ * @returns {Promise<Buffer|null>}
+ */
+export async function loadBrowserAuthSecret(credentials) {
+  if (!credentials || typeof credentials.modifyRecord !== "function") return null;
+  let record;
+  try {
+    record = await credentials.modifyRecord(AUTH_RECORD_KEY, async () => undefined);
+  } catch {
+    return null;
+  }
+  if (record === undefined || record === null || typeof record !== "object" || record.kind !== "grant") return null;
+  const payload = record.payload;
+  if (!payload || typeof payload !== "object" || payload.version !== AUTH_STORED_SECRET_VERSION) return null;
+  if (typeof payload.secret !== "string") return null;
+  const secret = decodeBase64Url(payload.secret);
+  if (!secret || secret.length !== AUTH_SECRET_BYTES) return null;
+  return secret;
+}
+
+// 进程级 memo：secret 一次命中就终身持有（宿主 create 只在缺失时铸新记录，
+// 正常进程内不会换代）；探测失败 10s 内不重试，401 风暴不会打爆 credential 锁。
+const WEB_AUTH_RETRY_MS = 10_000;
+let __webAuthSecret = null;
+let __webAuthProbeAt = 0;
+let __webAuthWarned = false;
+
+/** 测试钩子：直接注入/清除 secret，绕开 credentials 服务。 */
+export function _setWebAuthSecret(secret) { __webAuthSecret = secret; }
+export function _resetWebAuth() {
+  __webAuthSecret = null;
+  __webAuthProbeAt = 0;
+  __webAuthWarned = false;
+}
+
+/**
+ * 围栏的鉴权半段：取活跃 secret（含惰性探测与失败 memo）。
+ * secret 存在但请求未携有效 cookie → false（路由层回 401）；
+ * secret 不可得（无 credentials / 记录缺失 / 老版本宿主）→ true = 降级回旧围栏。
+ * @param {object|undefined} ctx 插件 ctx（get("credentials")）
+ * @param {object} req http 请求
+ */
+export async function webAuthGate(ctx, req) {
+  if (__webAuthSecret !== null) {
+    return browserAuthPayload(req, __webAuthSecret) !== undefined;
+  }
+  const now = Date.now();
+  if (now - __webAuthProbeAt < WEB_AUTH_RETRY_MS) return true; // 失败窗口内 = 降级
+  __webAuthProbeAt = now;
+  const credentials = ctx && typeof ctx.get === "function" ? ctx.get("credentials") : null;
+  __webAuthSecret = await loadBrowserAuthSecret(credentials);
+  if (__webAuthSecret === null && !__webAuthWarned) {
+    __webAuthWarned = true;
+    console.warn(
+      "[message-ops] BrowserAuth cookie 鉴权未启用（`client-connection/browser-session` 记录不可读）"
+      + "——GET 鉴权降级为旧的三层围栏语义；若这是 0.2.0+ 宿主，请检查该记录是否存在",
+    );
+  }
+  return __webAuthSecret === null ? true : browserAuthPayload(req, __webAuthSecret) !== undefined;
+}
+
 
 // ---------------------------------------------------------------------------
 // 0.5.7 · 磁盘路径（lazy-view 会话不进对象层时的回退）

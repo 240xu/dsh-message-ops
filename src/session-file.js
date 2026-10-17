@@ -20,15 +20,44 @@ const ZSTD_MAGIC = 0xfd2fb528;
 /** 魔数的字节形态（Buffer.indexOf 用；小端 0xfd2fb528 → 28 b5 2f fd）。 */
 const ZSTD_MAGIC_BYTES = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 
-/** 从 message 事件提取首个非空 text 块（listMessages / ops-core 共用单点）。 */
-export function messageText(e) {
+/** 带语义状态码的操作错误（单点：HTTP 直接映射 status，工具端转失败文本）。 */
+export class OpsError extends Error {
+  constructor(message, status = 400) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/** messageText 的「合格 text 段」选择口径（单点）：type==='text' 且非空白。 */
+function textSegments(e) {
   const msg = e && e.data && e.data.message;
   const content = msg && Array.isArray(msg.content) ? msg.content : (e && e.data && e.data.content);
-  if (!Array.isArray(content)) return "";
+  if (!Array.isArray(content)) return [];
+  const out = [];
   for (const c of content) {
-    if (c && c.type === "text" && typeof c.text === "string" && c.text.trim()) return c.text;
+    if (c && c.type === "text" && typeof c.text === "string" && c.text.trim()) out.push(c.text);
   }
-  return "";
+  return out;
+}
+
+/** 从 message 事件提取首个非空 text 块（listMessages / ops-core 共用单点）。 */
+export function messageText(e) {
+  const segs = textSegments(e);
+  return segs.length ? segs[0] : "";
+}
+
+/**
+ * message 事件的**全量** text（/text 路由用单点，别在路由里再造口径）。
+ *
+ * 宿主把长文本拆成多个 content 段（seq 6830 实测 = 321+7954+20 三段的
+ * compaction checkpoint），只取首段 = 摘要被拦腰截断。合并规则与 messageText
+ * **同一条口径**：段选择器共用 textSegments（非文本段按 messageText 的规则跳过），
+ * 差异只在聚合——全部合格段按 "\\n\\n" 接回（content 段是切块，接缝丢过换行，
+ * "\\n\\n" 恰好还原段落边界，也不会把「。」「#」硬粘成一行）。
+ */
+export function messageTextFull(e) {
+  const segs = textSegments(e);
+  return segs.join("\n\n");
 }
 
 /** 与 DSH 宿主一致：帧带 checksum（ZSTD_c_checksumFlag=1）。 */
@@ -298,11 +327,25 @@ export function markCommitted(messages) {
   return messages;
 }
 
+const MAX_SPAN = 1_000_000;
+
+/**
+ * M1 护栏：超 span 上限直接抛（fail loud；与 session-search 同款常量与阈值，
+ * 对方仓库不碰、本仓库自行持有常量）。路由层 catch 把 OpsError.status 映射为
+ * 404——历史 0.10.x marker 的区间都是个位数，一百万量级只可能来自损坏行或
+ * 伪造 marker，不允许把它卡死事件循环。
+ */
 export function computeShadowed(events) {
   const shadowed = new Set();
   for (const e of events) {
     const range = readReplaceOp(e);
     if (!range) continue;
+    if (range.endSeq - range.startSeq > MAX_SPAN) {
+      throw new OpsError(
+        `surface replace span too large: [${range.startSeq}..${range.endSeq}] exceeds MAX_SPAN=${MAX_SPAN} — refusing to materialize (corrupt or hostile replace marker?)`,
+        404,
+      );
+    }
     for (let s = range.startSeq; s <= range.endSeq; s++) shadowed.add(s);
   }
   return shadowed;

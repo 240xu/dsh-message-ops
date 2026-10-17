@@ -8,11 +8,11 @@
 
 import { zstdCompressSync } from "node:zlib";
 import { open as openFile, truncate as truncateFile, stat as statFile } from "node:fs/promises";
-import { isSessionId, sessionIdVariants, findSessionDirs, readSessionFileAsync, listMessages, computeShadowed, messageText, turnBounds, markCommitted } from "./session-file.js";
+import { isSessionId, sessionIdVariants, findSessionDirs, readSessionFileAsync, listMessages, computeShadowed, messageText, messageTextFull, turnBounds, markCommitted } from "./session-file.js";
 import { restoreNoticeText, planRevertFromEvents, planDeleteFromEvents, nextSeqFrom, buildMarkerEvent, buildRestoreNoticeEvent, buildReplayEvent, planNoticeWindow, noticeWindowPreamble, noticeWindowPostamble,
   OpsError, planRevert, planDelete, planRestore, applyRestore, applySurfaceReplace,
   restoreProgress, pendingRestoreTurns,
-  isTrustedApiRequest, isJsonContentType,
+  isTrustedApiRequest, isJsonContentType, webAuthGate,
 } from "./ops-core.js";
 
 export const name = "dsh-message-ops";
@@ -42,18 +42,26 @@ async function readJsonBody(req) {
   catch { return null; }
 }
 
-/** 统一入口围栏：全部 /api/message-ops/* 路由先过这一层。 */
-function fence(req, res) {
+/** 统一入口围栏：全部 /api/message-ops/* 路由先过这一层（三层信任 + 宿主 BrowserAuth cookie）。 */
+async function fence(targetCtx, req, res) {
   if (!isTrustedApiRequest(req)) {
     sendJson(res, 403, { ok: false, error: "untrusted request origin (loopback Host + same-origin only)" });
+    return false;
+  }
+  // 0.10.8：宿主同条件 GET 被读全量（审计缺口）。宿主 /api admit = 三层围栏
+  // 之外还要 BrowserAuth cookie（无 cookie → 401）；前端同源 fetch 自动带
+  // cookie，取数不受影响。secret 读不到 = 降级回旧围栏（webAuthGate 内部
+  // 告警一次），老宿主/测桩不破坏。
+  if (!(await webAuthGate(targetCtx, req))) {
+    sendJson(res, 401, { ok: false, error: "unauthorized (browser auth cookie required; reopen the URL printed by dsh web)" });
     return false;
   }
   return true;
 }
 
 /** 写操作围栏：入口信任 + Content-Type 必须 application/json（CSRF 纵深）。 */
-function writeFence(req, res) {
-  if (!fence(req, res)) return false;
+async function writeFence(targetCtx, req, res) {
+  if (!(await fence(targetCtx, req, res))) return false;
   if (!isJsonContentType(req)) {
     sendJson(res, 415, { ok: false, error: "content-type must be application/json" });
     return false;
@@ -519,17 +527,32 @@ async function opsCommit(targetCtx, mode, sessionId, seq) {
         : `[消息回滚] 已回滚到 seq ${seq}（含）之后的 ${plan.shadowedSeqs.length} 个节点`;
       // 0.8.2：会话 store 命中时走引擎路径 —— 同样要先开合成 turn 窗口，
       // 否则 notice 落在已关闭的 turn/step 里，加载端拒绝整份历史。
-      for (const pre of noticeWindowPreamble(win)) session.append(pre.kind, pre.data);
-      const event = applySurfaceReplace(session, plan.startSeq, plan.endSeq, plan.shadowedSeqs, text, turnStep);
-      // 必须闭合：否则引擎内存里 turn 16 永远开着 → isRunning 恒真 → 后续操作全被 409
-      for (const post of noticeWindowPostamble(win)) session.append(post.kind, post.data);
-      flushSessions(targetCtx, session);
-      return {
-        ok: true, mode, seq,
-        syntheticTurn: win.synthetic === true,
-        shadowedCount: plan.shadowedSeqs.length,
-        eventSeq: event && event.seq != null ? event.seq : null,
-      };
+      // 0.10.8 孤儿护栏：plan 校验（planRevert/planDelete 的 409 拒绝）本就在
+      // preamble **之前**执行；落 preamble 后残余的失败路径只剩引擎侧的
+      // replace/provenance/turn-step 校验（拼写探测双失败、surface TOCTOU 变化）。
+      // 捕一层把合成 turn 用 postamble **闭合**——失败时内存里不再留一个常开
+      // turn（0.8.2 注释锁定的「后半操作被 409 锁拒」形态），随后原样抛出，
+      // 由路由层按既有 OpsError 映射。append-only 引擎无「删除已落事件」能力，
+      // 闭合孤儿窗口是最小且可被动校验的整理。
+      try {
+        for (const pre of noticeWindowPreamble(win)) session.append(pre.kind, pre.data);
+        const event = applySurfaceReplace(session, plan.startSeq, plan.endSeq, plan.shadowedSeqs, text, turnStep);
+        // 必须闭合：否则引擎内存里 turn 16 永远开着 → isRunning 恒真 → 后续操作全被 409
+        for (const post of noticeWindowPostamble(win)) session.append(post.kind, post.data);
+        flushSessions(targetCtx, session);
+        return {
+          ok: true, mode, seq,
+          syntheticTurn: win.synthetic === true,
+          shadowedCount: plan.shadowedSeqs.length,
+          eventSeq: event && event.seq != null ? event.seq : null,
+        };
+      } catch (err) {
+        // 孤儿整理失败不再包一层也不会更糟（append 已失败态）；原错误照抛。
+        for (const post of noticeWindowPostamble(win)) {
+          try { session.append(post.kind, post.data); } catch { /* postamble 被引擎拒：维持原错误上抛 */ }
+        }
+        throw err;
+      }
     } finally {
       acq.release();
     }
@@ -583,6 +606,9 @@ async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq, discard) {
   }
   const acq = await acquireSession(targetCtx, sessionId);
   if (acq !== null && acq.session !== undefined) {
+    // 0.10.8 孤儿护栏（与 opsCommit 同型）：planRestore/进度校验本就在 preamble
+    // 之前完成；applyRestore 里的引擎 append 若抛（如 replay 坐标错开），
+    // preamble 已落——闭合合成 turn 再原样抛出，不留常开孤儿窗口。
     try {
       for (const pre of noticeWindowPreamble(win)) acq.session.append(pre.kind, pre.data);
       const result = applyRestore(acq.session, plan, {
@@ -590,6 +616,11 @@ async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq, discard) {
       });
       for (const post of noticeWindowPostamble(win)) acq.session.append(post.kind, post.data);
       return { ok: true, ...result, discarded: plan.discard === true, upToSeq: plan.upToSeq, restoredSourceSeqs: plan.replayable.map((i) => i.seq), range: { startSeq: plan.startSeq, endSeq: plan.endSeq } };
+    } catch (err) {
+      for (const post of noticeWindowPostamble(win)) {
+        try { acq.session.append(post.kind, post.data); } catch { /* postamble 被引擎拒：维持原错误上抛 */ }
+      }
+      throw err;
     } finally {
       acq.release();
     }
@@ -763,7 +794,7 @@ export function apply(ctx) {
       path: "/api/message-ops/messages",
       handler: async (req, res) => {
         if (req.method !== "GET") return sendJson(res, 405, { ok: false, error: "method not allowed" });
-        if (!fence(req, res)) return;
+        if (!(await fence(targetCtx, req, res))) return;
         try {
           const url = new URL(req.url, "http://localhost");
           return sendJson(res, 200, await opsList(targetCtx, url.searchParams.get("sessionId") || ""));
@@ -780,18 +811,24 @@ export function apply(ctx) {
       path: "/api/message-ops/text",
       handler: async (req, res) => {
         if (req.method !== "GET") return sendJson(res, 405, { ok: false, error: "method not allowed" });
-        if (!fence(req, res)) return;
+        if (!(await fence(targetCtx, req, res))) return;
         try {
           const url = new URL(req.url, "http://localhost");
           const sessionId = url.searchParams.get("sessionId") || "";
           const seq = Number.parseInt(url.searchParams.get("seq") || "", 10);
           if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
           if (!Number.isSafeInteger(seq) || seq < 0) throw new OpsError("invalid seq", 400);
+          // seq 0 在日志头里是结构事件区（permission/preset 等，实测恒非消息），
+          // messageText 恒空串；引用按钮不可能引用它，直接 404 而不是 200 {text:""}。
+          if (seq === 0) throw new OpsError("no quotable message at seq 0", 404);
           const { logPath } = pickSessionDir(sessionId);
           const { events } = await readSessionFileAsync(logPath);
           const ev = events.find((e) => e && e.seq === seq);
           if (!ev) throw new OpsError("seq not found", 404);
-          return sendJson(res, 200, { ok: true, seq, text: messageText(ev) });
+          // 0.10.8：宿主会把长文本拆成多段 content（seq 6830 实测 321+7954+20），
+          // 只回首段 = 摘要拦腰截断。messageTextFull 与 messageText 同一条
+          // 「合格 text 段」口径，聚合改为全量拼接。
+          return sendJson(res, 200, { ok: true, seq, text: messageTextFull(ev) });
         } catch (err) {
           return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
         }
@@ -801,7 +838,7 @@ export function apply(ctx) {
     // --- POST revert / delete：live-session surface replace ------------------
     const commitHandler = (mode) => async (req, res) => {
       if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method not allowed" });
-      if (!writeFence(req, res)) return;
+      if (!(await writeFence(targetCtx, req, res))) return;
       const body = await readFencedBody(req, res);
       if (body === undefined) return;
       if (!body || typeof body !== "object") return sendJson(res, 400, { ok: false, error: "invalid json" });
@@ -827,7 +864,7 @@ export function apply(ctx) {
       path: "/api/message-ops/restore",
       handler: async (req, res) => {
         if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method not allowed" });
-        if (!writeFence(req, res)) return;
+        if (!(await writeFence(targetCtx, req, res))) return;
         const body = await readFencedBody(req, res);
         if (body === undefined) return;
         if (!body || typeof body !== "object") return sendJson(res, 400, { ok: false, error: "invalid json" });
