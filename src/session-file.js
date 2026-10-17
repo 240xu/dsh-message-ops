@@ -340,6 +340,20 @@ export function computeShadowed(events) {
   for (const e of events) {
     const range = readReplaceOp(e);
     if (!range) continue;
+    // M2′（0.10.9）：反向区间 [start>end] —— 引擎 foldSurface 的替换遮蔽是
+    // 「节点索引序重算」（dsh-session/types/surface.js:299-327 replacementRange
+    // 用 nodes.indexOf + nodes.slice）。数值方向本身合法，宿主判 clean（语料
+    // afcc0453 的 9 个 compact-checkpoint 反向 marker 复演实证，m2-probe）。
+    // 磁盘口径下唯一等价的推导源是顶层 sourceEventSeqs（折叠凭据 = 被消费的
+    // 原事件序列）；无凭据时无法等价推导，保持旧约定忽略。
+    if (range.startSeq > range.endSeq) {
+      const src = e.sourceEventSeqs;
+      if (!Array.isArray(src)) continue;
+      for (const s of src) {
+        if (Number.isInteger(s) && s >= 0 && s < e.seq) shadowed.add(s);
+      }
+      continue;
+    }
     if (range.endSeq - range.startSeq > MAX_SPAN) {
       throw new OpsError(
         `surface replace span too large: [${range.startSeq}..${range.endSeq}] exceeds MAX_SPAN=${MAX_SPAN} — refusing to materialize (corrupt or hostile replace marker?)`,
