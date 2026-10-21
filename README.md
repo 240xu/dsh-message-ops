@@ -1,25 +1,21 @@
 # @240xu/dsh-message-ops
 
-DSH web 插件：**消息回滚 + 单条删除 + 恢复**，并为官方 `session/fork` 提供消息级入口。
-
-> 一句话：官方只能分支最后一条消息；本插件让你在任意消息上回滚、删除或分支，日志始终 append-only。
-
-## 当前版本速查（0.11.1）
-
-| 功能 | 入口 | 是否由本插件写会话日志 |
-|---|---|---|
-| 消息回滚 | Ops 面板 / 消息 hover / agent 工具 | 是（append-only surface replace） |
-| 单条删除 | Ops 面板 / 消息 hover / agent 工具 | 是（append-only surface replace） |
-| 恢复 | 输入框上方回撤贴条 / agent 工具 | 是（重放被遮蔽消息） |
-| 分支 | Ops 面板 / 消息 hover | 否，调用官方 `session/fork` |
-| 整会话删除 | 侧栏菜单 → 回收站 | 否，目录 rename 到回收站 |
-| 整会话恢复/永久删除 | Ops 面板 → 回收站 | 否，目录 rename / unlink |
-| Markdown 导出 | 不支持 | 请用官方 `/api/session.export` |
-
-`message_ops` agent 工具提供四个动作：`list | revert | delete | restore`。
+DSH web 插件：**消息回滚 + 删除 + 恢复**。只补 dsh 官方**没有**的能力。
 
 > **0.9.0 是破坏性变更**：移除了本插件的**分支**与 **Markdown 导出**。
 > 两者 dsh 官方都已有（`session/fork` 与 `/api/session.export`），详见下方「为什么不重复造轮子」。
+
+
+## 10 秒速查
+
+```sh
+dsh plugin --profile web add @240xu/dsh-message-ops
+# 重启 dsh web 后，会话头部点 Message ops
+```
+
+- 能做什么：回滚到任意消息、只删一条、恢复；分支调用官方 session/fork
+- 不能做什么：Markdown 导出（请用官方 `/api/session.export`）
+- 卸载：`dsh plugin --profile web remove @240xu/dsh-message-ops`
 
 ## 官方没有、本插件提供的
 
@@ -41,13 +37,13 @@ DSH web 插件：**消息回滚 + 单条删除 + 恢复**，并为官方 `sessio
 
 ## 用法
 
-- **右侧 Ops 面板**（默认入口）：消息 / 回收站双 tab，支持全文搜索、角色过滤、含已回滚开关、单条详情。
-- **会话头部**的 `Message ops` 按钮：打开同一面板。
-- **助手/用户消息** hover：`Revert to here`、`Quote to composer`。
-- **输入框上方的回撤贴条**：展开后可逐条 `Restore`（恢复入口）。
-- **侧栏会话行菜单**：整会话移入回收站。
+- **会话头部**的 `Message ops (revert / delete / branch)` 按钮 → 统一对话框
+- **助手消息** hover 行的 `Revert to here` / `Quote to composer`
+- **用户消息** hover 行的 `Revert to here`
+- **输入框上方的回撤贴条**：展开后可逐条 `Restore`（这是恢复的唯一入口）
+- **侧栏会话行**的 `...` 菜单
 
-面板流程：**选一条消息 → 查看全文 → 回滚 / 仅删除此条 / 从此条分支（调用官方 fork）→ 破坏性操作需确认**。
+对话框流程：**先在列表里选一条消息 → 上方出现三个操作 → 破坏性操作需勾选确认**。
 
 ## 安装
 
@@ -71,7 +67,7 @@ dsh plugin --profile web add file:C:/path/to/dsh-message-ops
 - 回滚/删除不重写日志：通过一条承载 `surfaceOp: replace` 的 system 事件实现，
   约束由 DSH 引擎 `assertProvenance` 校验，违规如实上报（HTTP 409）。
 - 回滚/删除前必须勾选风险确认；运行中的会话一律拒绝（提示先停止）。
-- 分支不再由本插件写磁盘：直接调用官方 `session/fork`，失败时提示先停止运行中的会话。
+- 分支先写临时文件再原子 rename，半写日志不会被会话扫描读到。
 
 ## 端点
 
@@ -80,7 +76,8 @@ dsh plugin --profile web add file:C:/path/to/dsh-message-ops
 | GET  | `/api/message-ops/messages?sessionId=<id>` | 消息级列表（磁盘真相 + 可见性标注 + running 状态） |
 | POST | `/api/message-ops/revert`  | `{sessionId, seq}` 回滚到该条（含） |
 | POST | `/api/message-ops/delete`  | `{sessionId, seq}` 仅遮蔽该条 |
-| GET  | `/api/message-ops/text?sessionId=<id>&seq=<n>` | 单条消息全文（面板详情用） |
+| POST | `/api/message-ops/branch`  | `{sessionId, upToSeq}` 分支新会话，返回 `{newId, dir, keptEvents}` |
+| GET  | `/api/message-ops/export?sessionId=<id>&seq=<可选>` | 导出 Markdown（seq ≤ 上界，缺省全部），附件下载 |
 | POST | `/api/message-ops/restore` | `{sessionId, seq}` 回滚恢复：seq 为某次 revert/delete 标记事件的 seq |
 
 ## 0.2.4 UI GAP（ux-scout dsh-ui-spec G-M1）
@@ -146,7 +143,7 @@ dsh plugin --profile web add file:C:/path/to/dsh-message-ops
 
 ### Agent 工具 `message_ops`
 
-模型侧可调用四操作：`action: list | revert | delete | restore`，参数
+模型侧可直接调用五操作：`action: list | revert | delete | branch | restore | export`，参数
 `sessionId`（必填）、`seq`、`upToSeq`。工具与 HTTP 路由共用同一套核心逻辑
 （`src/ops-core.js`），行为与错误语义完全一致；失败以文本形式返回，不中断回合。
 
@@ -758,4 +755,3 @@ min fence=10 → seq>=10 全藏 → 4792/4793 全被隐藏 → 正文几乎空�
 | `src/index.js:1-23` 模块头里的 0.9.0 分支/导出移除段 | 「为什么不重复造轮子（0.9.0 的取舍）」 |
 | `src/index.js:336-340` `revertFences` 塌缩复盘 | 「0.9.4 · 修「正文几乎空白」」 |
 | `src/ops-core.js:551-557` 0.5.7 磁盘路径复盘 | 「0.5.7 · 第四层根因：store-miss 会话的磁盘追加路径」 |
-
