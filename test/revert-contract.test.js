@@ -15,8 +15,20 @@ import { zstdCompressSync } from 'node:zlib'
 import { createRequire } from 'node:module'
 import { join, dirname } from 'node:path'
 
-import { decodeFrames, parseRows } from '/data/data/com.termux/files/home/dsh-plugins-src/sessionfix/lib/seqcore.js'
-import { officialValidate } from '/data/data/com.termux/files/home/dsh-plugins-src/sessionfix/lib/v4gate.mjs'
+// Optional local contract fixtures. CI does not ship sessionfix; these tests
+// are skipped there rather than hard-failing on a machine-specific path.
+const SEQ_IMPL = process.env.SESSIONFIX_SEQCORE ?? '/data/data/com.termux/files/home/dsh-plugins-src/sessionfix/lib/seqcore.js'
+const GATE_IMPL = process.env.SESSIONFIX_V4GATE ?? '/data/data/com.termux/files/home/dsh-plugins-src/sessionfix/lib/v4gate.mjs'
+let decodeFrames, parseRows, officialValidate
+try {
+  ({ decodeFrames, parseRows } = await import(SEQ_IMPL))
+  ;({ officialValidate } = await import(GATE_IMPL))
+} catch {
+  decodeFrames = parseRows = officialValidate = undefined
+}
+const contractSkip = process.env.SESSIONFIX_CONTRACT !== '1'
+  ? 'optional sessionfix contract tests; set SESSIONFIX_CONTRACT=1 to run'
+  : (decodeFrames === undefined ? 'sessionfix contract fixtures not available' : false)
 import {
   planNoticeWindow, noticeWindowPreamble, noticeWindowPostamble,
   buildMarkerEvent, buildRestoreNoticeEvent, buildReplayEvent, planRestore, restoreProgress,
@@ -39,7 +51,7 @@ function idleSessionBase() {
   ].map((e, i) => ({ ...e, seq: i, time: 1000 + i }))
 }
 
-test('契约：合成窗口承载的 revert marker 通过官方三层闸', () => {
+test('契约：合成窗口承载的 revert marker 通过官方三层闸', { skip: contractSkip }, () => {
   const base = idleSessionBase()
   const win = planNoticeWindow(base)
   assert.equal(win.synthetic, true, '空闲会话应规划合成窗口')
@@ -68,7 +80,7 @@ test('契约：合成窗口必须自带 reason（UI 层硬要求）', () => {
   assert.equal(turnEnd.data.reason.kind, 'interrupted')
 })
 
-test('契约：缺 reason 的 turn/end 会被官方闸拦下（回归证明这条规则有效）', () => {
+test('契约：缺 reason 的 turn/end 会被官方闸拦下（回归证明这条规则有效）', { skip: contractSkip }, () => {
   const base = idleSessionBase()
   const bad = [...base, { type: 'turn/start', seq: base.length, time: 6000, data: { turn: 2 } },
     { type: 'step/start', seq: base.length + 1, time: 6001, data: { turn: 2, step: 1 } },
@@ -80,7 +92,7 @@ test('契约：缺 reason 的 turn/end 会被官方闸拦下（回归证明这�
   assert.match(v.error, /reason/, `错误信息应指向 reason，实际：${v.error}`)
 })
 
-test('契约：完整 restore 链路（notice + 重放）通过官方三层闸', () => {
+test('契约：完整 restore 链路（notice + 重放）通过官方三层闸', { skip: contractSkip }, () => {
   const base = idleSessionBase()
   let cursor = base.length, t = 5000
   const win = planNoticeWindow(base)
