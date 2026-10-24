@@ -30,6 +30,24 @@ window.__ModuleLoader__.load({
     const MSG_COALESCE_MS = 1000
     var __messagesMemo = { url: null, at: 0, p: null, settled: false }
     var invalidateMessagesMemo = () => { __messagesMemo = { url: null, at: 0, p: null, settled: false } }
+    const SYNTHETIC_TURN_STYLE_ID = 'dsh-message-ops-synthetic-turn-hide'
+    const syncSyntheticTurnStyle = (messages) => {
+      if (typeof document === 'undefined' || !document.head) return
+      const turns = new Set()
+      for (const m of messages || []) {
+        if (m && m.syntheticTurn === true && Number.isSafeInteger(m.turn)) turns.add(m.turn)
+      }
+      let tag = document.getElementById(SYNTHETIC_TURN_STYLE_ID)
+      if (turns.size === 0) { if (tag) tag.remove(); return }
+      if (!tag) {
+        tag = document.createElement('style')
+        tag.id = SYNTHETIC_TURN_STYLE_ID
+        document.head.appendChild(tag)
+      }
+      tag.textContent = Array.from(turns).map((turn) =>
+        '[data-chat-flow-kind="turn-process"][data-chat-turn="' + turn + '"]{display:none!important}'
+      ).join('\n')
+    }
     const emitChanged = () => {
       // 数据变了：连同本地缓存一起作废（否则 8s TTL 会让 openSession 后的
       // scan 拿旧 payload 重算隐藏 = 「回滚了但界面没变」）。
@@ -129,6 +147,60 @@ window.__ModuleLoader__.load({
       'undo.none.redo': '没有可恢复的回滚',
       'redo.label': '恢复上一条被回滚的消息',
       'redo.desc': '把回滚掉的消息重新放回对话',
+      'panel.messages': '消息',
+      'panel.trash': '回收站',
+      'panel.search': '搜索当前会话',
+      'panel.searchHint': '搜索全文，不只是摘要',
+      'panel.all': '全部',
+      'panel.user': '用户',
+      'panel.assistant': '助手',
+      'panel.tool': '工具',
+      'panel.includeShadowed': '含已回滚',
+      'panel.loading': '正在读取…',
+      'panel.loadFail': '读取失败：',
+      'panel.searchFail': '搜索失败：',
+      'panel.empty': '没有可显示的消息。',
+      'panel.noMatch': '没有匹配结果。',
+      'panel.selectHint': '选择一条消息，查看全文和操作。',
+      'panel.detailLoading': '正在读取全文…',
+      'panel.shadowed': '已回滚',
+      'panel.running': '会话正在运行：回滚、删除、分支需先停止。',
+      'panel.revert': '回滚到此条',
+      'panel.revertHint': '包含此条及其后的可见消息',
+      'panel.revertConfirmTitle': '回滚到 #{seq}？',
+      'panel.revertConfirmBody': '将遮蔽 #{start}–#{end} 的 {n} 条消息，其中可见 {v} 条；日志仍保留，可恢复。',
+      'panel.deleteConfirmTitle': '仅删除 #{seq}？',
+      'panel.deleteConfirmBody': '将遮蔽这 1 条消息，其他内容不动；日志仍保留，可恢复。',
+      'panel.confirmRevert': '确认回滚',
+      'panel.confirmDeleteOne': '确认删除',
+      'panel.retry': '重试',
+      'panel.searching': '搜索中…',
+      'panel.deleteSessionImpact': '共 {n} 条消息；移入回收站后 7 天内可恢复。',
+      'panel.deleteUnavailable': '会话信息尚未就绪，暂不能删除。',
+      'panel.delete': '仅删除此条',
+      'panel.deleteHint': '只遮蔽这一条，其他消息不动',
+      'panel.branch': '从此条分支',
+      'panel.branchHint': '复制到此条为止的内容为新会话',
+      'panel.branchDone': '分支已创建：{id}',
+      'panel.openNew': '打开新会话',
+      'panel.revertDone': '回滚已生效',
+      'panel.deleteDone': '删除已生效',
+      'panel.count': '共 {n} 条 · 可见 {v} · 已回滚 {s}',
+      'panel.deleteSession': '删除整条会话',
+      'panel.deleteSessionHint': '移入回收站，7 天内可恢复。请输入标题确认：',
+      'panel.cancel': '取消',
+      'panel.confirmDelete': '确认删除',
+      'panel.deleting': '删除中…',
+      'panel.deleted': '会话已移入回收站',
+      'panel.trashEmpty': '回收站是空的。',
+      'panel.untitled': '未命名会话',
+      'panel.restore': '恢复',
+      'panel.purge': '永久删除',
+      'panel.purgeConfirm': '再点一次永久删除',
+      'panel.restored': '会话已恢复',
+      'panel.purged': '回收站条目已永久删除',
+      'panel.expires': '到期',
+      'panel.busy': '处理中…',
       'menu.ops': '消息操作',
     }
 
@@ -189,6 +261,60 @@ window.__ModuleLoader__.load({
       'undo.none.redo': 'No revert to redo',
       'redo.label': 'Restore the last reverted message',
       'redo.desc': 'Put the reverted message back into the conversation',
+      'panel.messages': 'Messages',
+      'panel.trash': 'Trash',
+      'panel.search': 'Search this session',
+      'panel.searchHint': 'Search full text, not just snippets',
+      'panel.all': 'All',
+      'panel.user': 'User',
+      'panel.assistant': 'Assistant',
+      'panel.tool': 'Tool',
+      'panel.includeShadowed': 'Include shadowed',
+      'panel.loading': 'Loading…',
+      'panel.loadFail': 'Failed to load: ',
+      'panel.searchFail': 'Search failed: ',
+      'panel.empty': 'No messages to show.',
+      'panel.noMatch': 'No matches.',
+      'panel.selectHint': 'Pick a message to see its full text and actions.',
+      'panel.detailLoading': 'Loading full text…',
+      'panel.shadowed': 'reverted',
+      'panel.running': 'Session is running: stop it before revert, delete, or branch.',
+      'panel.revert': 'Revert to here',
+      'panel.revertHint': 'Includes this message and all visible messages after it',
+      'panel.revertConfirmTitle': 'Revert to #{seq}?',
+      'panel.revertConfirmBody': 'This shadows {n} messages (#{start}–#{end}), including {v} visible. The log stays append-only and can be restored.',
+      'panel.deleteConfirmTitle': 'Delete only #{seq}?',
+      'panel.deleteConfirmBody': 'This shadows this one message; everything else stays. The log stays append-only and can be restored.',
+      'panel.confirmRevert': 'Confirm revert',
+      'panel.confirmDeleteOne': 'Confirm delete',
+      'panel.retry': 'Retry',
+      'panel.searching': 'Searching…',
+      'panel.deleteSessionImpact': 'Total {n} messages; recoverable from trash for 7 days.',
+      'panel.deleteUnavailable': 'Session details are not ready yet; deletion is disabled.',
+      'panel.delete': 'Delete only this',
+      'panel.deleteHint': 'Shadows only this message',
+      'panel.branch': 'Branch from here',
+      'panel.branchHint': 'Copy everything through this message into a new session',
+      'panel.branchDone': 'Branched: {id}',
+      'panel.openNew': 'Open new session',
+      'panel.revertDone': 'Revert applied',
+      'panel.deleteDone': 'Delete applied',
+      'panel.count': 'Total {n} · visible {v} · shadowed {s}',
+      'panel.deleteSession': 'Delete whole session',
+      'panel.deleteSessionHint': 'Moves it to trash for 7 days. Type the title to confirm:',
+      'panel.cancel': 'Cancel',
+      'panel.confirmDelete': 'Delete',
+      'panel.deleting': 'Deleting…',
+      'panel.deleted': 'Session moved to trash',
+      'panel.trashEmpty': 'Trash is empty.',
+      'panel.untitled': 'Untitled session',
+      'panel.restore': 'Restore',
+      'panel.purge': 'Delete forever',
+      'panel.purgeConfirm': 'Click again to delete forever',
+      'panel.restored': 'Session restored',
+      'panel.purged': 'Trash entry permanently deleted',
+      'panel.expires': 'expires',
+      'panel.busy': 'Working…',
       'menu.ops': 'Message ops',
     }
 
@@ -592,6 +718,924 @@ window.__ModuleLoader__.load({
       ])
     }
 
+    // --- A · 功能主义抽屉 -------------------------------------------------------
+
+    const PANEL_ROW_H = 46
+    const PANEL_SEARCH_LIMIT = 100
+
+    function fmtClock(value) {
+      if (typeof value !== 'number') return ''
+      try {
+        return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      } catch { return '' }
+    }
+
+    function roleCode(role) {
+      if (role === 'user') return 'U'
+      if (role === 'assistant') return 'A'
+      if (role === 'tool') return 'T'
+      return 'S'
+    }
+
+    function focusablesIn(root) {
+      if (!root || typeof root.querySelectorAll !== 'function') return []
+      const selector = 'button:not([disabled]),[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
+      return Array.prototype.slice.call(root.querySelectorAll(selector)).filter((el) => {
+        if (el.getAttribute('aria-hidden') === 'true') return false
+        return el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0
+      })
+    }
+
+    function ensurePanelStyle() {
+      try {
+        if (document.getElementById('dsh-message-ops-panel-style')) return
+        const tag = document.createElement('style')
+        tag.id = 'dsh-message-ops-panel-style'
+        tag.textContent = [
+          '.mopsPanelScrim{position:fixed;inset:0;z-index:1200;background:rgba(15,17,21,.18);display:flex;justify-content:flex-end}',
+          '.mopsPanel{width:560px;max-width:100vw;height:100%;display:flex;flex-direction:column;background:var(--dsw-alias-bg-primary,#fff);color:var(--dsw-alias-label-primary,#0f1115);border-left:1px solid var(--dsw-alias-border-l2,#e6e6e6);box-shadow:-16px 0 48px rgba(15,17,21,.14);font-family:inherit;font-size:13px;line-height:1.45}',
+          '.mopsPanel *{box-sizing:border-box}',
+          '.mopsPanel button{font:inherit;color:inherit;border-radius:0}',
+          '.mopsPanelHead{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:16px 18px 12px;border-bottom:1px solid var(--dsw-alias-border-l2,#e6e6e6)}',
+          '.mopsPanelKicker{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--dsw-alias-label-tertiary,#8a8a8e)}',
+          '.mopsPanelTitle{font-size:15px;font-weight:600;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:420px}',
+          '.mopsPanelSub{font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8a8e);margin-top:2px}',
+          '.mopsPanelClose{width:30px;height:30px;border:1px solid var(--dsw-alias-border-l2,#e6e6e6);background:transparent;cursor:pointer;font-size:16px;line-height:1;flex:none}',
+          '.mopsPanelClose:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(15,17,21,.06))}',
+          '.mopsTabs{display:flex;border-bottom:1px solid var(--dsw-alias-border-l2,#e6e6e6)}',
+          '.mopsTab{flex:1;padding:9px 12px;border:0;border-bottom:2px solid transparent;background:transparent;cursor:pointer;font-size:12px;color:var(--dsw-alias-label-secondary,#6b6b70)}',
+          '.mopsTab.on{border-bottom-color:var(--dsw-alias-brand-primary,#4d6bfe);color:var(--dsw-alias-label-primary,#0f1115);font-weight:600}',
+          '.mopsSearchRow{display:flex;gap:8px;padding:12px 18px 8px}',
+          '.mopsSearch{flex:1;min-width:0;height:32px;border:1px solid var(--dsw-alias-border-l2,#d8d8d8);background:transparent;color:inherit;padding:0 9px;font:inherit;font-size:12px;outline:none}',
+          '.mopsSearch:focus{border-color:var(--dsw-alias-brand-primary,#4d6bfe)}',
+          '.mopsChips{display:flex;gap:6px;padding:0 18px 10px;flex-wrap:wrap;align-items:center}',
+          '.mopsChip{height:26px;padding:0 9px;border:1px solid var(--dsw-alias-border-l2,#d8d8d8);background:transparent;cursor:pointer;font-size:11px;color:var(--dsw-alias-label-secondary,#6b6b70)}',
+          '.mopsChip.on{border-color:var(--dsw-alias-label-primary,#0f1115);background:var(--dsw-alias-label-primary,#0f1115);color:var(--dsw-alias-bg-primary,#fff)}',
+          '.mopsToggle{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--dsw-alias-label-secondary,#6b6b70);margin-left:auto;cursor:pointer}',
+          '.mopsToggle input{accent-color:var(--dsw-alias-brand-primary,#4d6bfe)}',
+          '.mopsList{flex:1;min-height:0;overflow-y:auto;position:relative;border-top:1px solid var(--dsw-alias-border-l1,#efefef)}',
+          '.mopsList:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4d6bfe);outline-offset:-2px}',
+          '.mopsRow{position:absolute;left:0;right:0;display:grid;grid-template-columns:44px 26px minmax(0,1fr) 48px;align-items:center;gap:8px;width:100%;border:0;border-bottom:1px solid var(--dsw-alias-border-l1,#f0f0f0);background:transparent;text-align:left;cursor:pointer;padding:0 12px 0 18px;color:inherit;font:inherit}',
+          '.mopsRow:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(15,17,21,.045))}',
+          '.mopsRow.on{background:rgba(77,107,254,.08);box-shadow:inset 2px 0 0 var(--dsw-alias-brand-primary,#4d6bfe)}',
+          '.mopsRow.shadowed{opacity:.42}',
+          '.mopsSeq{font-variant-numeric:tabular-nums;font-size:10px;color:var(--dsw-alias-label-tertiary,#9a9aa0)}',
+          '.mopsRole{width:20px;height:20px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--dsw-alias-border-l2,#d8d8d8);font-size:9px;font-weight:600;color:var(--dsw-alias-label-secondary,#6b6b70)}',
+          '.mopsSnippet{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}',
+          '.mopsClock{font-size:10px;color:var(--dsw-alias-label-tertiary,#9a9aa0);text-align:right;font-variant-numeric:tabular-nums}',
+          '.mopsEmpty{padding:28px 18px;color:var(--dsw-alias-label-tertiary,#8a8a8e);font-size:12px}',
+          '.mopsErrorState{display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap;color:var(--dsw-alias-state-error-primary,#c63b32)}',
+          '.mopsErrorState .mopsAction{flex:none}',
+          '.mopsDetail{flex:none;max-height:37%;overflow-y:auto;border-top:1px solid var(--dsw-alias-border-l2,#e6e6e6);padding:12px 18px 10px;background:var(--dsw-alias-bg-secondary,#fafafa)}',
+          '.mopsDetailMeta{display:flex;gap:8px;align-items:center;font-size:10px;color:var(--dsw-alias-label-tertiary,#8a8a8e);margin-bottom:6px}',
+          '.mopsDetailText{margin:0;white-space:pre-wrap;word-break:break-word;max-height:108px;overflow:auto;font-family:inherit;font-size:12px;line-height:1.55;color:var(--dsw-alias-label-primary,#0f1115)}',
+          '.mopsDetailHint{padding:10px 0 14px;color:var(--dsw-alias-label-tertiary,#8a8a8e);font-size:12px}',
+          '.mopsActions{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}',
+          '.mopsActionConfirm{display:flex;flex-direction:column;gap:7px;margin-top:10px;padding:10px;border:1px solid var(--dsw-alias-border-l2,#e6e6e6);background:var(--dsw-alias-bg-primary,#fff)}',
+          '.mopsImpactTitle{font-size:12px;font-weight:600}',
+          '.mopsImpact{font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#6b6b70)}',
+          '.mopsAction{height:30px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2,#cfcfcf);background:transparent;cursor:pointer;font-size:11px}',
+          '.mopsAction:hover:not(:disabled){border-color:var(--dsw-alias-label-primary,#0f1115)}',
+          '.mopsAction.primary{border-color:var(--dsw-alias-label-primary,#0f1115);background:var(--dsw-alias-label-primary,#0f1115);color:var(--dsw-alias-bg-primary,#fff)}',
+          '.mopsAction.danger{border-color:var(--dsw-alias-state-error-primary,#c63b32);color:var(--dsw-alias-state-error-primary,#c63b32)}',
+          '.mopsAction:disabled{opacity:.35;cursor:default}',
+          '.mopsPanelFoot{flex:none;display:flex;align-items:center;gap:10px;justify-content:space-between;padding:10px 18px;border-top:1px solid var(--dsw-alias-border-l2,#e6e6e6);background:var(--dsw-alias-bg-primary,#fff)}',
+          '.mopsCount{font-size:10px;color:var(--dsw-alias-label-tertiary,#8a8a8e)}',
+          '.mopsDanger{border:1px solid var(--dsw-alias-state-error-primary,#c63b32);background:transparent;color:var(--dsw-alias-state-error-primary,#c63b32);height:28px;padding:0 9px;cursor:pointer;font-size:11px}',
+          '.mopsDanger:hover{background:rgba(198,59,50,.06)}',
+          '.mopsBanner{padding:7px 18px;font-size:11px;border-bottom:1px solid var(--dsw-alias-border-l1,#efefef)}',
+          '.mopsBanner.warn{color:var(--dsw-alias-state-warn-primary,#9a6500);background:rgba(154,101,0,.06)}',
+          '.mopsBanner.err{color:var(--dsw-alias-state-error-primary,#c63b32);background:rgba(198,59,50,.06)}',
+          '.mopsBanner.ok{color:var(--dsw-alias-state-success-primary,#2f7d4a);background:rgba(47,125,74,.06)}',
+          '.mopsConfirm{position:absolute;inset:0;z-index:2;background:var(--dsw-alias-bg-primary,#fff);display:flex;flex-direction:column;justify-content:center;padding:28px 24px;gap:10px}',
+          '.mopsConfirm h3{margin:0;font-size:15px}',
+          '.mopsConfirm p{margin:0;font-size:12px;color:var(--dsw-alias-label-secondary,#6b6b70)}',
+          '.mopsConfirm p.mopsImpact{font-size:11px}',
+          '.mopsConfirm .mopsBanner{margin:0 -24px;border-top:1px solid var(--dsw-alias-border-l1,#efefef);border-bottom:1px solid var(--dsw-alias-border-l1,#efefef)}',
+          '.mopsConfirm input{height:34px;border:1px solid var(--dsw-alias-border-l2,#d8d8d8);background:transparent;color:inherit;padding:0 9px;font:inherit;font-size:13px}',
+          '.mopsConfirm input:disabled{opacity:.5}',
+          '.mopsConfirmRow{display:flex;gap:8px;margin-top:4px}',
+          '.mopsTrashItem{display:flex;align-items:center;gap:10px;padding:11px 18px;border-bottom:1px solid var(--dsw-alias-border-l1,#f0f0f0)}',
+          '.mopsTrashMain{flex:1;min-width:0}',
+          '.mopsTrashTitle{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+          '.mopsTrashMeta{font-size:10px;color:var(--dsw-alias-label-tertiary,#8a8a8e);margin-top:2px}',
+          '@media(max-width:760px){.mopsPanel{width:100vw;border-left:0}.mopsDetail{max-height:42%}}',
+        ].join('')
+        document.head.appendChild(tag)
+      } catch { /* style failure must not break the panel */ }
+    }
+
+    function OpsPanel(props) {
+      const t = (props && props.t) || __t
+      useLocaleRevision()
+      const [open, setOpen] = useState(false)
+      const [target, setTarget] = useState(null)
+      const [state, setState] = useState('idle')
+      const [loadError, setLoadError] = useState(null)
+      const [messages, setMessages] = useState([])
+      const [query, setQuery] = useState('')
+      const [role, setRole] = useState('all')
+      const [includeShadowed, setIncludeShadowed] = useState(false)
+      const [picked, setPicked] = useState(null)
+      const [detail, setDetail] = useState('')
+      const [detailState, setDetailState] = useState('idle')
+      const [tab, setTab] = useState('messages')
+      const [hits, setHits] = useState(null)
+      const [searching, setSearching] = useState(false)
+      const [trash, setTrash] = useState([])
+      const [trashState, setTrashState] = useState('idle')
+      const [trashError, setTrashError] = useState(null)
+      const [confirmDelete, setConfirmDelete] = useState(false)
+      const [confirmTitle, setConfirmTitle] = useState('')
+      const [deleteError, setDeleteError] = useState(null)
+      const [confirmAction, setConfirmAction] = useState(null)
+      const [purgeId, setPurgeId] = useState(null)
+      const [childId, setChildId] = useState(null)
+      const [busy, setBusy] = useState('')
+      const [error, setError] = useState(null)
+      const [done, setDone] = useState('')
+      const [scrollTop, setScrollTop] = useState(0)
+      const [viewport, setViewport] = useState(480)
+      const listRef = useRef(null)
+      const searchRef = useRef(null)
+      const panelRef = useRef(null)
+      const scrimRef = useRef(null)
+      const confirmRef = useRef(null)
+      const actionConfirmRef = useRef(null)
+      const triggerRef = useRef(null)
+      const deleteBtnRef = useRef(null)
+      const revertBtnRef = useRef(null)
+      const deleteOneBtnRef = useRef(null)
+      const detailReq = useRef(0)
+      const loadSeqRef = useRef(0)
+      const trashSeqRef = useRef(0)
+      const openRef = useRef(false)
+      const sessionRef = useRef(null)
+      openRef.current = open
+      sessionRef.current = target && target.sessionId ? target.sessionId : null
+
+      useEffect(() => {
+        ensurePanelStyle()
+        const handler = (e) => {
+          const d = e && e.detail ? e.detail : {}
+          if (!d.sessionId) return
+          const active = document.activeElement
+          if (!panelRef.current || !panelRef.current.contains(active)) triggerRef.current = active
+          loadSeqRef.current += 1
+          trashSeqRef.current += 1
+          detailReq.current += 1
+          setTarget({ sessionId: d.sessionId, title: d.title || null, running: d.running === true })
+          setOpen(true)
+          setState('loading')
+          setLoadError(null)
+          setMessages([])
+          setHits(null)
+          setQuery('')
+          setRole('all')
+          setIncludeShadowed(false)
+          setPicked(null)
+          setDetail('')
+          setDetailState('idle')
+          setTab('messages')
+          setTrash([])
+          setTrashState('idle')
+          setTrashError(null)
+          setConfirmDelete(false)
+          setConfirmTitle('')
+          setDeleteError(null)
+          setConfirmAction(null)
+          setPurgeId(null)
+          setChildId(null)
+          setError(null)
+          setDone('')
+          setScrollTop(0)
+        }
+        window.addEventListener(EVENT, handler)
+        return () => window.removeEventListener(EVENT, handler)
+      }, [])
+
+      const sid = target && target.sessionId
+
+      const loadMessages = useCallback(async (quiet) => {
+        if (!sid) return
+        const requestId = ++loadSeqRef.current
+        const requestSid = sid
+        if (!quiet) { setState('loading'); setLoadError(null) }
+        try {
+          const data = await fetchMessagesJson('/api/message-ops/messages?sessionId=' + encodeURIComponent(requestSid) + '&view=compact')
+          if (requestId !== loadSeqRef.current) return
+          setMessages(Array.isArray(data.messages) ? data.messages : [])
+          setTarget((prev) => prev && prev.sessionId === requestSid ? {
+            ...prev,
+            running: data.running === true,
+            title: prev.title || (data.session && data.session.title) || null,
+            expectedTitle: (data.session && data.session.confirmTitle) || prev.expectedTitle || prev.title || prev.sessionId,
+          } : prev)
+          setLoadError(null)
+          setError(null)
+          setState('ready')
+        } catch (reason) {
+          if (requestId !== loadSeqRef.current) return
+          const message = t('panel.loadFail') + (reason && reason.message ? reason.message : String(reason))
+          if (quiet) setError(message)
+          else { setLoadError(message); setState('error') }
+        }
+      }, [sid, t])
+
+      useEffect(() => {
+        if (!open || !sid) return
+        loadMessages(false)
+      }, [open, sid, loadMessages])
+
+      useEffect(() => {
+        if (!open || tab !== 'messages') return
+        const q = query.trim()
+        if (!q) { setHits(null); setSearching(false); return }
+        setSearching(true)
+        let cancelled = false
+        const timer = setTimeout(() => {
+          setError(null)
+          const url = '/api/message-ops/search?sessionId=' + encodeURIComponent(sid)
+            + '&q=' + encodeURIComponent(q)
+            + (role !== 'all' ? '&role=' + encodeURIComponent(role) : '')
+            + '&limit=' + PANEL_SEARCH_LIMIT
+          fetch(url)
+            .then((res) => res.json().catch(() => null).then((data) => ({ res, data })))
+            .then(({ res, data }) => {
+              if (cancelled) return
+              if (!res.ok || !data || data.ok !== true) throw new Error((data && data.error) || ('HTTP ' + res.status))
+              setHits(Array.isArray(data.results) ? data.results : [])
+              setError(null)
+            })
+            .catch((reason) => {
+              if (!cancelled) setError(t('panel.searchFail') + (reason && reason.message ? reason.message : String(reason)))
+            })
+            .finally(() => { if (!cancelled) setSearching(false) })
+        }, 200)
+        return () => { cancelled = true; clearTimeout(timer) }
+      }, [open, tab, sid, query, role, t])
+
+      const loadTrash = useCallback(async () => {
+        const requestId = ++trashSeqRef.current
+        setTrashState('loading')
+        setTrashError(null)
+        try {
+          const res = await fetch('/api/message-ops/session/trash')
+          const data = await res.json().catch(() => null)
+          if (requestId !== trashSeqRef.current) return
+          if (!res.ok || !data || data.ok !== true) throw new Error((data && data.error) || ('HTTP ' + res.status))
+          setTrash(Array.isArray(data.entries) ? data.entries : [])
+          setTrashError(null)
+          setTrashState('ready')
+        } catch (reason) {
+          if (requestId !== trashSeqRef.current) return
+          setTrashError(t('panel.loadFail') + (reason && reason.message ? reason.message : String(reason)))
+          setTrashState('error')
+        }
+      }, [t])
+
+      useEffect(() => {
+        if (open && tab === 'trash') loadTrash()
+      }, [open, tab, loadTrash])
+
+      const close = useCallback(() => {
+        if (busy) return
+        loadSeqRef.current += 1
+        trashSeqRef.current += 1
+        detailReq.current += 1
+        setOpen(false)
+        setTarget(null)
+        setPicked(null)
+        setConfirmDelete(false)
+        setConfirmAction(null)
+        setDeleteError(null)
+        setLoadError(null)
+        setTrashError(null)
+      }, [busy])
+
+      const closeConfirm = useCallback(() => {
+        if (busy === 'session-delete') return
+        setConfirmDelete(false)
+        setConfirmTitle('')
+        setDeleteError(null)
+        setTimeout(() => {
+          const el = deleteBtnRef.current
+          if (el && !el.disabled) el.focus()
+          else if (panelRef.current) panelRef.current.focus()
+        }, 0)
+      }, [busy])
+
+      const cancelAction = useCallback(() => {
+        if (busy) return
+        const mode = confirmAction
+        setConfirmAction(null)
+        setTimeout(() => {
+          const targetRef = mode === 'revert' ? revertBtnRef.current : deleteOneBtnRef.current
+          if (targetRef && !targetRef.disabled) targetRef.focus()
+          else if (panelRef.current) panelRef.current.focus()
+        }, 0)
+      }, [busy, confirmAction])
+
+      useEffect(() => {
+        if (!open) return undefined
+        const onKey = (e) => {
+          if (e.key === 'Escape') {
+            if (busy) return
+            if (confirmDelete) closeConfirm()
+            else if (confirmAction) cancelAction()
+            else close()
+          } else if (e.key === '/') {
+            if (confirmDelete || confirmAction) return
+            const el = e.target
+            const tag = el && el.tagName
+            if (el && (tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable)) return
+            e.preventDefault()
+            if (searchRef.current) searchRef.current.focus()
+          }
+        }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+      }, [open, busy, confirmDelete, confirmAction, close, closeConfirm, cancelAction])
+
+      useEffect(() => {
+        if (!open) return undefined
+        if (!triggerRef.current) triggerRef.current = document.activeElement
+        const timer = setTimeout(() => {
+          if (searchRef.current) searchRef.current.focus()
+          else if (panelRef.current) panelRef.current.focus()
+        }, 0)
+        const scrim = scrimRef.current
+        const parent = scrim && scrim.parentElement
+        const hidden = []
+        if (parent) {
+          for (const child of Array.from(parent.children)) {
+            if (child === scrim || child.tagName === 'SCRIPT' || child.tagName === 'STYLE') continue
+            hidden.push({ child, inert: child.hasAttribute('inert'), aria: child.getAttribute('aria-hidden') })
+            child.setAttribute('inert', '')
+            child.setAttribute('aria-hidden', 'true')
+          }
+        }
+        return () => {
+          clearTimeout(timer)
+          for (const item of hidden) {
+            if (!item.inert) item.child.removeAttribute('inert')
+            if (item.aria === null) item.child.removeAttribute('aria-hidden')
+            else item.child.setAttribute('aria-hidden', item.aria)
+          }
+          if (openRef.current) return
+          const trigger = triggerRef.current
+          triggerRef.current = null
+          if (trigger && typeof trigger.focus === 'function') {
+            setTimeout(() => { try { trigger.focus() } catch { /* detached trigger */ } }, 0)
+          }
+        }
+      }, [open, sid])
+
+      useEffect(() => {
+        if (!open) return undefined
+        const onKeyDown = (e) => {
+          if (e.key !== 'Tab') return
+          const scope = confirmDelete ? confirmRef.current : (confirmAction ? actionConfirmRef.current : panelRef.current)
+          if (!scope) return
+          const nodes = focusablesIn(scope)
+          if (!nodes.length) {
+            e.preventDefault()
+            scope.focus()
+            return
+          }
+          const first = nodes[0]
+          const last = nodes[nodes.length - 1]
+          const active = document.activeElement
+          if (active === scope || !scope.contains(active)) {
+            e.preventDefault()
+            const fallback = e.shiftKey ? last : first
+            fallback.focus()
+          } else if (e.shiftKey && active === first) {
+            e.preventDefault()
+            last.focus()
+          } else if (!e.shiftKey && active === last) {
+            e.preventDefault()
+            first.focus()
+          }
+        }
+        document.addEventListener('keydown', onKeyDown, true)
+        return () => document.removeEventListener('keydown', onKeyDown, true)
+      }, [open, confirmDelete, confirmAction])
+
+      useEffect(() => {
+        if (!open) return
+        if (confirmDelete) {
+          const input = confirmRef.current && confirmRef.current.querySelector('input')
+          if (input) input.focus()
+        } else if (confirmAction) {
+          const first = actionConfirmRef.current && actionConfirmRef.current.querySelector('button')
+          if (first) first.focus()
+        }
+      }, [open, confirmDelete, confirmAction])
+
+      const baseRows = query.trim() ? (hits || []) : messages
+      const rows = baseRows
+        .filter((m) => m && m.role !== 'system'
+          && (role === 'all' || m.role === role)
+          && (includeShadowed || !m.shadowed))
+        .sort((a, b) => b.seq - a.seq)
+      const activeIndex = picked ? rows.findIndex((m) => m.seq === picked.seq) : -1
+
+      const clearPick = () => {
+        detailReq.current += 1
+        setPicked(null)
+        setDetail('')
+        setDetailState('idle')
+        setConfirmAction(null)
+      }
+
+      const previewRow = (m) => {
+        if (!m) return
+        detailReq.current += 1
+        setPicked(m)
+        setDetail(m.snippet || '')
+        setDetailState('ready')
+        setConfirmAction(null)
+        setDone('')
+      }
+
+      const scrollRowIntoView = (index) => {
+        const el = listRef.current
+        if (!el) return
+        const top = index * PANEL_ROW_H
+        const view = el.clientHeight || viewport
+        let next = el.scrollTop
+        if (top < next) next = top
+        else if (top + PANEL_ROW_H > next + view) next = top + PANEL_ROW_H - view
+        if (next !== el.scrollTop) {
+          el.scrollTop = next
+          setScrollTop(next)
+        }
+      }
+
+      const handleListKeyDown = (e) => {
+        if (!rows.length) return
+        const page = Math.max(1, Math.floor((listRef.current && listRef.current.clientHeight || viewport) / PANEL_ROW_H) - 1)
+        let next = activeIndex
+        if (e.key === 'ArrowDown') next = activeIndex < 0 ? 0 : Math.min(rows.length - 1, activeIndex + 1)
+        else if (e.key === 'ArrowUp') next = activeIndex < 0 ? rows.length - 1 : Math.max(0, activeIndex - 1)
+        else if (e.key === 'Home') next = 0
+        else if (e.key === 'End') next = rows.length - 1
+        else if (e.key === 'PageDown') next = activeIndex < 0 ? 0 : Math.min(rows.length - 1, activeIndex + page)
+        else if (e.key === 'PageUp') next = activeIndex < 0 ? rows.length - 1 : Math.max(0, activeIndex - page)
+        else if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          const row = rows[activeIndex >= 0 ? activeIndex : 0]
+          if (row) { pick(row); if (listRef.current) listRef.current.focus() }
+          return
+        } else {
+          return
+        }
+        e.preventDefault()
+        const row = rows[next]
+        if (!row) return
+        previewRow(row)
+        scrollRowIntoView(next)
+      }
+
+      useEffect(() => {
+        if (!open || tab !== 'messages') return undefined
+        const el = listRef.current
+        if (!el) return undefined
+        const measure = () => setViewport(el.clientHeight || 480)
+        measure()
+        if (typeof ResizeObserver === 'undefined') return undefined
+        const ro = new ResizeObserver(measure)
+        ro.observe(el)
+        return () => ro.disconnect()
+      }, [open, tab, rows.length])
+
+      useEffect(() => {
+        if (!open || tab !== 'messages') return
+        const el = listRef.current
+        if (!el) return
+        const max = Math.max(0, rows.length * PANEL_ROW_H - (el.clientHeight || viewport))
+        if (el.scrollTop > max) {
+          el.scrollTop = max
+          setScrollTop(max)
+        }
+      }, [open, tab, rows.length, viewport])
+
+      const pick = useCallback((m) => {
+        if (!m || busy) return
+        setConfirmAction(null)
+        setPicked(m)
+        setDetail(m.snippet || '')
+        setDetailState('loading')
+        setDone('')
+        const req = ++detailReq.current
+        fetch('/api/message-ops/text?sessionId=' + encodeURIComponent(sid) + '&seq=' + encodeURIComponent(m.seq))
+          .then((res) => res.json().catch(() => null).then((data) => ({ res, data })))
+          .then(({ res, data }) => {
+            if (req !== detailReq.current) return
+            if (!res.ok || !data || data.ok !== true) throw new Error((data && data.error) || ('HTTP ' + res.status))
+            setDetail(typeof data.text === 'string' && data.text ? data.text : (m.snippet || ''))
+            setDetailState('ready')
+          })
+          .catch(() => {
+            if (req !== detailReq.current) return
+            setDetail(m.snippet || '')
+            setDetailState('ready')
+          })
+      }, [busy, sid])
+
+      const runAction = useCallback(async (mode, confirmed) => {
+        if (!target || !picked || busy) return
+        if (target.running && mode !== 'branch') return
+        if ((mode === 'revert' || mode === 'delete') && confirmed !== true) return
+        const actionSid = target.sessionId
+        setBusy(mode)
+        setError(null)
+        setDone('')
+        try {
+          if (mode === 'branch') {
+            const forkPath = pickForkPath(__sessionsSvc)
+            if (forkPath.kind !== 'official') throw new Error(t('fork.unavailable'))
+            const created = await forkPath.fork({ sessionId: target.sessionId, atSeq: picked.seq, increaseTitle: true })
+            if (sessionRef.current !== actionSid) return
+            setChildId(created || null)
+            setDone(t('panel.branchDone', { id: String(created || '') }))
+            notifyDone(t('panel.branchDone', { id: String(created || '') }))
+            return
+          }
+          const res = await fetch('/api/message-ops/' + mode, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionId: target.sessionId, seq: picked.seq }),
+          })
+          const data = await res.json().catch(() => null)
+          if (sessionRef.current !== actionSid) return
+          if (!res.ok || !data || data.ok !== true) {
+            if (res.status === 409) setTarget((prev) => prev ? { ...prev, running: true } : prev)
+            throw new Error((data && data.error) || ('HTTP ' + res.status))
+          }
+          if (mode === 'revert') {
+            setMessages((prev) => prev.map((m) => (m.seq >= picked.seq ? { ...m, shadowed: true, visible: false } : m)))
+            if (picked.role === 'user') {
+              try { refillComposer(target.sessionId, picked.seq) } catch { /* non-blocking */ }
+            }
+          } else {
+            setMessages((prev) => prev.map((m) => (m.seq === picked.seq ? { ...m, shadowed: true, visible: false } : m)))
+          }
+          const msg = t(mode === 'revert' ? 'panel.revertDone' : 'panel.deleteDone')
+          setDone(msg)
+          setConfirmAction(null)
+          setTimeout(() => { if (listRef.current) listRef.current.focus() }, 0)
+          notifyDone(msg)
+          emitChanged()
+          try {
+            if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(target.sessionId)
+          } catch { /* view rebuild is best effort */ }
+          setTimeout(() => { loadMessages(true).catch(() => {}) }, 650)
+        } catch (reason) {
+          if (sessionRef.current !== actionSid) return
+          setError(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)))
+        } finally {
+          setBusy('')
+        }
+      }, [target, picked, busy, t, loadMessages])
+
+      const deleteSession = useCallback(async () => {
+        if (!target || busy || target.running) return
+        const expected = target.expectedTitle || ''
+        if (!expected || confirmTitle.trim() !== expected) return
+        const actionSid = target.sessionId
+        setBusy('session-delete')
+        setDeleteError(null)
+        setDone('')
+        try {
+          const res = await fetch('/api/message-ops/session/delete', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionId: target.sessionId, confirmTitle: confirmTitle }),
+          })
+          const data = await res.json().catch(() => null)
+          if (sessionRef.current !== actionSid) return
+          if (!res.ok || !data || data.ok !== true) {
+            if (res.status === 409) setTarget((prev) => prev ? { ...prev, running: true } : prev)
+            throw new Error((data && data.error) || ('HTTP ' + res.status))
+          }
+          setConfirmDelete(false)
+          setDone(t('panel.deleted'))
+          notifyDone(t('panel.deleted'))
+          emitChanged()
+          setTimeout(() => { try { window.location.reload() } catch { /* non-browser guard */ } }, 700)
+        } catch (reason) {
+          if (sessionRef.current !== actionSid) return
+          setDeleteError(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)))
+        } finally {
+          setBusy('')
+        }
+      }, [target, busy, confirmTitle, t])
+
+      const restoreEntry = useCallback(async (trashId) => {
+        if (busy) return
+        setBusy('restore:' + trashId)
+        setError(null)
+        setDone('')
+        try {
+          const res = await fetch('/api/message-ops/session/restore', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ trashId }),
+          })
+          const data = await res.json().catch(() => null)
+          if (!res.ok || !data || data.ok !== true) throw new Error((data && data.error) || ('HTTP ' + res.status))
+          setTrash((prev) => prev.filter((x) => x.trashId !== trashId))
+          setDone(t('panel.restored'))
+          notifyDone(t('panel.restored'))
+          emitChanged()
+          setTimeout(() => { try { window.location.reload() } catch { /* non-browser guard */ } }, 700)
+        } catch (reason) {
+          setError(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)))
+        } finally {
+          setBusy('')
+        }
+      }, [busy, t])
+
+      const purgeEntry = useCallback(async (trashId) => {
+        if (busy) return
+        if (purgeId !== trashId) { setPurgeId(trashId); return }
+        setBusy('purge:' + trashId)
+        setError(null)
+        setDone('')
+        try {
+          const res = await fetch('/api/message-ops/session/purge', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ trashId }),
+          })
+          const data = await res.json().catch(() => null)
+          if (!res.ok || !data || data.ok !== true) throw new Error((data && data.error) || ('HTTP ' + res.status))
+          setTrash((prev) => prev.filter((x) => x.trashId !== trashId))
+          setPurgeId(null)
+          setDone(t('panel.purged'))
+          notifyDone(t('panel.purged'))
+        } catch (reason) {
+          setError(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)))
+        } finally {
+          setBusy('')
+        }
+      }, [busy, purgeId, t])
+
+      if (!open) return null
+
+      const pickedLive = picked ? (messages.find((m) => m.seq === picked.seq) || picked) : null
+      const canAct = !busy && !target.running && pickedLive && !pickedLive.shadowed
+      const visibleCount = messages.filter((m) => m.role !== 'system' && m.visible && !m.shadowed).length
+      const shadowedCount = messages.filter((m) => m.role !== 'system' && m.shadowed).length
+      const totalCount = messages.filter((m) => m.role !== 'system').length
+      const revertImpact = pickedLive
+        ? messages.filter((m) => m.role !== 'system' && !m.shadowed && m.seq >= pickedLive.seq)
+        : []
+      const revertCount = revertImpact.length
+      const revertVisibleCount = revertImpact.filter((m) => m.visible).length
+      const revertEnd = revertImpact.reduce((max, m) => Math.max(max, m.seq), pickedLive ? pickedLive.seq : 0)
+      const expectedDeleteTitle = target.expectedTitle || ''
+      const deleteBlockedReason = target.running
+        ? t('panel.running')
+        : state !== 'ready'
+          ? (state === 'error' ? t('panel.loadFail') : t('panel.loading'))
+          : !expectedDeleteTitle ? t('panel.deleteUnavailable') : ''
+      const canConfirmDelete = !busy && state === 'ready' && !target.running && !!expectedDeleteTitle
+        && confirmTitle.trim() === expectedDeleteTitle
+      const start = Math.min(Math.max(0, rows.length - 1), Math.max(0, Math.floor(scrollTop / PANEL_ROW_H) - 6))
+      const end = Math.min(rows.length, start + Math.ceil(viewport / PANEL_ROW_H) + 12)
+      const windowRows = rows.slice(start, end)
+      const activeRendered = picked && windowRows.some((m) => m.seq === picked.seq)
+      const showSearchLoading = searching && query.trim().length > 0
+
+      return React.createElement('div', {
+        className: 'mopsPanelScrim', role: 'presentation', ref: scrimRef,
+        onMouseDown: (e) => { if (e.target === e.currentTarget) close() },
+      },
+        React.createElement('section', {
+          className: 'mopsPanel', role: 'dialog', 'aria-modal': 'true',
+          'aria-labelledby': 'mops-panel-title', 'aria-describedby': 'mops-panel-session',
+          'aria-busy': busy || state === 'loading' ? 'true' : undefined,
+          tabIndex: -1, ref: panelRef,
+          style: { position: 'relative' },
+        },
+          React.createElement('header', { className: 'mopsPanelHead' },
+            React.createElement('div', { style: { minWidth: 0 } },
+              React.createElement('div', { className: 'mopsPanelKicker' }, t('dialog.title')),
+              React.createElement('div', { className: 'mopsPanelTitle', id: 'mops-panel-title' }, target.title || target.expectedTitle || target.sessionId),
+              React.createElement('div', { className: 'mopsPanelSub', id: 'mops-panel-session' }, target.sessionId)),
+            React.createElement('button', {
+              type: 'button', className: 'mopsPanelClose', title: t('dialog.cancel'),
+              'aria-label': t('dialog.cancel'),
+              onClick: close, disabled: !!busy,
+            }, '×')),
+          React.createElement('div', { className: 'mopsTabs' },
+            React.createElement('button', {
+              type: 'button', className: 'mopsTab' + (tab === 'messages' ? ' on' : ''),
+              onClick: () => { setTab('messages'); setConfirmDelete(false); setConfirmAction(null); setDeleteError(null) },
+            }, t('panel.messages') + ' ' + totalCount),
+            React.createElement('button', {
+              type: 'button', className: 'mopsTab' + (tab === 'trash' ? ' on' : ''),
+              onClick: () => { setTab('trash'); setConfirmDelete(false); setConfirmAction(null); setDeleteError(null) },
+            }, t('panel.trash') + (trash.length ? ' ' + trash.length : ''))),
+          target.running && tab === 'messages'
+            ? React.createElement('div', { className: 'mopsBanner warn' }, t('panel.running')) : null,
+          error ? React.createElement('div', { className: 'mopsBanner err', role: 'alert' }, error) : null,
+          done ? React.createElement('div', { className: 'mopsBanner ok' }, done,
+            childId ? React.createElement('button', {
+              type: 'button', className: 'mopsAction primary', style: { marginLeft: 10 },
+              onClick: () => { try { if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(childId) } catch { /* best effort */ } },
+            }, t('panel.openNew')) : null) : null,
+          tab === 'messages'
+            ? React.createElement(React.Fragment, null,
+              React.createElement('div', { className: 'mopsSearchRow' },
+                React.createElement('input', {
+                  ref: searchRef, className: 'mopsSearch', value: query,
+                  placeholder: t('panel.searchHint'), 'aria-label': t('panel.search'),
+                  onChange: (e) => { setQuery(e.target.value); clearPick(); setScrollTop(0); if (listRef.current) listRef.current.scrollTop = 0 },
+                })),
+              React.createElement('div', { className: 'mopsChips' },
+                ['all', 'user', 'assistant', 'tool'].map((key) => React.createElement('button', {
+                  key, type: 'button', className: 'mopsChip' + (role === key ? ' on' : ''),
+                  onClick: () => { setRole(key); clearPick(); setScrollTop(0); if (listRef.current) listRef.current.scrollTop = 0 },
+                }, t('panel.' + key))),
+                React.createElement('label', { className: 'mopsToggle' },
+                  React.createElement('input', {
+                    type: 'checkbox', checked: includeShadowed,
+                    onChange: (e) => { setIncludeShadowed(e.target.checked); clearPick(); setScrollTop(0); if (listRef.current) listRef.current.scrollTop = 0 },
+                  }), t('panel.includeShadowed'))),
+              React.createElement('div', {
+                className: 'mopsList', ref: listRef,
+                role: state === 'ready' && rows.length ? 'listbox' : 'region',
+                tabIndex: state === 'ready' && rows.length ? 0 : -1,
+                'aria-label': t('panel.messages'),
+                'aria-busy': state === 'loading' || showSearchLoading ? 'true' : undefined,
+                'aria-activedescendant': state === 'ready' && activeRendered ? 'mops-opt-' + picked.seq : undefined,
+                onKeyDown: handleListKeyDown,
+                onScroll: (e) => setScrollTop(e.currentTarget.scrollTop),
+              },
+                state === 'loading' || state === 'idle'
+                  ? React.createElement('div', { className: 'mopsEmpty', role: 'status', 'aria-live': 'polite' }, t('panel.loading'))
+                  : state === 'error'
+                    ? React.createElement('div', { className: 'mopsEmpty mopsErrorState', role: 'alert' },
+                        React.createElement('span', null, loadError || t('panel.loadFail')),
+                        React.createElement('button', {
+                          type: 'button', className: 'mopsAction',
+                          onClick: () => { loadMessages(false); setTimeout(() => { if (searchRef.current) searchRef.current.focus() }, 0) },
+                        }, t('panel.retry')))
+                    : rows.length === 0
+                      ? React.createElement('div', { className: 'mopsEmpty', role: 'status', 'aria-live': 'polite' }, showSearchLoading ? t('panel.searching') : (query.trim() ? t('panel.noMatch') : t('panel.empty')))
+                      : React.createElement('div', { style: { height: rows.length * PANEL_ROW_H, position: 'relative' } },
+                          windowRows.map((m, i) => React.createElement('div', {
+                            key: m.seq, id: 'mops-opt-' + m.seq, role: 'option',
+                            'aria-selected': pickedLive && pickedLive.seq === m.seq,
+                            'aria-setsize': rows.length, 'aria-posinset': start + i + 1,
+                            tabIndex: -1,
+                            className: 'mopsRow' + (pickedLive && pickedLive.seq === m.seq ? ' on' : '') + (m.shadowed ? ' shadowed' : ''),
+                            style: { top: (start + i) * PANEL_ROW_H, height: PANEL_ROW_H },
+                            onClick: () => { pick(m); if (listRef.current) listRef.current.focus() },
+                            title: '#' + m.seq + ' ' + (m.role || '') + ' · ' + (m.snippet || ''),
+                            'aria-label': '#' + m.seq + ' ' + (m.role || '') + (m.shadowed ? ' ' + t('panel.shadowed') : '') + ' · ' + (m.snippet || '') + (m.time ? ' · ' + fmtClock(m.time) : ''),
+                          },
+                            React.createElement('span', { className: 'mopsSeq' }, '#' + m.seq),
+                            React.createElement('span', { className: 'mopsRole' }, roleCode(m.role)),
+                            React.createElement('span', { className: 'mopsSnippet' }, m.snippet || '—'),
+                            React.createElement('span', { className: 'mopsClock' }, fmtClock(m.time)))))),
+              React.createElement('div', { className: 'mopsDetail' },
+                pickedLive
+                  ? React.createElement(React.Fragment, null,
+                      React.createElement('div', { className: 'mopsDetailMeta' },
+                        React.createElement('span', null, '#' + pickedLive.seq),
+                        React.createElement('span', null, pickedLive.role || ''),
+                        pickedLive.shadowed ? React.createElement('span', null, t('panel.shadowed')) : null,
+                        pickedLive.time ? React.createElement('span', null, fmtClock(pickedLive.time)) : null),
+                      React.createElement('pre', { className: 'mopsDetailText' },
+                        detailState === 'loading' ? t('panel.detailLoading') : (detail || pickedLive.snippet || '—')),
+                      React.createElement('div', { className: 'mopsActions' },
+                        React.createElement('button', {
+                          type: 'button', className: 'mopsAction primary', disabled: !canAct || !!confirmAction,
+                          ref: revertBtnRef,
+                          onClick: () => setConfirmAction('revert'),
+                          title: t('panel.revertHint'),
+                        }, t('panel.revert') + (revertCount ? ' · ' + revertCount : '')),
+                        React.createElement('button', {
+                          type: 'button', className: 'mopsAction danger', disabled: !canAct || !!confirmAction,
+                          ref: deleteOneBtnRef,
+                          onClick: () => setConfirmAction('delete'), title: t('panel.deleteHint'),
+                        }, t('panel.delete')),
+                        React.createElement('button', {
+                          type: 'button', className: 'mopsAction', disabled: !canAct || !!confirmAction,
+                          onClick: () => runAction('branch'), title: t('panel.branchHint'),
+                        }, t('panel.branch'))),
+                      confirmAction
+                        ? React.createElement('div', {
+                            className: 'mopsActionConfirm', ref: actionConfirmRef, role: 'group', tabIndex: -1,
+                            'aria-labelledby': 'mops-action-confirm-title',
+                          },
+                            React.createElement('div', { className: 'mopsImpactTitle', id: 'mops-action-confirm-title' },
+                              t(confirmAction === 'revert' ? 'panel.revertConfirmTitle' : 'panel.deleteConfirmTitle', { seq: String(pickedLive.seq) })),
+                            React.createElement('div', { className: 'mopsImpact' },
+                              confirmAction === 'revert'
+                                ? t('panel.revertConfirmBody', {
+                                    start: String(pickedLive.seq), end: String(revertEnd),
+                                    n: String(revertCount), v: String(revertVisibleCount),
+                                  })
+                                : t('panel.deleteConfirmBody')),
+                            React.createElement('div', { className: 'mopsConfirmRow' },
+                              React.createElement('button', {
+                                type: 'button', className: 'mopsAction', onClick: cancelAction, disabled: !!busy,
+                              }, t('panel.cancel')),
+                              React.createElement('button', {
+                                type: 'button', className: 'mopsAction danger',
+                                onClick: () => runAction(confirmAction, true),
+                                disabled: !!busy || !canAct,
+                              }, busy === confirmAction ? t('panel.busy') : t(confirmAction === 'revert' ? 'panel.confirmRevert' : 'panel.confirmDeleteOne'))))
+                        : null)
+                  : React.createElement('div', { className: 'mopsDetailHint' }, t('panel.selectHint'))),
+              React.createElement('footer', { className: 'mopsPanelFoot' },
+                React.createElement('span', { className: 'mopsCount' },
+                  t('panel.count', { n: String(totalCount), v: String(visibleCount), s: String(shadowedCount) })),
+                React.createElement('button', {
+                  type: 'button', className: 'mopsDanger', ref: deleteBtnRef,
+                  disabled: !!busy || !!deleteBlockedReason,
+                  title: deleteBlockedReason || undefined,
+                  onClick: () => {
+                    setConfirmTitle('')
+                    setDeleteError(null)
+                    setConfirmAction(null)
+                    setConfirmDelete(true)
+                  },
+                }, t('panel.deleteSession'))),
+              confirmDelete
+                ? React.createElement('div', {
+                    className: 'mopsConfirm', ref: confirmRef, role: 'alertdialog', 'aria-modal': 'true',
+                    'aria-labelledby': 'mops-delete-title', 'aria-describedby': 'mops-delete-hint mops-delete-impact',
+                    tabIndex: -1,
+                  },
+                    React.createElement('h3', { id: 'mops-delete-title' }, t('panel.deleteSession')),
+                    React.createElement('p', { id: 'mops-delete-hint' }, t('panel.deleteSessionHint')),
+                    React.createElement('p', { className: 'mopsImpact', id: 'mops-delete-impact' },
+                      t('panel.deleteSessionImpact', { n: String(totalCount) })),
+                    target.running ? React.createElement('div', { className: 'mopsBanner warn', role: 'status' }, t('panel.running')) : null,
+                    deleteError ? React.createElement('div', { className: 'mopsBanner err', role: 'alert' }, deleteError) : null,
+                    React.createElement('input', {
+                      id: 'mops-delete-title-input', value: confirmTitle, autoFocus: true,
+                      'aria-label': t('panel.deleteSessionHint'),
+                      'aria-describedby': 'mops-delete-hint',
+                      placeholder: expectedDeleteTitle || target.title || target.sessionId,
+                      disabled: !!busy || target.running || !expectedDeleteTitle,
+                      onChange: (e) => setConfirmTitle(e.target.value),
+                      onKeyDown: (e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault()
+                          if (canConfirmDelete) deleteSession()
+                        } else if (e.key === 'Escape') {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          closeConfirm()
+                        }
+                      },
+                    }),
+                    React.createElement('div', { className: 'mopsConfirmRow' },
+                      React.createElement('button', {
+                        type: 'button', className: 'mopsAction',
+                        onClick: closeConfirm, disabled: busy === 'session-delete',
+                      }, t('panel.cancel')),
+                      React.createElement('button', {
+                        type: 'button', className: 'mopsAction danger',
+                        disabled: !canConfirmDelete,
+                        onClick: deleteSession,
+                      }, busy === 'session-delete' ? t('panel.deleting') : t('panel.confirmDelete'))))
+                : null)
+            : React.createElement('div', { className: 'mopsList', style: { borderTop: 0 }, 'aria-busy': trashState === 'loading' ? 'true' : undefined },
+                trashState === 'loading' || trashState === 'idle'
+                  ? React.createElement('div', { className: 'mopsEmpty', role: 'status', 'aria-live': 'polite' }, t('panel.loading'))
+                  : trashState === 'error'
+                    ? React.createElement('div', { className: 'mopsEmpty mopsErrorState', role: 'alert' },
+                        React.createElement('span', null, trashError || t('panel.loadFail')),
+                        React.createElement('button', {
+                          type: 'button', className: 'mopsAction',
+                          onClick: () => { loadTrash(); setTimeout(() => { if (panelRef.current) panelRef.current.focus() }, 0) },
+                        }, t('panel.retry')))
+                    : trash.length === 0
+                      ? React.createElement('div', { className: 'mopsEmpty' }, t('panel.trashEmpty'))
+                      : trash.map((item) => React.createElement('div', { className: 'mopsTrashItem', key: item.trashId },
+                        React.createElement('div', { className: 'mopsTrashMain' },
+                          React.createElement('div', { className: 'mopsTrashTitle' }, item.title || t('panel.untitled')),
+                          React.createElement('div', { className: 'mopsTrashMeta' },
+                            item.sessionId + (item.expiresAt ? ' · ' + t('panel.expires') + ' ' + new Date(item.expiresAt).toLocaleDateString() : ''))),
+                        React.createElement('button', {
+                          type: 'button', className: 'mopsAction', disabled: !!busy,
+                          onClick: () => restoreEntry(item.trashId),
+                        }, busy === 'restore:' + item.trashId ? t('panel.busy') : t('panel.restore')),
+                        React.createElement('button', {
+                          type: 'button', className: 'mopsAction danger', disabled: !!busy,
+                          onClick: () => purgeEntry(item.trashId),
+                        }, busy === 'purge:' + item.trashId ? t('panel.busy') : (purgeId === item.trashId ? t('panel.purgeConfirm') : t('panel.purge'))))))))
+    }
+
     // --- 头部按钮 ---------------------------------------------------------------
 
     // 0.3.0 分支双路径选择：0.2.0+ 官方 sessions.fork({atSeq}) 优先。
@@ -920,6 +1964,7 @@ window.__ModuleLoader__.load({
       }, [styleInjected])
 
       useEffect(() => {
+        syncSyntheticTurnStyle([])
         let alive = true
         const onChange = () => load()
         window.addEventListener(CHANGED_EVENT, onChange)
@@ -941,6 +1986,7 @@ window.__ModuleLoader__.load({
             if (reqSeq !== reqSeqRef.current || reqSeq <= landedSeqRef.current) return
             landedSeqRef.current = reqSeq
             const msgs = data.messages || []
+            syncSyntheticTurnStyle(msgs)
             const act = activeMarkers(msgs)
             setMarkers(act)
             // 0.5.2（P2）：标题口径 = 标记 range 内 visible=false 的去重 seq 数
@@ -974,6 +2020,7 @@ window.__ModuleLoader__.load({
         return () => {
           alive = false
           loadRef.current = () => {}
+          syncSyntheticTurnStyle([])
           window.removeEventListener(CHANGED_EVENT, onChange)
         }
       }, [sessionId])
@@ -1995,7 +3042,7 @@ window.__ModuleLoader__.load({
       ctx.slots.inject(OVERLAY_SLOT, () => ctx.slots.register({
         name: OVERLAY_SLOT, id: DIALOG_ID, order: 101,
         ...(__locale ? { locale: NS } : {}),
-      }, OpsDialog))
+      }, window.__MOPS_LEGACY_DIALOG === true ? OpsDialog : OpsPanel))
       installSidebarOps()
       installUserRevertInjector()
     }

@@ -19,7 +19,11 @@ import assert from 'node:assert/strict'
 import { replayEventData } from '../src/ops-core.js'
 
 const TS = { turn: 4, step: 2 }
-const ASSISTANT_ITEM = { type: 'assistant/message', text: '重放的助手回答' }
+const ASSISTANT_ITEM = {
+  type: 'assistant/message',
+  text: '重放的助手回答',
+  source: { kind: 'model', provider: 'test', model: 'test' },
+}
 
 test('重放 assistant 必须带 stream，且是数组', () => {
   const data = replayEventData(ASSISTANT_ITEM, TS, 4)

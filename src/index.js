@@ -9,11 +9,12 @@
 import { zstdCompressSync } from "node:zlib";
 import { open as openFile, truncate as truncateFile, stat as statFile } from "node:fs/promises";
 import { isSessionId, sessionIdVariants, findSessionDirs, readSessionFileAsync, listMessages, computeShadowed, messageText, messageTextFull, turnBounds, markCommitted } from "./session-file.js";
-import { restoreNoticeText, planRevertFromEvents, planDeleteFromEvents, nextSeqFrom, buildMarkerEvent, buildRestoreNoticeEvent, buildReplayEvent, planNoticeWindow, noticeWindowPreamble, noticeWindowPostamble,
+import { restoreNoticeText, planRevertFromEvents, planDeleteFromEvents, nextSeqFrom, buildMarkerEvent, buildRestoreNoticeEvent, buildReplayEvent, planNoticeWindow, noticeWindowPreamble, noticeWindowPostamble, sessionLogOf, alignLiveTurnCursor,
   OpsError, planRevert, planDelete, planRestore, applyRestore, applySurfaceReplace,
-  restoreProgress, pendingRestoreTurns,
+  restoreProgress, pendingRestoreTurns, buildRestoreIndex, restoreProgressFromIndex, pendingRestoreTurnsFromIndex,
   isTrustedApiRequest, isJsonContentType, webAuthGate,
 } from "./ops-core.js";
+import { deleteSessionToTrash, listTrash, restoreTrash, purgeTrash, resolveSessionTitle } from "./session-trash.js";
 
 export const name = "dsh-message-ops";
 // 保持 inject 为空：tools 是可选增强而非硬依赖（cordis 的 inject 是
@@ -50,8 +51,8 @@ async function fence(targetCtx, req, res) {
   }
   // 0.10.8：宿主同条件 GET 被读全量（审计缺口）。宿主 /api admit = 三层围栏
   // 之外还要 BrowserAuth cookie（无 cookie → 401）；前端同源 fetch 自动带
-  // cookie，取数不受影响。secret 读不到 = 降级回旧围栏（webAuthGate 内部
-  // 告警一次），老宿主/测桩不破坏。
+  // cookie，取数不受影响。无 credentials 服务 = 老宿主旧围栏；有服务但
+  // 记录不可读 = 401 fail-closed（webAuthGate 内部告警一次）。
   if (!(await webAuthGate(targetCtx, req))) {
     sendJson(res, 401, { ok: false, error: "unauthorized (browser auth cookie required; reopen the URL printed by dsh web)" });
     return false;
@@ -354,6 +355,7 @@ async function buildDerived(logPath) {
   // seqText 索引，也不扫一遍 events（seqText 为 null 时下面两处都短路：
   // 本循环直接跳过，marker 循环体也一次都不会执行）。
   const seqText = messages.some((m) => m.marker === true) ? new Map() : null;
+  const restoreIndex = seqText ? buildRestoreIndex(events) : null;
   for (const e of seqText ? events : []) {
     if (!e || typeof e.seq !== "number") continue;
     if (e.type !== "user/message" && e.type !== "assistant/message") continue;
@@ -378,10 +380,10 @@ async function buildDerived(logPath) {
   // —— 这正是 opencode 的 `messages.slice(0, boundaryIndex)`（边界自己也不显示）。
   for (const m of messages) {
     if (!m || m.marker !== true) continue;
-    const prog = restoreProgress(events, m.seq);
+    const prog = restoreProgressFromIndex(restoreIndex, m.seq);
     if (!prog) { m.restoreComplete = false; m.pendingTurns = []; continue; }
     m.restoreComplete = prog.complete;
-    m.pendingTurns = pendingRestoreTurns(events, m.seq, prog).map((t) => ({
+    m.pendingTurns = pendingRestoreTurnsFromIndex(restoreIndex, m.seq, prog).map((t) => ({
       upTo: t.seqs[t.seqs.length - 1],
       count: t.seqs.length,
       // 0.10.2：轮起点常落在注入行上（system-reminder / 后台任务 / 子代理通知），
@@ -455,8 +457,9 @@ async function loadDerived(logPath) {
   return entry.promise;
 }
 
-async function opsList(targetCtx, sessionId) {
+async function opsList(targetCtx, sessionId, opts = {}) {
   if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
+  const compact = opts && opts.compact === true;
   const { logPath } = pickSessionDir(sessionId);
   // 文件派生段（读日志 → 消息 → 遮蔽集 → marker 进度 → turn 边界）走缓存：
   // key = logPath、失效看读前 stat 的 mtimeMs+size，见 loadDerived 注释。
@@ -470,6 +473,8 @@ async function opsList(targetCtx, sessionId) {
   applyLiveCommitted(messages, live);
   const visibleNodes = live && live.surface && Array.isArray(live.surface.nodes) ? new Set(live.surface.nodes) : null;
   let visibleCount = 0;
+  let shadowedCount = 0;
+  let markerCount = 0;
   for (const m of messages) {
     m.visible = visibleNodes ? visibleNodes.has(m.seq) : !shadowed.has(m.seq);
     // 0.9.6：**shadowed 与 visible 是两套语义，不能混用。**
@@ -484,22 +489,128 @@ async function opsList(targetCtx, sessionId) {
     // transcript 藏行必须用它；visible 只留给「可回滚目标」（lastRevertable）。
     m.shadowed = shadowed.has(m.seq);
     if (m.visible) visibleCount++;
+    if (m.shadowed) shadowedCount++;
+    if (m.marker === true) markerCount++;
   }
+
+  const visibleMessages = compact
+    ? messages.map((m) => ({
+      seq: m.seq,
+      role: m.role,
+      snippet: m.snippet,
+      time: m.time,
+      visible: m.visible,
+      shadowed: m.shadowed,
+    }))
+    : messages;
 
   return {
     ok: true,
-    session: { id: header.id, createdAt: header.createdAt, parentSession: header.parentSession ?? null },
+    session: {
+      id: header.id,
+      createdAt: header.createdAt,
+      parentSession: header.parentSession ?? null,
+      confirmTitle: resolveSessionTitle(targetCtx, sessionId) || header.id,
+    },
     running: isRunning(targetCtx, sessionId),
     runningSource: __runningSource,
     total: messages.length,
     visibleCount,
+    shadowedCount,
+    markerCount,
     turnEndSeq,
-    messages,
+    messages: visibleMessages,
   };
 }
 
-/** 测试钩子（非公开 API）：直接驱动 list 与文件派生缓存。 */
-export const _internals = { opsList, loadDerived, derivedCache };
+// ---------------------------------------------------------------------------
+// Per-session search (full text, beyond the 160-char snippet)
+// ---------------------------------------------------------------------------
+const SEARCH_CACHE_MAX = 8;
+const searchCache = new Map(); // logPath -> { mtimeMs, size, promise }
+
+/** Build the searchable corpus once per log revision (full text, lowercased lazily). */
+async function buildSearchCorpus(logPath) {
+  const { events } = await readSessionFileAsync(logPath);
+  const messages = listMessages(events);
+  const shadowed = computeShadowed(events);
+  const bySeq = new Map();
+  for (const e of events) if (e && typeof e.seq === "number") bySeq.set(e.seq, e);
+  const corpus = [];
+  for (const m of messages) {
+    const ev = bySeq.get(m.seq);
+    const text = ev ? messageTextFull(ev) : "";
+    corpus.push({
+      seq: m.seq,
+      type: m.type,
+      role: m.role,
+      marker: m.marker === true,
+      shadowed: shadowed.has(m.seq),
+      text: text || m.snippet || "",
+    });
+  }
+  return corpus;
+}
+
+async function loadSearchCorpus(logPath) {
+  const st = await statFile(logPath);
+  const hit = searchCache.get(logPath);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
+    searchCache.delete(logPath);
+    searchCache.set(logPath, hit);
+    return hit.promise;
+  }
+  const entry = { mtimeMs: st.mtimeMs, size: st.size, promise: buildSearchCorpus(logPath) };
+  searchCache.delete(logPath);
+  searchCache.set(logPath, entry);
+  while (searchCache.size > SEARCH_CACHE_MAX) searchCache.delete(searchCache.keys().next().value);
+  entry.promise.catch(() => { if (searchCache.get(logPath) === entry) searchCache.delete(logPath); });
+  return entry.promise;
+}
+
+function searchSnippet(text, query, radius = 45) {
+  const lower = text.toLowerCase();
+  const at = lower.indexOf(query);
+  const start = at < 0 ? 0 : Math.max(0, at - radius);
+  const end = at < 0 ? Math.min(text.length, 160) : Math.min(text.length, at + query.length + radius);
+  const raw = text.slice(start, end).replace(/\s+/g, " ").trim();
+  return (start > 0 ? "…" : "") + raw.slice(0, 158) + (end < text.length ? "…" : "");
+}
+
+async function opsSearch(targetCtx, sessionId, query, opts = {}) {
+  if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
+  const q = typeof query === "string" ? query.trim() : "";
+  if (q.length === 0) throw new OpsError("query is required", 400);
+  if (q.length > 500) throw new OpsError("query too long (max 500)", 400);
+  const role = opts && typeof opts.role === "string" && opts.role ? opts.role : null;
+  if (role && !["user", "assistant", "system", "tool"].includes(role)) {
+    throw new OpsError("invalid role", 400);
+  }
+  const limit = Number.isSafeInteger(opts && opts.limit) ? Math.max(1, Math.min(100, opts.limit)) : 50;
+  const { logPath } = pickSessionDir(sessionId);
+  const corpus = await loadSearchCorpus(logPath);
+  const needle = q.toLowerCase();
+  const results = [];
+  let total = 0;
+  for (const row of corpus) {
+    if (role && row.role !== role) continue;
+    if (!row.text.toLowerCase().includes(needle)) continue;
+    total++;
+    if (results.length >= limit) continue;
+    results.push({
+      seq: row.seq,
+      type: row.type,
+      role: row.role,
+      marker: row.marker,
+      shadowed: row.shadowed,
+      snippet: searchSnippet(row.text, needle),
+    });
+  }
+  return { ok: true, query: q, role, limit, total, truncated: total > results.length, results };
+}
+
+/** 测试钩子（非公开 API）：直接驱动 list / search 与文件派生缓存。 */
+export const _internals = { opsList, opsSearch, loadDerived, loadSearchCorpus, derivedCache, searchCache };
 
 async function opsCommit(targetCtx, mode, sessionId, seq) {
   if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
@@ -511,8 +622,7 @@ async function opsCommit(targetCtx, mode, sessionId, seq) {
   // 承载 notice，而不是拒绝。引擎 append-only 插不进已有 step，但合成一整个 turn 合法
   //��已对官方校验闸实测：append 型 / 单节点 replace / 多节点 replace 全 PASS，遮蔽受保护头正确拒绝）。
   // 带 reason:"message-ops"，UI 与审计可识别，不与真实模型轮次混淆。
-  const win = planNoticeWindow(events);
-  const turnStep = { turn: win.turn, step: win.step };
+  let win = planNoticeWindow(events);
   const notice = mode === "delete"
     ? `[消息删除] 已遮蔽 seq ${seq}`
     : null; // revert 文案含 shadowed 数量，规划后拼
@@ -520,6 +630,9 @@ async function opsCommit(targetCtx, mode, sessionId, seq) {
   if (acq !== null && acq.session !== undefined) {
     try {
       const session = acq.session;
+      const liveEvents = sessionLogOf(session);
+      if (liveEvents) win = planNoticeWindow(liveEvents);
+      const turnStep = { turn: win.turn, step: win.step };
       // 0.5.4（P0）：v4 准入要求 system/message 带正 turn/step——缺字段时持久层
       // encodeEventBatch 的 SessionFormatError 未捕获会**打死整个 dsh 进程**。
       const plan = mode === "delete" ? planDelete(session.surface, seq) : planRevert(session.surface, seq);
@@ -539,6 +652,7 @@ async function opsCommit(targetCtx, mode, sessionId, seq) {
         const event = applySurfaceReplace(session, plan.startSeq, plan.endSeq, plan.shadowedSeqs, text, turnStep);
         // 必须闭合：否则引擎内存里 turn 16 永远开着 → isRunning 恒真 → 后续操作全被 409
         for (const post of noticeWindowPostamble(win)) session.append(post.kind, post.data);
+        if (win.synthetic) alignLiveTurnCursor(targetCtx, session, win.turn);
         flushSessions(targetCtx, session);
         return {
           ok: true, mode, seq,
@@ -568,7 +682,7 @@ async function opsCommit(targetCtx, mode, sessionId, seq) {
     type: e.kind, seq: cursor++, time: baseTime + i, data: e.data,
   }));
   const marker = buildMarkerEvent({
-    seq: cursor++, time: baseTime + batch.length, turnStep, text, version: header?.version ?? 4,
+    seq: cursor++, time: baseTime + batch.length, turnStep: { turn: win.turn, step: win.step }, text, version: header?.version ?? 4,
     startSeq: plan.startSeq, endSeq: plan.endSeq, shadowedSeqs: plan.shadowedSeqs,
   });
   batch.push(marker);
@@ -594,27 +708,34 @@ async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq, discard) {
   // 0.8.0（B1 修复）：步进恢复必须排除先前轮次已重放的源 seq，
   // 否则每轮从区间头重放 → 消息副本成倍出现。
   // 合成 turn 承载 notice 的完整理由见 opsCommit() 处（0.8.2，实测 340/364 空闲会话）。
-  const win = planNoticeWindow(events);
-  const progress = restoreProgress(events, restoreSeq);
-  const plan = planRestore(events, restoreSeq, upToSeq, progress ? progress.restoredSeqs : null);
-  plan.turnStep = { turn: win.turn, step: win.step };
-  plan.window = win;
-  if (discard) plan.discard = true;
-  if (plan.replayable.length === 0 && progress && !progress.complete && progress.pendingSeqs.length > 0) {
-    // 请求的 upTo 之前已全部重放过 → 只补一条进度 notice（不重复重放）
-    plan.upToSeq = upToSeq != null ? Math.min(upToSeq, plan.endSeq) : plan.endSeq;
-  }
+  const buildPlan = (sourceEvents) => {
+    const window = planNoticeWindow(sourceEvents);
+    const progress = restoreProgress(sourceEvents, restoreSeq);
+    const restorePlan = planRestore(sourceEvents, restoreSeq, upToSeq, progress ? progress.restoredSeqs : null);
+    restorePlan.turnStep = { turn: window.turn, step: window.step };
+    restorePlan.window = window;
+    if (discard) restorePlan.discard = true;
+    if (restorePlan.replayable.length === 0 && progress && !progress.complete && progress.pendingSeqs.length > 0) {
+      // 请求的 upTo 之前已全部重放过 → 只补一条进度 notice（不重复重放）
+      restorePlan.upToSeq = upToSeq != null ? Math.min(upToSeq, restorePlan.endSeq) : restorePlan.endSeq;
+    }
+    return { win: window, plan: restorePlan };
+  };
+  let { win, plan } = buildPlan(events);
   const acq = await acquireSession(targetCtx, sessionId);
   if (acq !== null && acq.session !== undefined) {
     // 0.10.8 孤儿护栏（与 opsCommit 同型）：planRestore/进度校验本就在 preamble
     // 之前完成；applyRestore 里的引擎 append 若抛（如 replay 坐标错开），
     // preamble 已落——闭合合成 turn 再原样抛出，不留常开孤儿窗口。
     try {
+      const liveEvents = sessionLogOf(acq.session);
+      if (liveEvents) ({ win, plan } = buildPlan(liveEvents));
       for (const pre of noticeWindowPreamble(win)) acq.session.append(pre.kind, pre.data);
       const result = applyRestore(acq.session, plan, {
         flush: () => { flushSessions(targetCtx, acq.session); },
       });
       for (const post of noticeWindowPostamble(win)) acq.session.append(post.kind, post.data);
+      if (win.synthetic) alignLiveTurnCursor(targetCtx, acq.session, win.turn);
       return { ok: true, ...result, discarded: plan.discard === true, upToSeq: plan.upToSeq, restoredSourceSeqs: plan.replayable.map((i) => i.seq), range: { startSeq: plan.startSeq, endSeq: plan.endSeq } };
     } catch (err) {
       for (const post of noticeWindowPostamble(win)) {
@@ -797,12 +918,39 @@ export function apply(ctx) {
         if (!(await fence(targetCtx, req, res))) return;
         try {
           const url = new URL(req.url, "http://localhost");
-          return sendJson(res, 200, await opsList(targetCtx, url.searchParams.get("sessionId") || ""));
+          return sendJson(res, 200, await opsList(targetCtx, url.searchParams.get("sessionId") || "", {
+            compact: url.searchParams.get("view") === "compact",
+          }));
         } catch (err) {
           return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
         }
       },
     }), "dsh-message-ops: messages route");
+
+    // --- GET /api/message-ops/search：会话内全文搜索（服务端，匹配 snippet 之外） --
+    targetCtx.effect(() => host.register({
+      kind: "exact",
+      path: "/api/message-ops/search",
+      handler: async (req, res) => {
+        if (req.method !== "GET") return sendJson(res, 405, { ok: false, error: "method not allowed" });
+        if (!(await fence(targetCtx, req, res))) return;
+        try {
+          const url = new URL(req.url, "http://localhost");
+          const limitRaw = Number.parseInt(url.searchParams.get("limit") || "", 10);
+          return sendJson(res, 200, await opsSearch(
+            targetCtx,
+            url.searchParams.get("sessionId") || "",
+            url.searchParams.get("q") || "",
+            {
+              role: url.searchParams.get("role") || null,
+              limit: Number.isSafeInteger(limitRaw) ? limitRaw : undefined,
+            },
+          ));
+        } catch (err) {
+          return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
+        }
+      },
+    }), "dsh-message-ops: search route");
 
     // --- GET /api/message-ops/text：单条消息全文（0.5.2 引用按钮按需取） ----------
     // assistant 消息的 fullText 不在 messages 列表里（载荷控制），quote 点击时单取。
@@ -876,6 +1024,45 @@ export function apply(ctx) {
         }
       },
     }), "dsh-message-ops: restore route");
+
+    // --- Session trash：删除整条会话（可逆），列表 / 恢复 / 永久清理 ----------
+    targetCtx.effect(() => host.register({
+      kind: "exact",
+      path: "/api/message-ops/session/trash",
+      handler: async (req, res) => {
+        if (req.method !== "GET") return sendJson(res, 405, { ok: false, error: "method not allowed" });
+        if (!(await fence(targetCtx, req, res))) return;
+        try {
+          return sendJson(res, 200, { ok: true, entries: await listTrash(targetCtx, { purgeExpired: true }) });
+        } catch (err) {
+          return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
+        }
+      },
+    }), "dsh-message-ops: session trash route");
+
+    const sessionAction = (path, action) => targetCtx.effect(() => host.register({
+      kind: "exact",
+      path,
+      handler: async (req, res) => {
+        if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method not allowed" });
+        if (!(await writeFence(targetCtx, req, res))) return;
+        const body = await readFencedBody(req, res);
+        if (body === undefined) return;
+        if (!body || typeof body !== "object") return sendJson(res, 400, { ok: false, error: "invalid json" });
+        try {
+          return sendJson(res, 200, await action(targetCtx, body));
+        } catch (err) {
+          return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
+        }
+      },
+    }), "dsh-message-ops: " + path);
+
+    sessionAction("/api/message-ops/session/delete", (c, b) =>
+      deleteSessionToTrash(c, b.sessionId, b.confirmTitle));
+    sessionAction("/api/message-ops/session/restore", (c, b) =>
+      restoreTrash(c, b.trashId));
+    sessionAction("/api/message-ops/session/purge", (c, b) =>
+      purgeTrash(c, b.trashId));
 
   }
 

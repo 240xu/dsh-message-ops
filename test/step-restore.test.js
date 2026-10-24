@@ -7,7 +7,7 @@ function fixtures() {
   const events = [];
   const mk = (seq, type, text, extra) => Object.assign({
     seq, type, time: 1700000000000 + seq,
-    data: { turn: 1, step: 1, message: { id: "m" + seq, role: type === "assistant/message" ? "assistant" : "user", source: { kind: "chat" }, content: [{ type: "text", text }] } },
+    data: { turn: 1, step: 1, message: { id: "m" + seq, role: type === "assistant/message" ? "assistant" : "user", source: type === "assistant/message" ? { kind: "model", provider: "test", model: "test" } : { kind: "user" }, content: [{ type: "text", text }] } },
     surfaceOp: "append",
   }, extra || {});
   events.push(mk(11, "user/message", "U1"));

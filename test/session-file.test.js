@@ -7,10 +7,11 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { zstdCompressSync } from 'node:zlib'
 
 process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-msgops-'))
 
-const { scanZstdFrames, readSessionFile, encodeSessionFile, findSessionDirs, listMessages, computeShadowed } =
+const { scanZstdFrames, readSessionFile, readSessionHeader, encodeSessionFile, findSessionDirs, listMessages, computeShadowed } =
   await import('../src/session-file.js')
 
 const MAGIC = 0xfd2fb528
@@ -38,6 +39,20 @@ test('zstd 帧扫描定位每个魔数边界', () => {
   for (const f of frames) assert.equal(buf.readUInt32LE(f.start), MAGIC)
 })
 
+test('zstd 帧扫描不把压缩载荷内的魔数当成新帧', () => {
+  const magic = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
+  const payload = Buffer.alloc(2000, 0x41)
+  magic.copy(payload, 10)
+  const frame = zstdCompressSync(payload)
+  const inside = frame.indexOf(magic, 4)
+  assert.ok(inside > 0, 'fixture must contain magic bytes inside the compressed frame')
+
+  const { frames } = scanZstdFrames(frame)
+  assert.equal(frames.length, 1)
+  assert.equal(frames[0].start, 0)
+  assert.equal(frames[0].end, frame.length)
+})
+
 test('读写往返：header 与事件完整恢复', () => {
   const events = [
     msg('user/message', 0, '你好'),
@@ -51,6 +66,18 @@ test('读写往返：header 与事件完整恢复', () => {
   assert.equal(evs[0].data.message.content[0].text, '你好')
 })
 
+test('readSessionHeader only needs the first frame (corrupt body must not block title)', () => {
+  const id = 'session-00000000-0000-0000-0000-000000000009'
+  const p = writeLog(path.join(process.env.DSH_HOME, 'sessions', 'proj-h', id), header(id), [msg('user/message', 0, 'hi')])
+  const buf = fs.readFileSync(p)
+  const { frames } = scanZstdFrames(buf)
+  const broken = Buffer.from(buf)
+  broken[frames[1].start + 10] ^= 0xff
+  fs.writeFileSync(p, broken)
+  assert.throws(() => readSessionFile(p))
+  assert.equal(readSessionHeader(p).id, id)
+})
+
 test('listMessages 提取 role/snippet 与 tool 摘要', () => {
   const events = [msg('user/message', 0, '  多  空格\n文本 '), msg('assistant/message', 1, '回复'), { type: 'tool/call', seq: 2, data: { name: 'bash' } }]
   const ms = listMessages(events)
@@ -59,6 +86,18 @@ test('listMessages 提取 role/snippet 与 tool 摘要', () => {
   assert.equal(ms[0].snippet, '多 空格 文本')
   assert.equal(ms[2].role, 'tool')
   assert.match(ms[2].snippet, /\[tool\] bash/)
+})
+
+test('listMessages 标记 message-ops 合成 turn', () => {
+  const events = [
+    { type: 'turn/start', seq: 0, data: { turn: 2, reason: 'message-ops' } },
+    { type: 'system/message', seq: 1, surfaceOp: 'append', data: { turn: 2, step: 1, message: { role: 'system', source: { kind: 'system-prompt' }, content: [{ type: 'text', text: '[消息回滚] x' }] } } },
+    { type: 'turn/end', seq: 2, data: { turn: 2, reason: { kind: 'completed' } } },
+    msg('user/message', 3, 'real'),
+  ]
+  const ms = listMessages(events)
+  assert.equal(ms.find((m) => m.seq === 1).syntheticTurn, true)
+  assert.equal(ms.find((m) => m.seq === 3).syntheticTurn, undefined)
 })
 
 test('computeShadowed 识别 surface replace 遮蔽区间', () => {

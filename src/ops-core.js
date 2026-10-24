@@ -120,6 +120,21 @@ function messageSource(role, version) {
   return { kind: "plugin", plugin: PLUGIN_NAME, role: r };
 }
 
+function assistantReplaySource(item, version) {
+  const source = item && item.source;
+  if (version === 4) {
+    if (!source || source.kind !== "model" || typeof source.provider !== "string" || !source.provider
+      || typeof source.model !== "string" || !source.model) {
+      throw new OpsError("assistant replay requires the original model source", 500);
+    }
+    return { ...source };
+  }
+  if (source && typeof source === "object" && typeof source.kind === "string" && source.kind) {
+    return { ...source };
+  }
+  return messageSource("assistant", version);
+}
+
 /**
  * 重放事件的 data 形状 —— **按事件类型分派**。
  *
@@ -148,7 +163,7 @@ export function replayEventData(item, ts, version = 4) {
     message: {
       id: item.id ?? randomUUID(),
       role: "assistant",
-      source: messageSource("assistant", version),
+      source: assistantReplaySource(item, version),
       content: [{ type: "text", text: item.text }],
     },
     // ⚠️ v4 契约 `stream: AssistantStreamRecord[]` **非可选**
@@ -221,6 +236,27 @@ export function deriveTurnStep(events) {
  * @returns {{synthetic: boolean, turn: number, step: number,
  *            preamble?: Array, postamble?: Array}}
  */
+/** 合成 turn 落盘后，把宿主 idle agent 的 turn 游标对齐到该 turn（否则下一条真实消息会重号）。 */
+export function alignLiveTurnCursor(ctx, session, turn) {
+  if (!Number.isSafeInteger(turn) || turn < 1 || !session || typeof session.id !== "string") return false;
+  const agent = ctx && ctx.agents && typeof ctx.agents.get === "function" ? ctx.agents.get(session.id) : undefined;
+  if (!agent || agent.phase?.kind !== "idle" || typeof agent.setPhase !== "function") return false;
+  const lastTurn = Number.isSafeInteger(agent.phase.lastTurn) ? agent.phase.lastTurn : 0;
+  if (lastTurn >= turn) return false;
+  agent.setPhase({ kind: "idle", lastTurn: turn });
+  return true;
+}
+
+export function sessionLogOf(session) {
+  if (!session) return null;
+  if (Array.isArray(session.log)) return session.log;
+  if (Array.isArray(session.events)) return session.events;
+  if (typeof session.events === "function") {
+    try { const log = session.events(); return Array.isArray(log) ? log : null; } catch { return null; }
+  }
+  return null;
+}
+
 export function planNoticeWindow(events) {
   let turn = null, step = null, maxTurn = 0;
   for (const e of events ?? []) {
@@ -236,6 +272,7 @@ export function planNoticeWindow(events) {
   }
   // 会话正开着 turn+step（例如上一轮被中断）→ 直接用现成窗口，不造合成 turn
   if (turn !== null && step !== null) return { synthetic: false, turn, step };
+  if (turn !== null) throw new OpsError("session is between steps; retry after the current turn settles", 409);
   const nextTurn = maxTurn + 1;
   return { synthetic: true, turn: nextTurn, step: 1 };
 }
@@ -258,25 +295,27 @@ export function noticeWindowPostamble(win) {
     // （dsh-session/lib/index.js:783-786）。UI 的 trajectory 装配器无防护地读
     // `match.event.data.reason.kind`（dsh-client-ui-trajectory/lib/client.js:997-998）
     // → 缺字段会让整个会话页白屏（ConversationNodeAssembler.replayContext 抛 TypeError）。
-    // kind 选 "interrupted"：语义上就是"非模型驱动的 turn"（引擎用它标记被打断的轮次）。
-    { kind: "turn/end", data: { turn: win.turn, reason: { kind: "interrupted" } } },
+    // 用 "completed"：这是成功的记账 turn；用 "interrupted" 会被聊天 UI 渲染成“已停止”。
+    { kind: "turn/end", data: { turn: win.turn, reason: { kind: "completed" } } },
   ];
 }
 
 export function applySurfaceReplace(session, startSeq, endSeq, sourceEventSeqs, noticeText, turnStep) {
   const ts = turnStep && Number.isSafeInteger(turnStep.turn) && turnStep.turn > 0
     ? turnStep : { turn: 1, step: 1 };
+  const sources = [...new Set((Array.isArray(sourceEventSeqs) ? sourceEventSeqs : []).flat(Infinity))];
+  if (!sources.every(Number.isSafeInteger)) throw new OpsError("surface replace sources must be integer seqs", 500);
   const data = { turn: ts.turn, step: ts.step, message: { id: randomUUID(), role: "system", source: messageSource("system", 4), content: [{ type: "text", text: noticeText }] } };
   if (replaceShape) {
-    return session.append("system/message", data, { surfaceOp: replaceOpFor(replaceShape, startSeq, endSeq), sourceEventSeqs });
+    return session.append("system/message", data, { surfaceOp: replaceOpFor(replaceShape, startSeq, endSeq), sourceEventSeqs: sources });
   }
   try {
-    const event = session.append("system/message", data, { surfaceOp: replaceOpFor("legacy", startSeq, endSeq), sourceEventSeqs });
+    const event = session.append("system/message", data, { surfaceOp: replaceOpFor("legacy", startSeq, endSeq), sourceEventSeqs: sources });
     replaceShape = "legacy";
     return event;
   } catch (err) {
     if (!/invalid replace surfaceOp/.test(String(err && err.message))) throw err;
-    const event = session.append("system/message", data, { surfaceOp: replaceOpFor("new", startSeq, endSeq), sourceEventSeqs });
+    const event = session.append("system/message", data, { surfaceOp: replaceOpFor("new", startSeq, endSeq), sourceEventSeqs: sources });
     replaceShape = "new";
     return event;
   }
@@ -318,6 +357,9 @@ export function planRestore(events, restoreSeq, upToSeq, excludeSeqs) {
         type: e.type,
         role: e.type === "user/message" ? "user" : "assistant",
         text,
+        source: e.type === "assistant/message" && e.data && e.data.message
+          ? e.data.message.source
+          : undefined,
       });
     } else {
       skipped++; // tool/call 等不可安全重放的事件：跳过并在结果里计数
@@ -426,6 +468,71 @@ export function restoreProgress(events, markerSeq) {
   };
 }
 
+export function buildRestoreIndex(events) {
+  const bySeq = new Map();
+  const noticesByMarker = new Map();
+  const candidates = [];
+  for (const e of events) {
+    if (!e || typeof e.seq !== "number") continue;
+    bySeq.set(e.seq, e);
+    if (e.type === "user/message" || e.type === "assistant/message") {
+      if ((messageText(e) || "").trim()) candidates.push(e.seq);
+    }
+    const markerSeq = e.data && e.data.restoresSeq;
+    if (Number.isSafeInteger(markerSeq)) {
+      const list = noticesByMarker.get(markerSeq);
+      if (list) list.push(e); else noticesByMarker.set(markerSeq, [e]);
+    }
+  }
+  return { bySeq, noticesByMarker, candidates };
+}
+
+export function restoreProgressFromIndex(index, markerSeq) {
+  const marker = index.bySeq.get(markerSeq);
+  if (!marker) return null;
+  const range = readReplaceOp(marker);
+  if (!range) return null;
+  const { startSeq, endSeq } = range;
+  const candidates = [];
+  for (const q of index.candidates) {
+    if (q >= startSeq && q <= endSeq) candidates.push(q);
+  }
+  const notices = index.noticesByMarker.get(markerSeq) || [];
+  const restored = new Set();
+  let legacy = false;
+  let discarded = false;
+  for (const n of notices) {
+    if (n.data.discarded === true) { discarded = true; continue; }
+    const seqs = n.data && Array.isArray(n.data.restoredSourceSeqs) ? n.data.restoredSourceSeqs : null;
+    if (!seqs) { legacy = true; continue; }
+    for (const q of seqs) if (Number.isSafeInteger(q)) restored.add(q);
+  }
+  const pending = candidates.filter((q) => !restored.has(q));
+  return {
+    startSeq,
+    endSeq,
+    restoredSeqs: Array.from(restored).sort((a, b) => a - b),
+    pendingSeqs: pending,
+    complete: legacy || discarded ? true : pending.length === 0,
+    legacy,
+    discarded,
+  };
+}
+
+export function pendingRestoreTurnsFromIndex(index, markerSeq, progress) {
+  if (!progress || progress.pendingSeqs.length === 0) return [];
+  const turns = [];
+  let current = null;
+  for (const q of progress.pendingSeqs) {
+    const e = index.bySeq.get(q);
+    if (!e) continue;
+    if (e.type === "user/message") { current = { turnSeq: q, seqs: [q] }; turns.push(current); }
+    else if (current) current.seqs.push(q);
+    else turns.push({ turnSeq: q, seqs: [q] });
+  }
+  return turns;
+}
+
 /**
  * 0.8.0：贴条按行展示用 —— 列出该标记仍未重放的「轮」（一个 user 消息及其后
  * 到下一个 user 之前的 assistant 回复算一轮，对齐 opencode 按轮步进恢复）。
@@ -527,8 +634,8 @@ export function isJsonContentType(req) {
 // 同机无凭证进程 GET 即可整卷消息/全文（宿主同条件 401——审计缺口）。
 // 对齐修法（选型理由见报告）：前端本来就带 cookie → 围栏里**校验同款
 // cookie**；secret 经 credentials 服务的合法读法取（no-op modifyRecord，
-// 勿写勿落盘）；宿主无此服务 / 记录缺失或格式升级 → **降级回旧围栏语义**
-// 并告警（UI 永不因新校验而被 401，老版本宿主下行为不变）。
+// 勿写勿落盘）。无 credentials 服务 = 老宿主 → 保留旧围栏；有服务但记录
+// 缺失/格式升级 → **fail-closed** 并告警，避免永久 allow-all。
 // 非浏览器 GET（curl 等）从 200 变 401 = 与宿主对齐的有意行为变化。
 
 const AUTH_RECORD_KEY = "client-connection/browser-session";
@@ -625,7 +732,8 @@ export function browserAuthPayload(req, secret) {
 /**
  * 经 credentials 服务读宿主 BrowserAuth 签名 secret。**唯一读法**：
  * no-op modifyRecord（mutate 返回 undefined = 记录未动、返回 current），
- * 不落盘不经 argv。宿主无该成分 / 记录缺失 / 格式或长度不符 → null（降级）。
+ * 不落盘不经 argv。宿主无该成分 / 记录缺失 / 格式或长度不符 → null。
+ * 调用方据此决定老宿主降级还是 fail-closed（有 credentials 服务即后者）。
  * @param {object|undefined} credentials ctx.get("credentials")
  * @returns {Promise<Buffer|null>}
  */
@@ -651,6 +759,7 @@ export async function loadBrowserAuthSecret(credentials) {
 const WEB_AUTH_RETRY_MS = 10_000;
 let __webAuthSecret = null;
 let __webAuthProbeAt = 0;
+let __webAuthProbe = null;
 let __webAuthWarned = false;
 
 /** 测试钩子：直接注入/清除 secret，绕开 credentials 服务。 */
@@ -658,13 +767,14 @@ export function _setWebAuthSecret(secret) { __webAuthSecret = secret; }
 export function _resetWebAuth() {
   __webAuthSecret = null;
   __webAuthProbeAt = 0;
+  __webAuthProbe = null;
   __webAuthWarned = false;
 }
 
 /**
- * 围栏的鉴权半段：取活跃 secret（含惰性探测与失败 memo）。
+ * 围栏的鉴权半段：取活跃 secret（含单飞探测与 10s 失败 memo）。
  * secret 存在但请求未携有效 cookie → false（路由层回 401）；
- * secret 不可得（无 credentials / 记录缺失 / 老版本宿主）→ true = 降级回旧围栏。
+ * 无 credentials 服务（老宿主）→ true = 旧围栏；有服务但记录不可读 → false（fail-closed）。
  * @param {object|undefined} ctx 插件 ctx（get("credentials")）
  * @param {object} req http 请求
  */
@@ -672,19 +782,32 @@ export async function webAuthGate(ctx, req) {
   if (__webAuthSecret !== null) {
     return browserAuthPayload(req, __webAuthSecret) !== undefined;
   }
+
+  let credentials = null;
+  try { credentials = ctx && typeof ctx.get === "function" ? ctx.get("credentials") : null; } catch { /* legacy ctx */ }
+  if (!credentials || typeof credentials.modifyRecord !== "function") return true;
+
   const now = Date.now();
-  if (now - __webAuthProbeAt < WEB_AUTH_RETRY_MS) return true; // 失败窗口内 = 降级
-  __webAuthProbeAt = now;
-  const credentials = ctx && typeof ctx.get === "function" ? ctx.get("credentials") : null;
-  __webAuthSecret = await loadBrowserAuthSecret(credentials);
-  if (__webAuthSecret === null && !__webAuthWarned) {
-    __webAuthWarned = true;
-    console.warn(
-      "[message-ops] BrowserAuth cookie 鉴权未启用（`client-connection/browser-session` 记录不可读）"
-      + "——GET 鉴权降级为旧的三层围栏语义；若这是 0.2.0+ 宿主，请检查该记录是否存在",
-    );
+  if (__webAuthProbe === null && now - __webAuthProbeAt >= WEB_AUTH_RETRY_MS) {
+    __webAuthProbeAt = now;
+    __webAuthProbe = loadBrowserAuthSecret(credentials)
+      .then((secret) => {
+        __webAuthSecret = secret;
+        if (secret === null && !__webAuthWarned) {
+          __webAuthWarned = true;
+          console.warn(
+            "[message-ops] BrowserAuth cookie 鉴权已启用但 `client-connection/browser-session` 记录不可读"
+            + "——GET 鉴权 fail-closed；请检查该记录是否存在",
+          );
+        }
+        return secret;
+      })
+      .finally(() => { __webAuthProbe = null; });
   }
-  return __webAuthSecret === null ? true : browserAuthPayload(req, __webAuthSecret) !== undefined;
+
+  if (__webAuthProbe === null) return false;
+  const secret = await __webAuthProbe;
+  return secret !== null && browserAuthPayload(req, secret) !== undefined;
 }
 
 
@@ -765,6 +888,8 @@ export function nextSeqFrom(events) {
 
 /** 磁盘回撤/删除标记事件（字段镜像引擎金标准：type/seq/time/data/sourceEventSeqs/surfaceOp）。 */
 export function buildMarkerEvent({ seq, time, turnStep, text, startSeq, endSeq, shadowedSeqs, version = 4 }) {
+  const sources = [...new Set((Array.isArray(shadowedSeqs) ? shadowedSeqs : []).flat(Infinity))];
+  if (!sources.every(Number.isSafeInteger)) throw new OpsError("surface replace sources must be integer seqs", 500);
   return {
     type: "system/message",
     seq,
@@ -774,7 +899,7 @@ export function buildMarkerEvent({ seq, time, turnStep, text, startSeq, endSeq, 
       step: turnStep.step,
       message: { id: randomUUID(), role: "system", source: messageSource("system", version), content: [{ type: "text", text }] },
     },
-    sourceEventSeqs: [...shadowedSeqs],
+    sourceEventSeqs: sources,
     surfaceOp: { op: "replace", startSeq, endSeq },
   };
 }

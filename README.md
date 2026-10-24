@@ -37,13 +37,15 @@ dsh plugin --profile web add @240xu/dsh-message-ops
 
 ## 用法
 
-- **会话头部**的 `Message ops (revert / delete / branch)` 按钮 → 统一对话框
+- **会话头部**的 `Message ops` 按钮 → 右侧 `OpsPanel` 抽屉（消息 / 回收站双 tab）；
+  旧 `OpsDialog` 仅 `window.__MOPS_LEGACY_DIALOG === true` 时回退
 - **助手消息** hover 行的 `Revert to here` / `Quote to composer`
 - **用户消息** hover 行的 `Revert to here`
-- **输入框上方的回撤贴条**：展开后可逐条 `Restore`（这是恢复的唯一入口）
+- **输入框上方的回撤贴条**：展开后可逐条 `Restore`（消息级恢复入口）
 - **侧栏会话行**的 `...` 菜单
 
-对话框流程：**先在列表里选一条消息 → 上方出现三个操作 → 破坏性操作需勾选确认**。
+面板流程：**选一条消息 → 回滚 / 仅删除 / 分支 → 破坏性操作二次确认**；
+整会话删除在回收站 tab，需输入会话标题确认。
 
 ## 安装
 
@@ -66,19 +68,53 @@ dsh plugin --profile web add file:C:/path/to/dsh-message-ops
 
 - 回滚/删除不重写日志：通过一条承载 `surfaceOp: replace` 的 system 事件实现，
   约束由 DSH 引擎 `assertProvenance` 校验，违规如实上报（HTTP 409）。
-- 回滚/删除前必须勾选风险确认；运行中的会话一律拒绝（提示先停止）。
-- 分支先写临时文件再原子 rename，半写日志不会被会话扫描读到。
+- 回滚/删除前必须二次确认；运行中的会话一律拒绝（提示先停止）。
+- 分支走官方 `sessions.fork`（要求先停止运行中的会话），插件不再写磁盘分支。
+- 插件 GET 与宿主 `/api` 同条件校验 BrowserAuth cookie；有 `credentials` 服务但
+  `client-connection/browser-session` 记录不可读时 401 fail-closed，无该服务的老宿主
+  保留旧围栏。
 
 ## 端点
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET  | `/api/message-ops/messages?sessionId=<id>` | 消息级列表（磁盘真相 + 可见性标注 + running 状态） |
+| GET  | `/api/message-ops/messages?sessionId=<id>` | 消息级列表（磁盘真相 + 可见性标注 + running 状态）；`&view=compact` 只回 `seq/role/snippet/time/visible/shadowed`（体积约 −54%） |
+| GET  | `/api/message-ops/search?sessionId=<id>&q=&role=&limit=` | 服务端全文检索（含已回滚消息之外的全部文本），返回 query 对齐片段 |
+| GET  | `/api/message-ops/text?sessionId=<id>&seq=` | 单条消息全文（引用按钮按需取） |
+| GET  | `/api/message-ops/session/trash` | 回收站列表（自动清理过期条目） |
 | POST | `/api/message-ops/revert`  | `{sessionId, seq}` 回滚到该条（含） |
 | POST | `/api/message-ops/delete`  | `{sessionId, seq}` 仅遮蔽该条 |
-| POST | `/api/message-ops/branch`  | `{sessionId, upToSeq}` 分支新会话，返回 `{newId, dir, keptEvents}` |
-| GET  | `/api/message-ops/export?sessionId=<id>&seq=<可选>` | 导出 Markdown（seq ≤ 上界，缺省全部），附件下载 |
 | POST | `/api/message-ops/restore` | `{sessionId, seq}` 回滚恢复：seq 为某次 revert/delete 标记事件的 seq |
+| POST | `/api/message-ops/session/delete` | `{sessionId, confirmTitle}` 整会话移入回收站（7 天保留；运行中 409） |
+| POST | `/api/message-ops/session/restore` | `{trashId}` 从回收站恢复目录与投影/工作区元数据 |
+| POST | `/api/message-ops/session/purge` | `{trashId}` 永久删除（唯一 destructive 操作） |
+
+### 0.11.2 · 合成 turn 竞态与历史日志兼容修复
+
+- 修复回滚在 live 会话中可能产生**重复 turn**：`opsCommit` / `opsRestore` 在取得
+  live session 后改用 `session.log` 重算 turn 窗口，不再信任可能已过期的磁盘快照。
+- 合成 turn 成功闭合后对齐宿主 idle agent 的 `lastTurn`，防止下一条真实消息复用同一 turn。
+- `planNoticeWindow` 遇到「turn 已开但 step 未开」直接 409，不再嵌套非法合成 turn。
+- `applySurfaceReplace` / `buildMarkerEvent` 对 `sourceEventSeqs` 做扁平化、去重和整数校验，
+  杜绝 `[[start,end]]` 旧伤继续写入。
+- 旧日志中已存在的嵌套 `sourceEventSeqs` 与 tool/result replacement 非 content 字段
+  需用维护脚本修复；本版本保证不再产生该类记录。
+- 契约测试在无本地 `sessionfix` 夹具时自动跳过，不再硬依赖个人绝对路径。
+
+### 0.11.0 · 方向 A 面板 + 会话回收站
+
+- `src/client.js` 新增右侧功能主义抽屉 `OpsPanel`（560px，≤760px 全屏）：
+  消息/回收站双 tab、200ms 防抖搜索、角色过滤、含已回滚开关、46px 固定行高
+  虚拟列表、`/text` 详情、回滚/仅删除/分支、整会话删除（输入标题确认）。
+  旧 `OpsDialog` 保留为 `window.__MOPS_LEGACY_DIALOG === true` 回退。
+- `GET /messages?view=compact` 为面板默认载荷；`GET /search` 提供 500 字符
+  上限的服务端全文检索（LRU 8 corpus 缓存，按 logPath mtime+size 失效）。
+- `src/session-trash.js`：删除 = 目录 `rename` + 投影行/工作区/归档/置顶元数据
+  快照写 `manifest.json`；恢复拒绝覆盖已存在目录（409）；purge 才真正删除。
+  恢复校验 `manifest.sessionId` 与 `rel`（必须是 sessions 根下两层、且与 id 匹配），
+  delete 回滚失败时保留回收站唯一副本，不再无条件删除。
+- 无标题会话取标题只解压首个 zstd header frame（`readSessionHeader`），损坏的正文
+  不会阻塞列表；marker 恢复进度改为单次索引扫描。
 
 ## 0.2.4 UI GAP（ux-scout dsh-ui-spec G-M1）
 

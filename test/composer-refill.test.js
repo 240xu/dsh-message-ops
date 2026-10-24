@@ -65,9 +65,9 @@ test('R4：afterWrite 必须传带 session- 前缀的 id 给 openSession', () =>
 
 test('R2：所有 revert 入口都接了 refillComposer', () => {
   const calls = (src.match(/\brefillComposer\(/g) || []).length
-  // 三个回滚入口：runUndo(/undo) + runRevert(AI 时钟) + runUserRevert(悬停)
+  // 四个回滚入口：runUndo(/undo) + runRevert(AI 时钟) + runUserRevert(悬停) + OpsPanel(A 抽屉)
   // 注意：定义写法是 `refillComposer = (`，不匹配 `refillComposer(`
-  assert.equal(calls, 3, `refillComposer 调用 ${calls} 处，应为 3 个回滚入口`)
+  assert.equal(calls, 4, `refillComposer 调用 ${calls} 处，应为 4 个回滚入口`)
   assert.ok(/var refillComposer = \(/.test(src), '缺 refillComposer 定义')
   // 反例：restore / redo 不该回填（它们是加回内容，不是删）
   const redo = src.match(/var runRedo = \(\) => \{[\s\S]*?\n    \}/)

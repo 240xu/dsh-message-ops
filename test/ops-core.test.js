@@ -6,14 +6,24 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-const { OpsError, planRestore, applyRestore, messageText } =
+const { OpsError, planRestore, applyRestore, messageText, restoreProgress, pendingRestoreTurns, buildRestoreIndex, restoreProgressFromIndex, pendingRestoreTurnsFromIndex } =
   await import('../src/ops-core.js')
 const { createMessageOpsTool, apply } = await import('../src/index.js')
 
 function msg(type, seq, text, role) {
+  const resolved = role || (type === 'user/message' ? 'user' : 'assistant')
   return {
     type, seq, time: Date.now(), surfaceOp: 'append',
-    data: { turn: 1, message: { role: role || (type === 'user/message' ? 'user' : 'assistant'), content: [{ type: 'text', text }] } },
+    data: {
+      turn: 1,
+      message: {
+        role: resolved,
+        source: resolved === 'assistant'
+          ? { kind: 'model', provider: 'test', model: 'test' }
+          : { kind: 'user' },
+        content: [{ type: 'text', text }],
+      },
+    },
   }
 }
 
@@ -78,6 +88,25 @@ test('planRestore：非标记事件 / 越界 seq 拒绝；空可重放区间改�
   const plan = planRestore(onlyTool, 1)
   assert.equal(plan.replayable.length, 0, '空可重放 = 接受为停用计划')
   assert.equal(plan.startSeq, 0)
+})
+
+test('索引化恢复进度与逐标记语义一致（含部分恢复 notice）', () => {
+  const events = sampleEvents()
+  events.push({
+    type: 'system/message', seq: 6, data: { restoresSeq: 5, restoredSourceSeqs: [3] },
+  })
+  const index = buildRestoreIndex(events)
+  for (const markerSeq of [5, 6]) {
+    const oldProgress = restoreProgress(events, markerSeq)
+    const newProgress = restoreProgressFromIndex(index, markerSeq)
+    assert.deepEqual(newProgress, oldProgress)
+    assert.deepEqual(
+      pendingRestoreTurnsFromIndex(index, markerSeq, newProgress),
+      pendingRestoreTurns(events, markerSeq, oldProgress),
+    )
+  }
+  assert.deepEqual(restoreProgressFromIndex(index, 5).pendingSeqs, [4])
+  assert.equal(restoreProgressFromIndex(index, 5).complete, false)
 })
 
 test('applyRestore：重放 append 干净文本（0.6.0 无前缀）+ system 说明，flush 被调用', () => {
@@ -174,7 +203,7 @@ test('apply：无 webServer、无 tools 时走 inject 等待，不抛错', () =>
   assert.equal(ctx.registrations.length, 0)
 })
 
-test('apply：webServer 存在时注册全部 5 条路由；tools 缺失走 inject 等待', () => {
+test('apply：webServer 存在时注册全部 10 条路由；tools 缺失走 inject 等待', () => {
   const ctx = mockCtx({ webServer: { register: (route) => ctx.registrations.push(route) } })
   assert.doesNotThrow(() => apply(ctx))
   const paths = ctx.registrations.map((r) => r.path).sort()
@@ -183,6 +212,11 @@ test('apply：webServer 存在时注册全部 5 条路由；tools 缺失走 inje
     '/api/message-ops/messages',
     '/api/message-ops/restore',
     '/api/message-ops/revert',
+    '/api/message-ops/search',
+    '/api/message-ops/session/delete',
+    '/api/message-ops/session/purge',
+    '/api/message-ops/session/restore',
+    '/api/message-ops/session/trash',
     '/api/message-ops/text',
   ], '0.9.0：branch/export 路由已移除（改用官方 session/fork 与 /api/session.export）')
   // tools 缺失 → 容错等待而非 fatal
@@ -344,15 +378,28 @@ test('磁盘计划/构建器：可见节点剔除遮蔽、marker 字段逐项镜
   // 故只能是 {kind:'plugin', plugin:<name>}（迁移后成 plugin:<name>，v4 接受）
   assert.equal(rp.data.source.kind, 'plugin:@240xu/dsh-message-ops', 'v4 直接写必须用 producerKind 形态')
   // assistant 必须带**打开的**坐标，且不是写死的 1/1
-  const rp2 = core.buildReplayEvent({ seq: 18, time: 4, turnStep: { turn: 3, step: 7 }, item: { type: 'assistant/message', role: 'assistant', text: 'yo' } })
+  const rp2 = core.buildReplayEvent({ seq: 18, time: 4, turnStep: { turn: 3, step: 7 }, item: { type: 'assistant/message', role: 'assistant', text: 'yo', source: { kind: 'model', provider: 'test', model: 'test' } } })
   assert.equal(rp2.data.turn, 3, 'replayed assistant must use the open turn')
   assert.equal(rp2.data.step, 7, 'replayed assistant must use the open step')
   assert.equal(rp2.data.message.role, 'assistant')
-  assert.equal(rp2.data.message.source.kind, 'plugin:@240xu/dsh-message-ops')
+  assert.deepEqual(rp2.data.message.source, { kind: 'model', provider: 'test', model: 'test' }, 'must preserve the original model source')
   // v3 目标日志：必须用 {kind:'plugin', plugin:<name>}（v3 要求字面量 plugin）
   const rp3 = core.buildReplayEvent({ seq: 20, time: 6, version: 3, turnStep: { turn: 1, step: 1 }, item: { type: 'user/message', role: 'user', text: 'v3' } })
   assert.equal(rp3.data.source.kind, 'plugin', 'v3 日志要求字面量 plugin')
   assert.equal(rp3.data.source.plugin, '@240xu/dsh-message-ops')
   // 缺 turnStep 必须抛错，绝不静默落 1/1
   assert.throws(() => core.buildReplayEvent({ seq: 19, time: 5, item: { type: 'assistant/message', role: 'assistant', text: 'z' } }), (e) => e.status === 500)
+});
+
+
+test('alignLiveTurnCursor：只推进 idle agent 的 lastTurn，不碰 running/已领先游标', async () => {
+  const { alignLiveTurnCursor } = await import('../src/ops-core.js');
+  const phases = [];
+  const agent = { phase: { kind: 'idle', lastTurn: 4 }, setPhase(p) { phases.push(p); this.phase = p; } };
+  const ctx = { agents: { get: () => agent } };
+  assert.equal(alignLiveTurnCursor(ctx, { id: 's1' }, 5), true);
+  assert.deepEqual(phases, [{ kind: 'idle', lastTurn: 5 }]);
+  assert.equal(alignLiveTurnCursor(ctx, { id: 's1' }, 5), false);
+  const running = { phase: { kind: 'running', turn: 6, step: 1, abort: {} }, setPhase() { throw new Error('must not run'); } };
+  assert.equal(alignLiveTurnCursor({ agents: { get: () => running } }, { id: 's2' }, 7), false);
 });

@@ -17,8 +17,6 @@ import os from "node:os";
 import { constants, zstdCompressSync, zstdDecompressSync } from "node:zlib";
 
 const ZSTD_MAGIC = 0xfd2fb528;
-/** 魔数的字节形态（Buffer.indexOf 用；小端 0xfd2fb528 → 28 b5 2f fd）。 */
-const ZSTD_MAGIC_BYTES = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
 
 /** 带语义状态码的操作错误（单点：HTTP 直接映射 status，工具端转失败文本）。 */
 export class OpsError extends Error {
@@ -68,13 +66,51 @@ function compressFrame(input) {
 }
 
 /**
+ * 按 RFC 8878 计算一个 zstd 帧的精确结束偏移。
+ * 魔数可能出现在压缩载荷内，因此不能用 Buffer.indexOf 定帧界。
+ * @returns {{end:number}|{error:'truncated'|'malformed'}}
+ */
+function zstdFrameEnd(buf, start) {
+  if (start + 4 > buf.length || buf.readUInt32LE(start) !== ZSTD_MAGIC) return { error: "malformed" };
+  let p = start + 4;
+  if (p >= buf.length) return { error: "truncated" };
+  const fhd = buf[p++];
+  if ((fhd & 0x18) !== 0) return { error: "malformed" };
+  const fcsFlag = fhd >> 6;
+  const singleSegment = (fhd >> 5) & 1;
+  const checksum = (fhd >> 2) & 1;
+  const dictFlag = fhd & 3;
+  if (!singleSegment) {
+    if (p >= buf.length) return { error: "truncated" };
+    p += 1;
+  }
+  const dictSize = [0, 1, 2, 4][dictFlag];
+  const fcsSize = fcsFlag === 0 ? (singleSegment ? 1 : 0) : [0, 2, 4, 8][fcsFlag];
+  p += dictSize + fcsSize;
+  if (p > buf.length) return { error: "truncated" };
+  for (;;) {
+    if (p + 3 > buf.length) return { error: "truncated" };
+    const bh = buf[p] | (buf[p + 1] << 8) | (buf[p + 2] << 16);
+    p += 3;
+    const last = bh & 1;
+    const type = (bh >> 1) & 3;
+    const size = bh >>> 3;
+    if (type === 3) return { error: "malformed" };
+    const payload = type === 1 ? 1 : size;
+    if (p + payload > buf.length) return { error: "truncated" };
+    p += payload;
+    if (last) break;
+  }
+  if (checksum) {
+    if (p + 4 > buf.length) return { error: "truncated" };
+    p += 4;
+  }
+  return { end: p };
+}
+
+/**
  * 扫描串联 zstd 流的完整帧边界（不解压块）。
- *
- * 找「下一个魔数」用 Buffer.indexOf（原生 memchr 实现）而不是逐字节
- * readUInt32LE 循环 —— 10.8MB 日志的逐字节扫描实测 44~73ms 且全程同步
- * 阻塞事件循环（单次卡顿 146ms 的主要来源）；indexOf 同样从 offset+4
- * 起找、同样要求 4 字节完整落在缓冲区内，语义与原循环**逐位等价**
- * （命中区间 [offset+4, buf.length-4]，找不到则 end=buf.length）。
+ * 帧界按结构计算，任何非帧字节或畸形帧都 fail-closed。
  * @returns {{frames: {start:number,end:number}[], tornStart?: number}}
  */
 export function scanZstdFrames(buf) {
@@ -86,11 +122,16 @@ export function scanZstdFrames(buf) {
     if (buf.readUInt32LE(offset) !== ZSTD_MAGIC) {
       throw new Error(`corrupt zstd session log: invalid frame magic at byte ${offset}`);
     }
-    let end = buf.length;
-    const found = buf.indexOf(ZSTD_MAGIC_BYTES, offset + 4);
-    if (found !== -1) end = found;
-    frames.push({ start, end });
-    offset = end;
+    const parsed = zstdFrameEnd(buf, offset);
+    if (parsed.error === "truncated") {
+      frames.push({ start, end: buf.length });
+      return { frames, tornStart: start };
+    }
+    if (parsed.error) {
+      throw new Error(`corrupt zstd session log: malformed frame at byte ${offset}`);
+    }
+    frames.push({ start, end: parsed.end });
+    offset = parsed.end;
   }
   return { frames };
 }
@@ -133,6 +174,25 @@ export function readSessionFile(file) {
   }
   if (!header) throw new Error(`session log ${file}: no {type:"session"} header line in any frame`);
   return { header, events };
+}
+
+/** Read only the first zstd frame (header); a damaged body cannot block titles. */
+export function readSessionHeader(file) {
+  const buf = fs.readFileSync(file);
+  if (buf.length < 4 || buf.readUInt32LE(0) !== ZSTD_MAGIC) {
+    throw new Error(`session log ${file}: no zstd header frame`);
+  }
+  const parsed = zstdFrameEnd(buf, 0);
+  if (parsed.error) throw new Error(`session log ${file}: ${parsed.error} header frame`);
+  const text = zstdDecompressSync(buf.subarray(0, parsed.end)).toString("utf8");
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    let json;
+    try { json = JSON.parse(t); } catch { continue; }
+    if (json && typeof json === "object" && json.type === "session") return json;
+  }
+  throw new Error(`session log ${file}: no {type:"session"} header line in the first frame`);
 }
 
 /** 物化整份日志：header 帧（恰一行）+ 单一事件帧（全部事件行）。 */
@@ -224,6 +284,11 @@ export function turnBounds(events) {
 }
 
 export function listMessages(events) {
+  const syntheticTurns = new Set();
+  for (const e of events) {
+    if (e && e.type === "turn/start" && e.data && e.data.reason === "message-ops"
+      && Number.isSafeInteger(e.data.turn)) syntheticTurns.add(e.data.turn);
+  }
   const messages = [];
   for (const e of events) {
     if (!e || typeof e.seq !== "number") continue;
@@ -252,6 +317,7 @@ export function listMessages(events) {
           ? e.data.restoresSeq : null,
         time: e.time ?? null,
         turn: (e.data && e.data.turn) ?? null,
+        syntheticTurn: syntheticTurns.has(e.data && e.data.turn) || undefined,
         // 0.9.1：assistant 节点的宿主 node-key 是 `14:assistant-step<turn>:<step>`，
         // 没有 step 就无法把渲染行映射回日志 seq → 回滚时助手回答藏不掉。
         step: (e.data && e.data.step) ?? null,
