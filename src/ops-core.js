@@ -947,8 +947,18 @@ export function buildMarkerEvent({ seq, time, turnStep, text, startSeq, endSeq, 
   };
 }
 
-/** 磁盘恢复说明事件（restoresSeq → dock 移除该行；surfaceOp 恒 "append"）。 */
-export function buildRestoreNoticeEvent({ seq, time, turnStep, text, restoreSeq, discard, version = 4 }) {
+/**
+ * 磁盘恢复说明事件（restoresSeq → dock 移除该行；surfaceOp 恒 "append"）。
+ *
+ * 0.11.4：必须写入 `restoredSourceSeqs`。`restoreProgress` 靠它累计「已重放哪些
+ * 源 seq」来算 pending/complete；旧实现只写 `restoresSeq`，于是每次恢复都被判
+ * `legacy`（`complete:true` 但 `restoredSeqs` 恒空）→ 进度不可见，且下一轮
+ * `excludeSeqs` 为空 → 同一区间被**反复重放**（实测 008f3759 两轮各 209 条）。
+ */
+export function buildRestoreNoticeEvent({ seq, time, turnStep, text, restoreSeq, discard, restoredSourceSeqs, version = 4 }) {
+  const restored = Array.isArray(restoredSourceSeqs)
+    ? [...new Set(restoredSourceSeqs.filter((q) => Number.isSafeInteger(q)))]
+    : [];
   return {
     type: "system/message",
     seq,
@@ -958,6 +968,7 @@ export function buildRestoreNoticeEvent({ seq, time, turnStep, text, restoreSeq,
       step: turnStep.step,
       message: { id: randomUUID(), role: "system", source: messageSource("system", version), content: [{ type: "text", text }] },
       restoresSeq: restoreSeq,
+      ...(restored.length > 0 ? { restoredSourceSeqs: restored } : {}),
       ...(discard ? { discarded: true } : {}),
     },
     surfaceOp: "append",

@@ -89,6 +89,16 @@ dsh plugin --profile web add file:C:/path/to/dsh-message-ops
 | POST | `/api/message-ops/session/restore` | `{trashId}` 从回收站恢复目录与投影/工作区元数据 |
 | POST | `/api/message-ops/session/purge` | `{trashId}` 永久删除（唯一 destructive 操作） |
 
+### 0.11.5 · restore 进度落盘 + `turnAligned` 可观测
+
+- **磁盘 restore 漏写 `restoredSourceSeqs`（数据正确性）**：`buildRestoreNoticeEvent`
+  只写 `restoresSeq`，而 `restoreProgress` 靠 `restoredSourceSeqs` 累计已重放项。
+  结果每次恢复都被判 `legacy`（`complete:true` 但 `restoredSeqs` 恒空）→ 进度不可见，
+  且下一轮 `excludeSeqs` 为空 → **同一区间被反复重放**（实测 008f3759 两轮各 209 条）。
+  磁盘路径改为把 `plan.replayable.map(i => i.seq)` 落进 notice；discard 时不写。
+- `/revert` 与 `/restore` 响应新增 `turnAligned`：live 路径应为 `true`，
+  disk/store-miss 路径没有内存 agent，`false` 属正常。便于运行时确认游标对齐是否生效。
+
 ### 0.11.4 · turn 游标对齐真正生效（会话损坏 P0 续）
 
 - **`alignLiveTurnCursor` 此前从未执行**：插件 `export const inject = []`

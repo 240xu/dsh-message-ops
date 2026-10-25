@@ -667,11 +667,14 @@ async function opsCommit(targetCtx, mode, sessionId, seq) {
         const event = applySurfaceReplace(session, plan.startSeq, plan.endSeq, plan.shadowedSeqs, text, turnStep);
         // 必须闭合：否则引擎内存里 turn 永远开着 → isRunning 恒真 → 后续操作全被 409
         closeWindow()
-        if (win.synthetic) alignLiveTurnCursor(targetCtx, session, win.turn);
+        const aligned = win.synthetic ? alignLiveTurnCursor(targetCtx, session, win.turn) : false;
         flushSessions(targetCtx, session);
         return {
           ok: true, mode, seq,
           syntheticTurn: win.synthetic === true,
+          // 0.11.4：暴露对齐结果。live 路径必须 true；disk 路径（store-miss）没有
+          // 内存 agent，false 属正常。若 live 也 false，下一条真实消息就会重号。
+          turnAligned: aligned,
           shadowedCount: plan.shadowedSeqs.length,
           eventSeq: event && event.seq != null ? event.seq : null,
         };
@@ -748,8 +751,8 @@ async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq, discard) {
         flush: () => { flushSessions(targetCtx, acq.session); },
       });
       for (const post of noticeWindowPostamble(win)) acq.session.append(post.kind, post.data);
-      if (win.synthetic) alignLiveTurnCursor(targetCtx, acq.session, win.turn);
-      return { ok: true, ...result, discarded: plan.discard === true, upToSeq: plan.upToSeq, restoredSourceSeqs: plan.replayable.map((i) => i.seq), range: { startSeq: plan.startSeq, endSeq: plan.endSeq } };
+      const aligned = win.synthetic ? alignLiveTurnCursor(targetCtx, acq.session, win.turn) : false;
+      return { ok: true, ...result, turnAligned: aligned, discarded: plan.discard === true, upToSeq: plan.upToSeq, restoredSourceSeqs: plan.replayable.map((i) => i.seq), range: { startSeq: plan.startSeq, endSeq: plan.endSeq } };
     } catch (err) {
       for (const post of noticeWindowPostamble(win)) {
         try { acq.session.append(post.kind, post.data); } catch { /* postamble 被引擎拒：维持原错误上抛 */ }
@@ -774,6 +777,9 @@ async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq, discard) {
       : restoreNoticeText(plan),
     restoreSeq: plan.restoreSeq,
     discard: plan.discard === true,
+    // 0.11.4：把本轮实际重放的源 seq 落进 notice，restoreProgress 才能累计进度、
+    // 下一轮 excludeSeqs 才不会重复重放同一批消息（详见 ops-core 该函数注释）。
+    restoredSourceSeqs: plan.discard ? [] : plan.replayable.map((i) => i.seq),
   }));
   let offset = 0;
   for (const item of plan.discard ? [] : plan.replayable) {

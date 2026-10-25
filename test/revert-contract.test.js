@@ -214,3 +214,30 @@ test('alignLiveTurnCursor：游标已领先时不得回退', () => {
   assert.equal(alignLiveTurnCursor(ctx, { id: 'session-x' }, 7), false)
   assert.deepEqual(setPhases, [])
 })
+
+test('buildRestoreNoticeEvent：必须落 restoredSourceSeqs（否则进度不可见且会重复重放）', () => {
+  const ev = buildRestoreNoticeEvent({
+    seq: 30, time: 1, turnStep: { turn: 3, step: 1 }, text: 'x',
+    restoreSeq: 20, restoredSourceSeqs: [12, 13, 13, 12, 14],
+  })
+  assert.deepEqual(ev.data.restoredSourceSeqs, [12, 13, 14], '应按首次出现去重')
+  assert.equal(ev.data.restoresSeq, 20)
+  assert.equal(ev.surfaceOp, 'append')
+})
+
+test('buildRestoreNoticeEvent：discard 时调用方传空数组 → 不写该字段', () => {
+  const ev = buildRestoreNoticeEvent({
+    seq: 31, time: 1, turnStep: { turn: 3, step: 1 }, text: 'x',
+    restoreSeq: 20, discard: true, restoredSourceSeqs: [],
+  })
+  assert.equal(ev.data.discarded, true)
+  assert.equal(ev.data.restoredSourceSeqs, undefined, '无重放内容时不写空数组')
+})
+
+test('磁盘 restore 路径把 plan.replayable 的 seq 传给 notice', () => {
+  const src = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8')
+  const block = src.slice(src.indexOf('batch.push(buildRestoreNoticeEvent({'))
+  const call = block.slice(0, block.indexOf('}));') + 4)
+  assert.match(call, /restoredSourceSeqs:\s*plan\.discard \? \[\] : plan\.replayable\.map/,
+    '磁盘路径漏写该字段会让 restoreProgress 判 legacy、下一轮重复重放同一批消息')
+})
