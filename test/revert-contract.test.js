@@ -33,7 +33,7 @@ const contractSkip = process.env.SESSIONFIX_CONTRACT !== '1'
 import {
   planNoticeWindow, noticeWindowPreamble, noticeWindowPostamble,
   buildMarkerEvent, buildRestoreNoticeEvent, buildReplayEvent, planRestore, restoreProgress,
-  applySurfaceReplace, expandSourceSeqs,
+  applySurfaceReplace, expandSourceSeqs, alignLiveTurnCursor,
 } from '../src/ops-core.js'
 
 const HEADER = { type: 'session', version: 4, id: 'contract-test', createdAt: 1, isSeeded: false, delegationDepth: 0 }
@@ -192,4 +192,25 @@ test('postamble 必须幂等：成功路径闭合后 catch 不得再写第二遍
   const writes = (block.match(/session\.append\(post\.kind/g) || []).length
   assert.equal(writes, 1, `postamble 落盘只能有一处，实测 ${writes} 处（多于 1 就会出现重复闭合）`)
   assert.match(block, /if \(closed\) return/, '必须用幂等标志挡住第二次闭合')
+})
+
+test('alignLiveTurnCursor：inject 为空时 ctx.agents 属性不存在，必须走 ctx.get 兜底', async () => {
+  // 实况：插件 inject=[] → ctx.agents 恒 undefined。旧实现只看属性，
+  // 这条对齐从未执行 → 下一条真实消息复用同一 turn → 日志
+  // `turn/start does not open the expected turn`（实测 session-36fb0081 /
+  // session-580065fd）。必须回落到 ctx.get("agents")。
+  const setPhases = []
+  const agent = { phase: { kind: 'idle', lastTurn: 2 }, setPhase: (p) => setPhases.push(p) }
+  const ctx = { get: (n) => (n === 'agents' ? { get: () => agent } : undefined) } // 无 ctx.agents 属性
+  const aligned = alignLiveTurnCursor(ctx, { id: 'session-x' }, 7)
+  assert.equal(aligned, true, 'ctx.agents 缺失时必须用 ctx.get("agents") 找到 agent')
+  assert.deepEqual(setPhases, [{ kind: 'idle', lastTurn: 7 }])
+})
+
+test('alignLiveTurnCursor：游标已领先时不得回退', () => {
+  const setPhases = []
+  const agent = { phase: { kind: 'idle', lastTurn: 9 }, setPhase: (p) => setPhases.push(p) }
+  const ctx = { get: () => ({ get: () => agent }) }
+  assert.equal(alignLiveTurnCursor(ctx, { id: 'session-x' }, 7), false)
+  assert.deepEqual(setPhases, [])
 })

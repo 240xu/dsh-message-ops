@@ -239,7 +239,15 @@ export function deriveTurnStep(events) {
 /** 合成 turn 落盘后，把宿主 idle agent 的 turn 游标对齐到该 turn（否则下一条真实消息会重号）。 */
 export function alignLiveTurnCursor(ctx, session, turn) {
   if (!Number.isSafeInteger(turn) || turn < 1 || !session || typeof session.id !== "string") return false;
-  const agent = ctx && ctx.agents && typeof ctx.agents.get === "function" ? ctx.agents.get(session.id) : undefined;
+  // 0.11.4：插件 `inject` 故意留空（tools 是可选增强），因此 `ctx.agents`
+  // **属性访问恒为 undefined** —— 旧实现只写 `ctx.agents`，这条对齐从来没执行过。
+  // 实测 `ctx.get("agents")` 在 HTTP 请求期可解析（同 resolveSession 的取法），
+  // 故属性优先、ctx.get 兜底。
+  let agents = null;
+  try { if (ctx && ctx.agents) agents = ctx.agents; } catch { /* getter threw */ }
+  if (!agents) { try { agents = ctx && typeof ctx.get === "function" ? ctx.get("agents") : null; } catch { /* absent */ } }
+  let agent = null;
+  try { agent = agents && typeof agents.get === "function" ? agents.get(session.id) : null; } catch { /* registry miss */ }
   if (!agent || agent.phase?.kind !== "idle" || typeof agent.setPhase !== "function") return false;
   const lastTurn = Number.isSafeInteger(agent.phase.lastTurn) ? agent.phase.lastTurn : 0;
   if (lastTurn >= turn) return false;

@@ -89,6 +89,16 @@ dsh plugin --profile web add file:C:/path/to/dsh-message-ops
 | POST | `/api/message-ops/session/restore` | `{trashId}` 从回收站恢复目录与投影/工作区元数据 |
 | POST | `/api/message-ops/session/purge` | `{trashId}` 永久删除（唯一 destructive 操作） |
 
+### 0.11.4 · turn 游标对齐真正生效（会话损坏 P0 续）
+
+- **`alignLiveTurnCursor` 此前从未执行**：插件 `export const inject = []`
+  （tools 是可选增强，故意不声明硬依赖），因此 `ctx.agents` **属性恒为 undefined**，
+  旧实现只读属性 → 恒返回 false。合成 turn 占用编号后宿主 idle agent 的
+  `phase.lastTurn` 不推进，下一条真实消息复用同一 turn 号，日志落成
+  `turn/start does not open the expected turn`，整份会话不可加载。
+  改为属性优先、`ctx.get("agents")` 兜底（与 `resolveSession` 同取法）。
+- 回归测试：`ctx.agents` 缺失必须走 `ctx.get`；游标已领先时不得回退。
+
 ### 0.11.3 · 区间编码、回填落盘与会话损坏修复
 
 - **`sourceEventSeqs` 区间语义修正（数据正确性）**：宿主用 `encodeSeqRanges` 把连续
