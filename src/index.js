@@ -647,11 +647,26 @@ async function opsCommit(targetCtx, mode, sessionId, seq) {
       // turn（0.8.2 注释锁定的「后半操作被 409 锁拒」形态），随后原样抛出，
       // 由路由层按既有 OpsError 映射。append-only 引擎无「删除已落事件」能力，
       // 闭合孤儿窗口是最小且可被动校验的整理。
+      // 0.11.3 P0：postamble 只能写一次。
+      // 旧实现把 `for (const post of postamble) session.append(...)` 同时放在 try
+      // 成功路径和 catch 里；一旦**成功路径的 postamble 自身**抛错（引擎已接受
+      // step/end，第二个 turn/end 被拒 / flush 失败），catch 会再写一遍 →
+      // 日志落成 `step/end, turn/end, step/end, turn/end`。宿主读盘直接判
+      // `step/end does not match an open turn and step`，整份会话变 corrupt
+      // （实测 session-5b49db5b seq 806-809）。用 closed 标志保证闭环只发生一次。
+      let closed = false
+      const closeWindow = () => {
+        if (closed) return
+        closed = true
+        for (const post of noticeWindowPostamble(win)) {
+          try { session.append(post.kind, post.data) } catch { /* 引擎拒：维持原错误/继续 */ }
+        }
+      }
       try {
         for (const pre of noticeWindowPreamble(win)) session.append(pre.kind, pre.data);
         const event = applySurfaceReplace(session, plan.startSeq, plan.endSeq, plan.shadowedSeqs, text, turnStep);
-        // 必须闭合：否则引擎内存里 turn 16 永远开着 → isRunning 恒真 → 后续操作全被 409
-        for (const post of noticeWindowPostamble(win)) session.append(post.kind, post.data);
+        // 必须闭合：否则引擎内存里 turn 永远开着 → isRunning 恒真 → 后续操作全被 409
+        closeWindow()
         if (win.synthetic) alignLiveTurnCursor(targetCtx, session, win.turn);
         flushSessions(targetCtx, session);
         return {
@@ -661,10 +676,8 @@ async function opsCommit(targetCtx, mode, sessionId, seq) {
           eventSeq: event && event.seq != null ? event.seq : null,
         };
       } catch (err) {
-        // 孤儿整理失败不再包一层也不会更糟（append 已失败态）；原错误照抛。
-        for (const post of noticeWindowPostamble(win)) {
-          try { session.append(post.kind, post.data); } catch { /* postamble 被引擎拒：维持原错误上抛 */ }
-        }
+        // 只补闭合**尚未发生**的窗口；已闭合过就绝不再写第二遍。
+        closeWindow()
         throw err;
       }
     } finally {

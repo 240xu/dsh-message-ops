@@ -104,3 +104,25 @@ test('R2：不再用静默 catch 吞掉 setDraft 失败', () => {
   assert.ok(/console\.warn/.test(m[0]), 'setDraft 失败必须留痕，原先 catch {} 完全静默')
   assert.ok(!/catch \{ \/\* 回填失败不阻断 \*\/ \}/.test(m[0]))
 })
+
+test('回填必须落盘：setDraft 不持久化，openSession 会覆盖成空草稿', () => {
+  const fn = src.match(/var refillComposer = [\s\S]*?\n    \}/)
+  assert.ok(fn, '找不到 refillComposer')
+  assert.match(fn[0], /__inputActions\.setDraft\(/, '仍应设置编辑器')
+  assert.match(fn[0], /__inputActions\.persistDraft\(/,
+    'setDraft 只改编辑器不写 localStorage；必须 persistDraft()，否则紧随的 openSession 会从旧草稿重读并覆盖')
+})
+
+test('对话框入口直接 setDraft 时也必须 persistDraft', () => {
+  const m = src.match(/const okMsg = mode === 'revert'[\s\S]*?setDoneMsg\(okMsg\)/)
+  assert.ok(m, '找不到对话框回填分支')
+  assert.match(m[0], /persistDraft\(/,
+    '该入口绕过 refillComposer，若不落盘同样会被 openSession 覆盖')
+})
+
+test('lastRevertable 必须排除 shadowed（防二次 /undo 命中已遮蔽 seq → 409）', () => {
+  const m = src.match(/var lastRevertable = \(\) => \{[\s\S]*?\n    \}/)
+  assert.ok(m, '找不到 lastRevertable')
+  assert.match(m[0], /shadowed\s*!==\s*true/,
+    '只判 visible 时，回滚刚落盘、索引未刷新的窗口里会再次选中同一 seq')
+})

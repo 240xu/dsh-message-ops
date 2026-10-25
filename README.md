@@ -89,16 +89,35 @@ dsh plugin --profile web add file:C:/path/to/dsh-message-ops
 | POST | `/api/message-ops/session/restore` | `{trashId}` 从回收站恢复目录与投影/工作区元数据 |
 | POST | `/api/message-ops/session/purge` | `{trashId}` 永久删除（唯一 destructive 操作） |
 
+### 0.11.3 · 区间编码、回填落盘与会话损坏修复
+
+- **`sourceEventSeqs` 区间语义修正（数据正确性）**：宿主用 `encodeSeqRanges` 把连续
+  ≥3 个 seq 无损压缩成 `[start, end]` 闭区间，读盘时 `decodeSeqRanges` 再展开。
+  0.11.2 的 `flat(Infinity)` 会把 `[[3, 6]]` 变成 `3, 6`，丢掉 4、5，写出的 marker
+  被引擎判 `missing 4, 5`。改为 `expandSourceSeqs()` 按闭区间展开并保持首次出现顺序。
+- **`postamble` 幂等（会话损坏 P0）**：旧实现成功路径与 catch 各写一次
+  `noticeWindowPostamble`；postamble/flush 自身抛错时 catch 再写一遍，落成
+  `step/end,turn/end,step/end,turn/end`，宿主读盘直接判
+  `step/end does not match an open turn and step`，整份会话变 corrupt。
+  改为 `closeWindow()` 单点 + `closed` 标志。
+- **composer 回填落盘（「回滚成功但输入框是空的」）**：宿主 `inputActions.setDraft()`
+  只改编辑器、不写 `localStorage`；紧随其后的 `openSession()` 会用
+  `readConversationDraft()` 从旧草稿重读并覆盖。回填后补 `persistDraft()`。
+  对话框入口同理。
+- **`lastRevertable` 排除 `shadowed`**：只判 `visible` 时，回滚刚落盘、索引未刷新的
+  窗口里会再次选中同一 seq → 409 `surface replace: start seq N not found in surface`。
+  `/undo` 成功后同时就地标记 `seq >= target` 行为 shadowed。
+
 ### 0.11.2 · 合成 turn 竞态与历史日志兼容修复
 
 - 修复回滚在 live 会话中可能产生**重复 turn**：`opsCommit` / `opsRestore` 在取得
   live session 后改用 `session.log` 重算 turn 窗口，不再信任可能已过期的磁盘快照。
 - 合成 turn 成功闭合后对齐宿主 idle agent 的 `lastTurn`，防止下一条真实消息复用同一 turn。
 - `planNoticeWindow` 遇到「turn 已开但 step 未开」直接 409，不再嵌套非法合成 turn。
-- `applySurfaceReplace` / `buildMarkerEvent` 对 `sourceEventSeqs` 做扁平化、去重和整数校验，
-  杜绝 `[[start,end]]` 旧伤继续写入。
-- 旧日志中已存在的嵌套 `sourceEventSeqs` 与 tool/result replacement 非 content 字段
-  需用维护脚本修复；本版本保证不再产生该类记录。
+- `applySurfaceReplace` / `buildMarkerEvent` 对 `sourceEventSeqs` 去重和整数校验（0.11.3 起改为正确展开区间），
+  区间成员不再丢失。
+- 旧日志中的区间式 `sourceEventSeqs`（`[[start,end]]`）在 0.11.3 已确认是宿主合法编码，
+  无需维护脚本；tool/result replacement 非 content 字段仍需按需修复。
 - 契约测试在无本地 `sessionfix` 夹具时自动跳过，不再硬依赖个人绝对路径。
 
 ### 0.11.0 · 方向 A 面板 + 会话回收站

@@ -300,11 +300,47 @@ export function noticeWindowPostamble(win) {
   ];
 }
 
+/**
+ * 展开 `sourceEventSeqs` 的存储形态为宿主内存态整数序列。
+ *
+ * ⚠️ 宿主把**连续 ≥3 个** seq 无损压缩成 `[start, end]` 闭区间对
+ * （dsh-session/lib/index.js `encodeSeqRanges`，读盘 `decodeSeqRanges` 再展开）。
+ * 因此 `[[780, 782]]` 表示 **780、781、782 三个**节点，不是「两个端点」。
+ * 早期版本用 `flat(Infinity)` 处理 —— 会把 `[3, 6]` 变成 `3, 6`，
+ * 丢掉区间内的 4、5，写出的 marker 被引擎判 `sourceEventSeqs must include
+ * every shadowed surface node; missing 4, 5` 而 500/409。
+ *
+ * @param {unknown} value 存储形态（整数与/或 `[start, end]` 闭区间）
+ * @returns {number[]} 去重后保持首次出现顺序的整数序列
+ */
+export function expandSourceSeqs(value) {
+  const out = [];
+  const seen = new Set();
+  const push = (seq) => {
+    if (!Number.isSafeInteger(seq)) throw new OpsError("surface replace sources must be integer seqs", 500);
+    if (seen.has(seq)) return;
+    seen.add(seq);
+    out.push(seq);
+  };
+  for (const entry of Array.isArray(value) ? value : []) {
+    if (Array.isArray(entry)) {
+      if (entry.length !== 2) throw new OpsError("surface replace source ranges must be [start, end] pairs", 500);
+      const [start, end] = entry;
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || end < start) {
+        throw new OpsError("surface replace source ranges require integer start <= end", 500);
+      }
+      for (let seq = start; seq <= end; seq += 1) push(seq);
+    } else {
+      push(entry);
+    }
+  }
+  return out;
+}
+
 export function applySurfaceReplace(session, startSeq, endSeq, sourceEventSeqs, noticeText, turnStep) {
   const ts = turnStep && Number.isSafeInteger(turnStep.turn) && turnStep.turn > 0
     ? turnStep : { turn: 1, step: 1 };
-  const sources = [...new Set((Array.isArray(sourceEventSeqs) ? sourceEventSeqs : []).flat(Infinity))];
-  if (!sources.every(Number.isSafeInteger)) throw new OpsError("surface replace sources must be integer seqs", 500);
+  const sources = expandSourceSeqs(sourceEventSeqs);
   const data = { turn: ts.turn, step: ts.step, message: { id: randomUUID(), role: "system", source: messageSource("system", 4), content: [{ type: "text", text: noticeText }] } };
   if (replaceShape) {
     return session.append("system/message", data, { surfaceOp: replaceOpFor(replaceShape, startSeq, endSeq), sourceEventSeqs: sources });
@@ -888,8 +924,7 @@ export function nextSeqFrom(events) {
 
 /** 磁盘回撤/删除标记事件（字段镜像引擎金标准：type/seq/time/data/sourceEventSeqs/surfaceOp）。 */
 export function buildMarkerEvent({ seq, time, turnStep, text, startSeq, endSeq, shadowedSeqs, version = 4 }) {
-  const sources = [...new Set((Array.isArray(shadowedSeqs) ? shadowedSeqs : []).flat(Infinity))];
-  if (!sources.every(Number.isSafeInteger)) throw new OpsError("surface replace sources must be integer seqs", 500);
+  const sources = expandSourceSeqs(shadowedSeqs);
   return {
     type: "system/message",
     seq,

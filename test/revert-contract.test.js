@@ -14,6 +14,7 @@ import assert from 'node:assert/strict'
 import { zstdCompressSync, constants as zlibConstants } from 'node:zlib'
 import { createRequire } from 'node:module'
 import { join, dirname } from 'node:path'
+import { readFileSync } from 'node:fs'
 
 // Optional local contract fixtures. CI does not ship sessionfix; these tests
 // are skipped there rather than hard-failing on a machine-specific path.
@@ -32,6 +33,7 @@ const contractSkip = process.env.SESSIONFIX_CONTRACT !== '1'
 import {
   planNoticeWindow, noticeWindowPreamble, noticeWindowPostamble,
   buildMarkerEvent, buildRestoreNoticeEvent, buildReplayEvent, planRestore, restoreProgress,
+  applySurfaceReplace, expandSourceSeqs,
 } from '../src/ops-core.js'
 
 const HEADER = { type: 'session', version: 4, id: 'contract-test', createdAt: 1, isSeeded: false, delegationDepth: 0 }
@@ -146,10 +148,48 @@ test('planNoticeWindow：turn 已开但 step 未开时拒绝合成（防重号/�
   assert.equal(planNoticeWindow(closed).turn, 8)
 })
 
-test('buildMarkerEvent：嵌套/重复 sourceEventSeqs 必须摊平去重', () => {
+test('buildMarkerEvent：区间展开 + 重复去重（保持首次出现顺序）', () => {
   const ev = buildMarkerEvent({
     seq: 20, time: 1, turnStep: { turn: 2, step: 1 }, text: 'x',
-    startSeq: 3, endSeq: 9, shadowedSeqs: [[3, 6], 6, 7, [9]],
+    startSeq: 3, endSeq: 9, shadowedSeqs: [[3, 6], 6, 7, 9],
   })
-  assert.deepEqual(ev.sourceEventSeqs, [3, 6, 7, 9])
+  assert.deepEqual(ev.sourceEventSeqs, [3, 4, 5, 6, 7, 9])
+})
+
+test('expandSourceSeqs：拒绝非法区间（宿主 encodeSeqRanges 只写 [start,end]）', () => {
+  assert.deepEqual(expandSourceSeqs([[3, 6], 6, 7, 9]), [3, 4, 5, 6, 7, 9])
+  assert.deepEqual(expandSourceSeqs([]), [])
+  assert.throws(() => expandSourceSeqs([[9]]), (e) => e.status === 500)
+  assert.throws(() => expandSourceSeqs([[6, 3]]), (e) => e.status === 500)
+  assert.throws(() => expandSourceSeqs([1, 2.5]), (e) => e.status === 500)
+})
+
+test('buildMarkerEvent：区间成员必须展开（不能只留端点）', () => {
+  const ev = buildMarkerEvent({
+    seq: 20, time: 1, turnStep: { turn: 2, step: 1 }, text: 'x',
+    startSeq: 3, endSeq: 9, shadowedSeqs: [[3, 6], 6, 7, 9],
+  })
+  assert.deepEqual(ev.sourceEventSeqs, [3, 4, 5, 6, 7, 9],
+    '[3,6] 是宿主 encodeSeqRanges 的闭区间，摊成端点会丢 4、5 → 引擎报 missing')
+})
+
+test('applySurfaceReplace：区间成员必须展开且保持首次出现顺序', () => {
+  const appended = []
+  const session = { append: (type, data, opts) => { appended.push(opts); return { seq: 99 } } }
+  applySurfaceReplace(session, 3, 9, [[3, 6], 6, 7], 'x', { turn: 1, step: 1 })
+  assert.deepEqual(appended[0].sourceEventSeqs, [3, 4, 5, 6, 7])
+})
+
+test('postamble 必须幂等：成功路径闭合后 catch 不得再写第二遍', async () => {
+  // 复刻 0.11.2 的回归：postamble 在成功路径写入后，若随后 flush 抛错，
+  // 旧 catch 会再写一遍 → 日志出现 step/end,turn/end,step/end,turn/end，
+  // 宿主读盘判 `step/end does not match an open turn and step`，整份会话 corrupt。
+  const src = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8')
+  const start = src.indexOf('const closeWindow = () => {')
+  assert.ok(start > 0, '找不到 closeWindow 幂等闭合器')
+  const block = src.slice(start, src.indexOf('} finally {', start))
+  assert.ok(block.length > 0, '找不到 opsCommit 的窗口闭合代码')
+  const writes = (block.match(/session\.append\(post\.kind/g) || []).length
+  assert.equal(writes, 1, `postamble 落盘只能有一处，实测 ${writes} 处（多于 1 就会出现重复闭合）`)
+  assert.match(block, /if \(closed\) return/, '必须用幂等标志挡住第二次闭合')
 })

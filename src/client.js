@@ -559,9 +559,15 @@ window.__ModuleLoader__.load({
             // branch 在上面已 return，故 done.restore 分支在此不可达，一并删掉。
             const okMsg = mode === 'revert' ? t('done.revert') : t('done.delete')
             // 0.4.0 composer 回填（opencode 式）：回滚用户消息 → 原文回填输入框，「编辑重发」零按钮
-            if (mode === 'revert' && pickedMsg && pickedMsg.role === 'user' && pickedMsg.fullText
-                && __inputActions && typeof __inputActions.setDraft === 'function') {
-              try { __inputActions.setDraft(pickedMsg.fullText) } catch { /* 回填失败不阻断成功反馈 */ }
+            // 0.11.3：必须走统一出口，且要落盘 —— 直接 setDraft 会被随后的
+            // openSession 用 localStorage 里的旧草稿覆盖（见 refillComposer 注释）。
+            if (mode === 'revert' && pickedMsg && pickedMsg.role === 'user' && pickedMsg.fullText) {
+              try {
+                if (__inputActions && typeof __inputActions.setDraft === 'function') {
+                  __inputActions.setDraft(pickedMsg.fullText)
+                  if (typeof __inputActions.persistDraft === 'function') __inputActions.persistDraft()
+                }
+              } catch (e) { console.warn('[message-ops] refill failed:', e) }
             }
             setDoneMsg(okMsg)
             setBusyMsg('')
@@ -2820,7 +2826,10 @@ window.__ModuleLoader__.load({
       if (!cache || !Array.isArray(cache.rows)) return null
       for (var i = cache.rows.length - 1; i >= 0; i--) {
         var r = cache.rows[i]
-        if (r && r.seq != null && r.visible) return r
+        // 0.11.3：必须同时排除 shadowed。只用 visible 会在「回滚刚落盘、索引还没刷新」
+        // 的窗口里再次选中已被遮蔽的 seq → 服务端 409
+        // `surface replace: start seq N not found in surface`（实测 2026-10-25）。
+        if (r && r.seq != null && r.visible && r.shadowed !== true) return r
       }
       return null
     }
@@ -2858,6 +2867,15 @@ window.__ModuleLoader__.load({
      *
      * 0.9.6 统一出口 —— 此前「5 个入口只有 2 个回填」的事故史见 README「历史事故记录」#5。
      *
+     * 0.11.3 修「回滚成功但输入框还是空的」：
+     *   宿主 `inputActions.setDraft()` **只改编辑器，不落 localStorage**；
+     *   只有 `persistDraft()`（→ 内部 persistCurrentDraft）才写
+     *   `dsh.conversation.<sessionId>`。而所有回滚入口紧接着都调
+     *   `openSession()` 重挂会话视图，挂载时 shell 会
+     *   `setDraft(readConversationDraft(sessionId))` —— 从 localStorage 重读。
+     *   于是刚回填的文本被旧草稿（常见为空）覆盖回去，用户看到的就是空输入框。
+     *   修法：回填后立刻 `persistDraft()` 落盘，让重建读到的就是同一份草稿。
+     *
      * 取文本规则：rowsCache 里 seq <= boundary 的最后一条带 fullText 的行。
      *   - /undo        → boundary 就是被回滚的那条用户消息 → 取到它自己 ✓
      *   - AI 时钟按钮  → boundary 是 AI 消息 seq → 取到它之前那条用户消息 ✓
@@ -2873,6 +2891,10 @@ window.__ModuleLoader__.load({
         if (!rows.length) return false
         if (!__inputActions || typeof __inputActions.setDraft !== 'function') return false
         __inputActions.setDraft(rows[rows.length - 1].fullText)
+        // 关键：不落盘的话，紧随其后的 openSession 会从 localStorage 读回旧草稿。
+        if (typeof __inputActions.persistDraft === 'function') {
+          try { __inputActions.persistDraft() } catch (e) { console.warn('[message-ops] persistDraft failed:', e) }
+        }
         return true
       } catch (e) {
         // 原来这里 `catch {}` 完全静默 —— 失败了连痕迹都没有，排查时看不到
@@ -2899,6 +2921,15 @@ window.__ModuleLoader__.load({
         .then(async (res) => {
           const data = await res.json().catch(() => ({}))
           if (!res.ok || !data.ok) throw new Error(data.error || ('HTTP ' + res.status))
+          // 0.11.3：立刻把本行标成已遮蔽，否则 afterWrite 的异步刷新窗里
+          // 再点一次 /undo 仍会选中同一个 seq → 409。
+          const rowsCache = __peekRowsCache ? __peekRowsCache() : null
+          if (rowsCache && Array.isArray(rowsCache.rows)) {
+            for (const r of rowsCache.rows) {
+              if (r && typeof r.seq === 'number' && r.seq >= target.seq) r.shadowed = true
+            }
+            rowsCache.at = 0
+          }
           refillComposer(rawSid, target.seq)   // 先回填，再重建视图（与对话框一致）
           afterWrite(rawSid, __t('undo.done.undo'))
         })
