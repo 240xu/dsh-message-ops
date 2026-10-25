@@ -126,3 +126,28 @@ test('lastRevertable 必须排除 shadowed（防二次 /undo 命中已遮蔽 seq
   assert.match(m[0], /shadowed\s*!==\s*true/,
     '只判 visible 时，回滚刚落盘、索引未刷新的窗口里会再次选中同一 seq')
 })
+
+test('回填行为契约：只 setDraft 会被 openSession 覆盖，补 persistDraft 才存活', () => {
+  // 宿主最小模型：setDraft 只改编辑器；persistDraft 才写 localStorage；
+  // openSession 挂载时从 localStorage 重读草稿（dsh-client-ui-conversation
+  // readConversationDraft + shell.setDraft(readConversationDraft(...))）。
+  const store = new Map()
+  let editor = ''
+  const shell = {
+    setDraft(t) { editor = t },
+    persistDraft() { store.set('dsh.conversation.sid', JSON.stringify({ draft: editor })) },
+  }
+  const openSession = () => {
+    const raw = store.get('dsh.conversation.sid')
+    editor = raw ? JSON.parse(raw).draft : ''
+  }
+
+  shell.setDraft('继续')
+  openSession()
+  assert.equal(editor, '', '只 setDraft 时会被空旧草稿覆盖 —— 用户看到的空输入框')
+
+  shell.setDraft('继续')
+  shell.persistDraft()
+  openSession()
+  assert.equal(editor, '继续', 'setDraft + persistDraft 后重建视图仍保有回填内容')
+})
