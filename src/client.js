@@ -425,13 +425,25 @@ window.__ModuleLoader__.load({
     }
 
     // 头部按钮图标：三叉分支（git-branch 风格，16x16）。
-    const BRANCH_PATH = 'M5 2.5a2 2 0 1 1-.9 3.78v3.44a2 2 0 1 1-1.2 0V6.28A2 2 0 1 1 5 2.5Zm0 1.2a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6ZM3.5 11.5a.8.8 0 1 0 1.6 0 .8.8 0 0 0-1.6 0ZM12.5 2.5a2 2 0 0 1 .6 3.9v.85c0 1.9-1.54 3.44-3.44 3.44H8.03a2 2 0 1 1 0-1.2h1.63a2.24 2.24 0 0 0 2.24-2.24V6.4a2 2 0 0 1 .6-3.9Zm0 1.2a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6Z'
+    // ⚠️ 这条 path 是按**描边**（stroke）设计的：圆点用 arc 画、连接线用
+    // `v3.44` / `V6.28` / `v.85` 这类**零宽度线段**。若用 fill 渲染，线段没有
+    // 面积 → 整条分支线消失，只剩几个孤立色块（0.11.x 实测症状：
+    // 「那个 svg 渲染有问题」）。必须 stroke + round cap/join。
+    const BRANCH_PATHS = [
+      'M5 2.5a2 2 0 1 1-.9 3.78v3.44a2 2 0 1 1-1.2 0V6.28A2 2 0 1 1 5 2.5Zm0 1.2a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6ZM3.5 11.5a.8.8 0 1 0 1.6 0 .8.8 0 0 0-1.6 0ZM12.5 2.5a2 2 0 0 1 .6 3.9v.85c0 1.9-1.54 3.44-3.44 3.44H8.03a2 2 0 1 1 0-1.2h1.63a2.24 2.24 0 0 0 2.24-2.24V6.4a2 2 0 0 1 .6-3.9Zm0 1.2a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6Z',
+    ]
 
     function BranchIcon() {
       return React.createElement('svg', {
         width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none',
         xmlns: 'http://www.w3.org/2000/svg',
-      }, React.createElement('path', { d: BRANCH_PATH, fill: 'currentColor' }))
+        'aria-hidden': 'true', focusable: 'false',
+      }, React.createElement('path', {
+        d: BRANCH_PATHS[0],
+        stroke: 'currentColor', strokeWidth: 1.4,
+        strokeLinecap: 'round', strokeLinejoin: 'round',
+        fill: 'none',
+      }))
     }
 
     // --- 共享对话框 -------------------------------------------------------------
@@ -758,8 +770,11 @@ window.__ModuleLoader__.load({
         const tag = document.createElement('style')
         tag.id = 'dsh-message-ops-panel-style'
         tag.textContent = [
-          '.mopsPanelScrim{position:fixed;inset:0;z-index:1200;background:rgba(15,17,21,.18);display:flex;justify-content:flex-end}',
-          '.mopsPanel{width:560px;max-width:100vw;height:100%;display:flex;flex-direction:column;background:var(--dsw-alias-bg-primary,#fff);color:var(--dsw-alias-label-primary,#0f1115);border-left:1px solid var(--dsw-alias-border-l2,#e6e6e6);box-shadow:-16px 0 48px rgba(15,17,21,.14);font-family:inherit;font-size:13px;line-height:1.45}',
+          '.mopsPanelScrim{position:fixed;inset:0;z-index:1200;background:rgba(15,17,21,.28);display:flex;align-items:center;justify-content:center;padding:24px;animation:mopsFade .12s ease-out}',
+          '@keyframes mopsFade{from{opacity:0}to{opacity:1}}',
+          '@keyframes mopsRise{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:none}}',
+          '.mopsPanel{width:560px;max-width:min(560px,100%);height:min(760px,100%);max-height:100%;display:flex;flex-direction:column;background:var(--dsw-alias-bg-primary,#fff);color:var(--dsw-alias-label-primary,#0f1115);border:1px solid var(--dsw-alias-border-l2,#e6e6e6);box-shadow:0 24px 64px rgba(15,17,21,.24);font-family:inherit;font-size:13px;line-height:1.45;animation:mopsRise .16s cubic-bezier(.2,.8,.3,1)}',
+          '@media(prefers-reduced-motion:reduce){.mopsPanelScrim,.mopsPanel{animation:none}}',
           '.mopsPanel *{box-sizing:border-box}',
           '.mopsPanel button{font:inherit;color:inherit;border-radius:0}',
           '.mopsPanelHead{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:16px 18px 12px;border-bottom:1px solid var(--dsw-alias-border-l2,#e6e6e6)}',
@@ -825,7 +840,7 @@ window.__ModuleLoader__.load({
           '.mopsTrashMain{flex:1;min-width:0}',
           '.mopsTrashTitle{font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
           '.mopsTrashMeta{font-size:10px;color:var(--dsw-alias-label-tertiary,#8a8a8e);margin-top:2px}',
-          '@media(max-width:760px){.mopsPanel{width:100vw;border-left:0}.mopsDetail{max-height:42%}}',
+          '@media(max-width:760px){.mopsPanelScrim{padding:0}.mopsPanel{width:100%;height:100%;max-width:100%;max-height:100%;border:0}.mopsDetail{max-height:42%}}',
         ].join('')
         document.head.appendChild(tag)
       } catch { /* style failure must not break the panel */ }
