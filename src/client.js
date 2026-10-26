@@ -429,9 +429,20 @@ window.__ModuleLoader__.load({
     // `v3.44` / `V6.28` / `v.85` 这类**零宽度线段**。若用 fill 渲染，线段没有
     // 面积 → 整条分支线消失，只剩几个孤立色块（0.11.x 实测症状：
     // 「那个 svg 渲染有问题」）。必须 stroke + round cap/join。
-    const BRANCH_PATHS = [
-      'M5 2.5a2 2 0 1 1-.9 3.78v3.44a2 2 0 1 1-1.2 0V6.28A2 2 0 1 1 5 2.5Zm0 1.2a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6ZM3.5 11.5a.8.8 0 1 0 1.6 0 .8.8 0 0 0-1.6 0ZM12.5 2.5a2 2 0 0 1 .6 3.9v.85c0 1.9-1.54 3.44-3.44 3.44H8.03a2 2 0 1 1 0-1.2h1.63a2.24 2.24 0 0 0 2.24-2.24V6.4a2 2 0 0 1 .6-3.9Zm0 1.2a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6Z',
-    ]
+    // 唯一数据源：所有图标入口（React 组件 / innerHTML 字符串）都从这里取，
+    // 以免再次出现「一处改名、另一处仍用旧名 → d="undefined"」的回归。
+    const BRANCH_PATH = 'M5 2.5a2 2 0 1 1-.9 3.78v3.44a2 2 0 1 1-1.2 0V6.28A2 2 0 1 1 5 2.5Zm0 1.2a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6ZM3.5 11.5a.8.8 0 1 0 1.6 0 .8.8 0 0 0-1.6 0ZM12.5 2.5a2 2 0 0 1 .6 3.9v.85c0 1.9-1.54 3.44-3.44 3.44H8.03a2 2 0 1 1 0-1.2h1.63a2.24 2.24 0 0 0 2.24-2.24V6.4a2 2 0 0 1 .6-3.9Zm0 1.2a.8.8 0 1 0 0 1.6.8.8 0 0 0 0-1.6Z'
+    const BRANCH_STROKE = 1.4
+
+    /** 生成分支图标的 SVG 标记（供 innerHTML 场景复用）。 */
+    function branchIconMarkup(size) {
+      const px = size || 16
+      return '<svg width="' + px + '" height="' + px + '" viewBox="0 0 16 16" fill="none"'
+        + ' xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"'
+        + ' style="flex:none"><path d="' + BRANCH_PATH + '" fill="none"'
+        + ' stroke="currentColor" stroke-width="' + BRANCH_STROKE + '"'
+        + ' stroke-linecap="round" stroke-linejoin="round"/></svg>'
+    }
 
     function BranchIcon() {
       return React.createElement('svg', {
@@ -439,8 +450,8 @@ window.__ModuleLoader__.load({
         xmlns: 'http://www.w3.org/2000/svg',
         'aria-hidden': 'true', focusable: 'false',
       }, React.createElement('path', {
-        d: BRANCH_PATHS[0],
-        stroke: 'currentColor', strokeWidth: 1.4,
+        d: BRANCH_PATH,
+        stroke: 'currentColor', strokeWidth: BRANCH_STROKE,
         strokeLinecap: 'round', strokeLinejoin: 'round',
         fill: 'none',
       }))
@@ -2732,7 +2743,7 @@ window.__ModuleLoader__.load({
         'font:inherit', 'font-size:13px', 'line-height:20px',
         'text-align:left', 'border-radius:6px', 'cursor:pointer',
       ].join(';')
-      item.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex:none"><path d="' + BRANCH_PATH + '" fill="currentColor"/></svg><span></span>'
+      item.innerHTML = branchIconMarkup(16) + '<span></span>'
       item.querySelector('span').textContent = __t('menu.ops')
       item.addEventListener('mouseenter', function () {
         item.style.background = 'var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.14))'
