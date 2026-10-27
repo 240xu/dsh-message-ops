@@ -2245,7 +2245,8 @@ window.__ModuleLoader__.load({
     }
 
     // --- 0.7.0 用户消息「回滚」按钮（DOM 注入，挂在官方动作行内）-------------------
-    // 官方用户消息的动作行 = .xzv4MW_actions（含 Copy，height28，位于消息下方 16px），
+    // 官方用户消息的动作行类名是 CSS Module（哈希 + `_actions` 后缀，含 Copy，height28，位于消息下方 16px）。
+    // 哈希随 DSH 构建变化（实测 xzv4MW_actions / xD_KDq_actions），只能按后缀匹配。
     // 可见性由宿主 [data-actions-reveal] 控制。把按钮 append 进该行、与 Copy 同级同层，
     // 可见性天然继承宿主动作行（不再自己玩 hover）。0.6.0 的 absolute 覆盖教训见 README「历史事故记录」#2。
     function installUserRevertInjector() {
@@ -2463,14 +2464,15 @@ window.__ModuleLoader__.load({
         return { hidden, unresolved, shown };
       };
 
-      // 用户消息锚点：优先官方 Sixlwa_userRow（含 .xzv4MW_actions），回退 flow-kind 属性
+      // 用户消息锚点：优先官方动作行（CSS Module 后缀 `_actions`），回退 flow-kind 属性。
       // 锚点 = 每条用户消息自己的容器（一个块只算一次）：
-      // 从官方动作行 .xzv4MW_actions 反查最近的消息容器，最贴近"一条消息"的粒度。
+      // 从官方动作行反查最近的消息容器，最贴近"一条消息"的粒度。
+      // 哈希随构建变化，写死某一版（xzv4MW_actions）会让锚点集为空。
       var userAnchors = () => {
         const out = []
         const seen = new Set()
         const add = (el) => { if (el && !seen.has(el)) { seen.add(el); out.push(el) } }
-        const rows = Array.from(document.querySelectorAll('[class*="xzv4MW_actions"]'))
+        const rows = Array.from(document.querySelectorAll('[class*="_actions"]'))
         for (const r of rows) {
           const block = r.closest('[data-chat-flow-kind="user"]')
             || r.closest('[class*="_userRow"], [class*="_userStack"], [class*="_bubble"]')
@@ -2614,12 +2616,19 @@ window.__ModuleLoader__.load({
           })
       }
       var ensureBtn = (block) => {
-        // 官方动作行（含 Copy）：把按钮放到这一行里，与 Copy 同级
-        let host = block.querySelector('[class*="xzv4MW_actions"]')
+        // 官方动作行（含 Copy）：把按钮放到这一行里，与 Copy 同级。
+        // 类名是 CSS Module「哈希_actions」，写死 xzv4MW_actions 会永远匹配不上，
+        // 于是每次 scan 都新建一行 mopsUserActionsRow（issue #1：一列增殖的回滚按钮）。
+        // 先复用自家行，再按后缀找官方行；找不到才新建，并清掉历史遗留的重复行。
+        let host = block.querySelector('.mopsUserActionsRow')
+        if (!host) host = block.querySelector('[class*="_actions"]')
         if (!host) {
           host = document.createElement('div')
           host.className = 'mopsUserActionsRow'
           block.appendChild(host)
+        }
+        for (const row of block.querySelectorAll('.mopsUserActionsRow')) {
+          if (row !== host && !row.contains(host)) row.remove()
         }
         let btn = host.querySelector('.mopsUserRevert')
         if (btn) return btn
@@ -2704,7 +2713,7 @@ window.__ModuleLoader__.load({
         //    这是正确性问题，不只是性能。
         // ③ attributeFilter 只盯 data-chat-node-key：本插件不写该属性（写的是
         //    data-mops-seq / hidden），所以不会被自己触发成环。
-        var MO_SEL = '[data-chat-node-key],[data-chat-flow-kind="user"],[class*="xzv4MW_actions"],[class*="_userRow"]'
+        var MO_SEL = '[data-chat-node-key],[data-chat-flow-kind="user"],[class*="_actions"],[class*="_userRow"]'
         var scanPendingSince = 0
         var scheduleScan = () => {
           var now = Date.now()

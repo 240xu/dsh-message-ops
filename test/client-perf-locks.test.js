@@ -68,7 +68,8 @@ test('P1-2：MO 回调先过滤，matches 与 querySelector 两者都试', () =>
   assert.ok(/n\.querySelector\(MO_SEL\)/.test(src), '新增子树可能是祖先容器')
   assert.ok(/catch \{ scheduleScan\(\) \}/.test(src), '过滤自身出错必须放行（宁可多扫一次）')
   assert.ok(/MO_SEL = '\[data-chat-node-key\]/.test(src), '选择器必须覆盖宿主 chat 行')
-  assert.ok(/\[class\*="xzv4MW_actions"\]/.test(src), '选择器必须覆盖官方用户动作行')
+  assert.ok(/\[class\*="_actions"\]/.test(src), '选择器必须按 _actions 后缀覆盖官方用户动作行（哈希随构建变化）')
+  assert.ok(!/\[class\*="xzv4MW_actions"\]/.test(src), '不许写死某一版 CSS Module 哈希')
 })
 
 test('P1-2：防抖 trailing 200ms + maxWait（连续 mutation 不许无限推迟）', () => {
