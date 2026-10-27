@@ -1097,14 +1097,52 @@ window.__ModuleLoader__.load({
           else if (panelRef.current) panelRef.current.focus()
         }, 0)
         const scrim = scrimRef.current
-        const parent = scrim && scrim.parentElement
         const hidden = []
-        if (parent) {
-          for (const child of Array.from(parent.children)) {
-            if (child === scrim || child.tagName === 'SCRIPT' || child.tagName === 'STYLE') continue
+        // 0.11.8：槽位会把 scrim 挂进一个**只有 scrim 自己**的独立容器，
+        // 于是「遍历 parent.children」永远遍历不到真实背景 —— inert 形同虚设
+        // （实测：inert=false，Tab 能跑到背后的会话列表，读屏也读得到）。
+        // 正确做法是从宿主挂载点（body 直接子节点）出发，把**包含 scrim 的那条
+        // 祖先链之外**的兄弟节点全部隔离；祖先链本身不能 inert（会连面板一起废掉）。
+        if (scrim && document.body) {
+          const chain = new Set()
+          for (let el = scrim; el && el !== document.body; el = el.parentElement) chain.add(el)
+          for (const child of Array.from(document.body.children)) {
+            if (chain.has(child)) continue
+            if (child.tagName === 'SCRIPT' || child.tagName === 'STYLE' || child.tagName === 'LINK') continue
             hidden.push({ child, inert: child.hasAttribute('inert'), aria: child.getAttribute('aria-hidden') })
             child.setAttribute('inert', '')
             child.setAttribute('aria-hidden', 'true')
+          }
+          // 祖先链上的每一层：把**除当前链节点以外**的兄弟也隔离掉。
+          // 典型结构 body > #root > ... > 槽位容器 > scrim，中途每层都可能带界面。
+          for (const el of chain) {
+            const parent = el.parentElement
+            if (!parent || parent === document.body) continue
+            for (const sib of Array.from(parent.children)) {
+              if (sib === el || chain.has(sib)) continue
+              if (sib.tagName === 'SCRIPT' || sib.tagName === 'STYLE' || sib.tagName === 'LINK') continue
+              hidden.push({ child: sib, inert: sib.hasAttribute('inert'), aria: sib.getAttribute('aria-hidden') })
+              sib.setAttribute('inert', '')
+              sib.setAttribute('aria-hidden', 'true')
+            }
+          }
+        }
+        // 居中模态必须锁背景滚动：否则滚轮/触屏拖拽会把背后的会话列表滚走，
+        // 关闭后视口停在别处。用 overflow:hidden 而非 position:fixed，
+        // 后者会丢失滚动位置。保留原有内联值以便精确还原。
+        const body = document.body
+        const prevOverflow = body && body.style ? body.style.overflow : ''
+        const prevPaddingRight = body && body.style ? body.style.paddingRight : ''
+        let scrollbarW = 0
+        try {
+          scrollbarW = window.innerWidth - document.documentElement.clientWidth
+        } catch { /* non-browser */ }
+        if (body && body.style) {
+          body.style.overflow = 'hidden'
+          // 为被隐藏的经典滚动条补回等宽内边距，避免整页横向跳动。
+          if (scrollbarW > 0) {
+            const base = Number.parseFloat(getComputedStyle(body).paddingRight) || 0
+            body.style.paddingRight = (base + scrollbarW) + 'px'
           }
         }
         return () => {
@@ -1113,6 +1151,10 @@ window.__ModuleLoader__.load({
             if (!item.inert) item.child.removeAttribute('inert')
             if (item.aria === null) item.child.removeAttribute('aria-hidden')
             else item.child.setAttribute('aria-hidden', item.aria)
+          }
+          if (body && body.style) {
+            body.style.overflow = prevOverflow
+            body.style.paddingRight = prevPaddingRight
           }
           if (openRef.current) return
           const trigger = triggerRef.current
