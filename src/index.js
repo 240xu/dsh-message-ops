@@ -497,6 +497,7 @@ async function opsList(targetCtx, sessionId, opts = {}) {
     ? messages.map((m) => ({
       seq: m.seq,
       role: m.role,
+      type: m.type,
       snippet: m.snippet,
       time: m.time,
       visible: m.visible,

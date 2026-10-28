@@ -1789,6 +1789,8 @@ window.__ModuleLoader__.load({
       const summary = sessions && sessions.byId ? sessions.byId[sessionId] : undefined
       const running = summary ? summary.running === true : false
       const [seq, setSeq] = React.useState(null)
+      const [role, setRole] = React.useState(null)
+      const [type, setType] = React.useState(null)
       const [fullText, setFullText] = React.useState(null)
       const [busy, setBusy] = React.useState(null) // 'revert' | null（S11 双提交防护）
       // 0.9.7（P4）：索引被 dataSig 重建后要重跑解析，否则「新 AI 消息旁
@@ -1811,7 +1813,7 @@ window.__ModuleLoader__.load({
               for (const m of (data && data.messages) || []) {
                 // 0.5.2（P2）：同 id 取**最早** seq——与服务端 buildSeqIndex 口径一致
                 // （重试链取最早可见节点；此前内联 set 覆盖=取最大，双实现分裂）
-                if (m && m.id != null && !index.has(String(m.id))) index.set(String(m.id), m.seq)
+                if (m && m.id != null && !index.has(String(m.id))) index.set(String(m.id), { seq: m.seq, role: m.role, type: m.type })
                 if (m && m.id != null && m.fullText) full.set(String(m.id), m.fullText)
               }
               __seqIndexCache.set(sessionId, index)
@@ -1828,7 +1830,7 @@ window.__ModuleLoader__.load({
         const resolve = (index) => {
           if (!alive) return
           const hit = index && index.get(String(messageId))
-          if (typeof hit === 'number') { setSeq(hit); return }
+          if (hit && typeof hit.seq === 'number') { setSeq(hit.seq); setRole(hit.role); setType(hit.type); return }
           // 0.9.7（P4）：索引里没有这个 messageId = 会话已增长（或索引过期）。
           // 旧实现这里**什么都不做**，`seq` 永远是 null → 组件 return null →
           // 按钮再也不渲染。现在失效并重拉一次（retried 保证不自旋）；
@@ -1926,6 +1928,12 @@ window.__ModuleLoader__.load({
       }
 
       if (seq == null) return null
+      // 0.11.x：只对真实对话轮次(user/assistant 文本)提供回滚/引用;
+      // 工具结果、思考/推理步骤、系统事件在索引里 role=assistant 或无回滚语义,
+      // 且服务端 buildSeqIndex 本就跳过 tool/call(ops-core.js:409)。
+      // 端点原本只回传 role、不回传 type,这里用 type 是否以 "/message" 结尾判定真实轮次。
+      if (role === 'system' || role === 'tool') return null
+      if (!type || !/message$/.test(type)) return null
       const act = (icon, label, mode, onClick, disabled) => React.createElement('button', {
         type: 'button', title: running && mode === 'revert' ? t('dialog.runningWarn') : label,
         'aria-label': label, disabled: !!disabled,
