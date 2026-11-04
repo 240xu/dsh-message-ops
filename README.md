@@ -891,6 +891,48 @@ min fence=10 → seq>=10 全藏 → 4792/4793 全被隐藏 → 正文几乎空�
 | `src/index.js:336-340` `revertFences` 塌缩复盘 | 「0.9.4 · 修「正文几乎空白」」 |
 | `src/ops-core.js:551-557` 0.5.7 磁盘路径复盘 | 「0.5.7 · 第四层根因：store-miss 会话的磁盘追加路径」 |
 
+### 0.13.1 · 修第二轮对抗审查的两个 HIGH
+
+**HIGH-1｜隐藏官方 branch 按钮在 0.2.2-alpha.2 上 100% 无效。**
+0.12.0 用 `svg path` 的 `d` 前缀 `M13.0762…` 识别官方 branch 图标 —— 但该版本图标已改为
+**sprite 复用**，官方组件（app bundle 里的工厂 `T(e,t)`）渲染的是：
+
+```html
+<svg data-icon="dsw-icon-branch-outline-regular" aria-hidden="true">
+  <use href="#dsw-icon-branch-outline-regular"/>
+</svg>
+```
+
+**DOM 里根本没有 `<path>`**，`M13.0762` 在整个已安装 dsh 里 0 次命中 → `d` 恒为空 →
+`suppressHostBranch()` 一个按钮也藏不掉，且静默失效、无报错。
+更糟的是 `test/fork-dom-behavior.test.js` 当时用自造的 `<path d="M13.0762…">` 夹具，
+**测的是自己的假设，不是宿主现实**，所以一直绿。
+修法：主判据改为 `svg[data-icon="dsw-icon-branch-outline-regular"]`（id 由工厂
+`Qv(e,t)=`dsw-icon-${name}-${size}`` 生成，属契约级常量），保留内联 path 作为旧宿主兼容回退；
+测试夹具换成真实的 `<use>` 形状。
+
+**HIGH-2｜审查者认为面板分叉恒走坏回退 —— 复核后不成立。**
+报告称 `OpsDialog` 没带 `&view=compact` 所以 `turnStartSeq` 恒 `undefined`。
+实测（`_internals.opsList` 对同一会话跑 full / compact 两遍）：full view 同样返回
+`turnStartSeq = 4`，因为 `buildDerived` 是把它挂在**消息对象本身**上，而非 compact
+分支返回的就是这些完整消息对象 —— compact 只是挑了字段子集，不是唯一来源。
+故未改动。
+
+**其余三条 MED 的复核结论**：
+- `seq - 1` 回退对 `inheritedEventCount` 会话不成立 → **不成立**。实测 9 个
+  `isSeeded` 子会话，seq 均从 0 重新编号（`minSeq=0`），`inheritedEventCount` 只是日志
+  长度统计，不偏移 seq；restore 副本同理（服务端按新 seq 重算 `turnStartSeq`）。
+- `persistDraft` 空转却报成功 → **成立**，已修：写入后**回读** `dsh.conversation.<sid>`，
+  对不上就报 `panel.editUnavailable` 且**不 close**。
+- 160 字截断的 snippet 冒充原文 → **成立**，已修：新增显式 `detailFull` 状态，
+  `/text` 失败即降级为 `false`，编辑按钮要求 `detailFull === true`。
+
+**两条 LOW 均成立并已修**：`revert.unresolved` 从未定义（改用已有的
+`slot.revertUnmatched`）；`OpsDialog` 的 `op.branch` 文案仍是旧「含该条」语义（改为 before）。
+
+新增 `test/reviewer-round2.test.js`（8 条），其中 i18n 锁会扫出**任何**未定义的
+`__t('…')` key。测试 276（272 pass / 4 skip）。
+
 ### 0.13.0 · 代码风格官方化 + 拆掉「格式被测试冻住」的问题
 
 **风格**（与 `~/.dsh/deepseek-harness-master/.oxlintrc.json` 的 `@stylistic/*` 规则一致）：

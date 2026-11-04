@@ -76,6 +76,8 @@ test('分叉图标复用官方 IconBranchOutline16 路径，且显式声明填�
   assert.match(body, /M13\.0762 1\.37207/, '图标路径必须取官方 IconBranchOutline16（不自己画）')
   assert.match(body, /fill="currentColor"/, '官方图标是填充几何，必须 currentColor')
   assert.doesNotMatch(body, /stroke="currentColor"/, '填充几何不能同时描边（会变粗）')
+  // 我们注入的是**内联 path**（自己画的 button），与宿主 sprite 形态无关；
+  // 但识别宿主按钮时必须认 sprite —— 见 fork-dom-behavior.test.js。
 })
 
 test('块内按钮统一同步（新增分叉后不能只同步回滚）', () => {
@@ -91,9 +93,10 @@ test('官方 AI 消息的 branch 按钮被隐藏（按图标路径识别，不�
   assert.match(scanBody, /\[data-turn-tail\] button/, '作用域必须限定在 assistant turn-tail 内')
   assert.match(scanBody, /isHostBranchButton\(btn\)/, '判定必须来自单一纯函数')
   const pure = block('isHostBranchButton')
-  assert.match(pure, /HOST_BRANCH_D_PREFIX/, '必须按官方 IconBranchOutline16 的 path 前缀识别')
+  assert.match(pure, /HOST_BRANCH_ICON_ID/, '主判据必须是 sprite 的 data-icon id（0.2.2-alpha.2 无 <path>）')
+  assert.match(pure, /HOST_BRANCH_D_PREFIX/, '同时保留旧宿主的内联 path 回退')
   assert.doesNotMatch(pure, /aria-label/, 'aria-label 有 8 种语言，不能作为识别依据')
-  assert.match(pure, /HOST_BRANCH_CLASS/, '必须排除自己注入的分叉按钮（它复用同一 path）')
+  assert.match(pure, /HOST_BRANCH_CLASS/, '必须排除自己注入的分叉按钮（它复用同一图标）')
 })
 
 test('scan 每轮都会重新隐藏官方 branch（视图重建后仍生效）', () => {

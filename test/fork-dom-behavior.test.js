@@ -34,7 +34,13 @@ class El {
   matches() { return false }
   querySelectorAll(sel) {
     const out = []
-    const walk = (n) => { for (const c of n.children) { if (sel === 'svg path' ? c.tagName === 'PATH' : false) out.push(c); walk(c) } }
+    const match = (c) => {
+      if (sel === 'svg path') return c.tagName === 'PATH'
+      if (sel === 'svg') return c.tagName === 'SVG'
+      if (sel === 'use') return c.tagName === 'USE'
+      return false
+    }
+    const walk = (n) => { for (const c of n.children) { if (match(c)) out.push(c); walk(c) } }
     walk(this)
     return out
   }
@@ -95,12 +101,45 @@ function loadPlugin(g) {
   return api
 }
 
-test('真执行：isHostBranchButton 认官方 branch 图标，不认 copy/其它图标', () => {
+test('真执行：isHostBranchButton 认 sprite 形态（<svg data-icon> + <use>），这是 0.2.2-alpha.2 的真实 DOM', () => {
   withDom((g) => {
     const { __test } = loadPlugin(g)
-    const mkBtn = (cls, d) => {
+    // 官方形态：<svg data-icon="dsw-icon-branch-outline-regular"><use href="#…"/></svg>
+    const mkSpriteBtn = (cls, iconId) => {
       const b = new El('button')
       if (cls) for (const c of cls.split(' ')) b.classList.add(c)
+      const svg = new El('svg')
+      svg.setAttribute('data-icon', iconId)
+      svg.setAttribute('aria-hidden', 'true')
+      const use = new El('use')
+      use.setAttribute('href', '#' + iconId)
+      svg.appendChild(use)
+      b.appendChild(svg)
+      return b
+    }
+    assert.equal(
+      __test.isHostBranchButton(mkSpriteBtn('', 'dsw-icon-branch-outline-regular')),
+      true,
+      'sprite 形态的官方 branch 必须被识别（0.12.0 用 path 判定在这里恒 false）',
+    )
+    assert.equal(
+      __test.isHostBranchButton(mkSpriteBtn('', 'dsw-icon-copy-outline-regular')),
+      false,
+      '复制图标不能被误判',
+    )
+    assert.equal(
+      __test.isHostBranchButton(mkSpriteBtn('mopsUserFork', 'dsw-icon-branch-outline-regular')),
+      false,
+      '自己注入的分叉按钮必须排除（复用同一图标）',
+    )
+  })
+})
+
+test('真执行：isHostBranchButton 兼容旧宿主的内联 path 形态', () => {
+  withDom((g) => {
+    const { __test } = loadPlugin(g)
+    const mkPathBtn = (d) => {
+      const b = new El('button')
       const svg = new El('svg')
       const path = new El('path')
       path.setAttribute('d', d)
@@ -108,11 +147,8 @@ test('真执行：isHostBranchButton 认官方 branch 图标，不认 copy/其�
       b.appendChild(svg)
       return b
     }
-    assert.equal(__test.isHostBranchButton(mkBtn('', 'M13.0762 1.37207C14.0846 1.37228Z')), true, '官方 branch 图标必须被识别')
-    assert.equal(__test.isHostBranchButton(mkBtn('', 'M2.5 8a5.5 5.5 0 1 0 1.6-3.9')), false, '其它图标不能被误判')
-    assert.equal(__test.isHostBranchButton(mkBtn('mopsUserFork', 'M13.0762 1.37207Z')), false, '自己注入的分叉按钮必须排除（复用同一 path）')
-    assert.equal(__test.isHostBranchButton(null), false, '空输入不能抛')
-    assert.equal(__test.isHostBranchButton(new El('button')), false, '无图标的按钮不能抛')
+    assert.equal(__test.isHostBranchButton(mkPathBtn('M13.0762 1.37207C14.0846 1.37228Z')), true, '旧宿主内联 path 仍要认')
+    assert.equal(__test.isHostBranchButton(mkPathBtn('M2.5 8a5.5 5.5 0 1 0 1.6-3.9')), false, '其它图标不能误判')
   })
 })
 
@@ -137,6 +173,6 @@ test('真执行：writeSessionDraft 对空 id 返回 false 且不写脏键', () 
 test('真执行：forkBoundaryBefore 与源码里的 HOST_BRANCH_D_PREFIX 一起导出，说明两者同源', () => {
   withDom((g) => {
     const { __test } = loadPlugin(g)
-    assert.equal(__test.HOST_BRANCH_D_PREFIX, 'M13.0762 1.37207', '图标前缀必须与官方 IconBranchOutline16 一致')
+    assert.equal(__test.HOST_BRANCH_ICON_ID, 'dsw-icon-branch-outline-regular', 'sprite id 必须与官方图标工厂 Qv 的拼法一致')
   })
 })

@@ -129,8 +129,8 @@ window.__ModuleLoader__.load({
       'op.revertDesc': '遮蔽所选消息及其后所有可见内容；日志 append-only，可通过重新发送恢复语境。',
       'op.delete': '仅删除这一条',
       'op.deleteDesc': '仅遮蔽所选的一条消息；其余内容保持不变。',
-      'op.branch': '从此条分支为新会话',
-      'op.branchDesc': '复制所选消息（含）之前的全部事件为新会话（原会话不变，非破坏操作）。',
+      'op.branch': '从此条分叉为新会话',
+      'op.branchDesc': '把此条之前的对话复制到新会话，并把此条原文放回新会话输入框（原会话不变，非破坏操作）。',
       'slot.revert': '回滚到此条',
       'slot.revertUnmatched': '在日志里定位不到这条消息的 seq（通常是模型写的摘要与渲染文本偏差过大）——请改用「消息操作」对话框。',
       'slot.fork': '从此条分叉',
@@ -212,6 +212,7 @@ window.__ModuleLoader__.load({
       'panel.editDone': '原文已放回输入框',
       'panel.editEmpty': '这条消息没有可编辑的文本',
       'panel.editUnavailable': '编辑器不可写（会话可能正在运行或尚未挂载）',
+      'panel.editNotReady': '全文尚未就绪（列表只带 160 字摘要）——请重试或改用回滚回填',
       'panel.openNew': '打开新会话',
       'panel.revertDone': '回滚已生效',
       'panel.deleteDone': '删除已生效',
@@ -254,8 +255,9 @@ window.__ModuleLoader__.load({
         'Shadows the picked message and all later visible content; the log stays append-only so context can be restored by re-sending.',
       'op.delete': 'Delete only this message',
       'op.deleteDesc': 'Shadows only the picked message; everything else stays.',
-      'op.branch': 'Branch into a new session from here',
-      'op.branchDesc': 'Copies everything up to and including the picked message into a new session (original untouched, non-destructive).',
+      'op.branch': 'Fork into a new session from here',
+      'op.branchDesc':
+        'Copies the conversation above the picked message into a new session and puts this message back in the new composer (original untouched, non-destructive).',
       'slot.revert': 'Revert to here',
       'slot.revertUnmatched':
         'Cannot locate this message seq in the log (usually the model-written summary drifted too far from the rendered text) — use the Message ops dialog instead.',
@@ -340,6 +342,7 @@ window.__ModuleLoader__.load({
       'panel.editDone': 'Original text is back in the composer',
       'panel.editEmpty': 'This message has no editable text',
       'panel.editUnavailable': 'Composer is not writable (session may be running or not mounted)',
+      'panel.editNotReady': 'Full text is not ready (the list only carries a 160-char snippet) — retry, or use revert to refill',
       'panel.openNew': 'Open new session',
       'panel.revertDone': 'Revert applied',
       'panel.deleteDone': 'Delete applied',
@@ -1123,6 +1126,8 @@ window.__ModuleLoader__.load({
       const [picked, setPicked] = useState(null)
       const [detail, setDetail] = useState('')
       const [detailState, setDetailState] = useState('idle')
+      // MED-5：detail 是**全文**还是 snippet 回退？只有全文才允许「编辑并重发」。
+      const [detailFull, setDetailFull] = useState(false)
       const [tab, setTab] = useState('messages')
       const [hits, setHits] = useState(null)
       const [searching, setSearching] = useState(false)
@@ -1382,6 +1387,17 @@ window.__ModuleLoader__.load({
             setError(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)))
             return
           }
+          // MED-4：`persistDraft` 存在 ≠ 真的落盘。宿主的 writer 由
+          // `bindDraftPersistence` 在视图挂载时绑定；blank/hero 态或视图未挂载时
+          // 该函数在但空转。于是「setDraft 改的是内存编辑器、随后 close() 关面板、
+          // 宿主重挂会话时从 localStorage 读回旧草稿」→ 用户看到成功却什么都没了。
+          // 判据不能靠函数存在，只能**回读**：写不进存储就当失败，不 close。
+          const sidForDraft = target.sessionId
+          const stored = readSessionDraft(sidForDraft)
+          if (stored != null && stored !== body) {
+            setError(t('panel.editUnavailable'))
+            return
+          }
           setDone(t('panel.editDone'))
           notifyDone(t('panel.editDone'))
           close()
@@ -1546,6 +1562,7 @@ window.__ModuleLoader__.load({
         detailReq.current += 1
         setPicked(null)
         setDetail('')
+        setDetailFull(false)
         setDetailState('idle')
         setConfirmAction(null)
       }
@@ -1555,6 +1572,7 @@ window.__ModuleLoader__.load({
         detailReq.current += 1
         setPicked(m)
         setDetail(m.snippet || '')
+        setDetailFull(false)
         setDetailState('ready')
         setConfirmAction(null)
         setDone('')
@@ -1631,6 +1649,7 @@ window.__ModuleLoader__.load({
           setConfirmAction(null)
           setPicked(m)
           setDetail(m.snippet || '')
+          setDetailFull(false)
           setDetailState('loading')
           setDone('')
           const req = ++detailReq.current
@@ -1644,12 +1663,15 @@ window.__ModuleLoader__.load({
             .then(({ res, data }) => {
               if (req !== detailReq.current) return
               if (!res.ok || !data || data.ok !== true) throw new Error((data && data.error) || 'HTTP ' + res.status)
-              setDetail(typeof data.text === 'string' && data.text ? data.text : m.snippet || '')
+              const full = typeof data.text === 'string' && data.text !== '' ? data.text : null
+              setDetail(full ?? (m.snippet || ''))
+              setDetailFull(full !== null)
               setDetailState('ready')
             })
             .catch(() => {
               if (req !== detailReq.current) return
               setDetail(m.snippet || '')
+              setDetailFull(false) // 拉全文失败 → 只有截断的 snippet，不许冒充原文
               setDetailState('ready')
             })
         },
@@ -1848,6 +1870,10 @@ window.__ModuleLoader__.load({
       const pickedIsUser = !!pickedLive && pickedLive.role === 'user'
       const canFork = !busy && !target.running && pickedIsUser && !pickedLive.shadowed && pickedLive.seq > 0
       const canEdit = pickedIsUser && !pickedLive.shadowed && state === 'ready' && !busy
+      // MED-5：只有**真拉到全文**才允许编辑。detail 在 /text 失败时会退化成
+      // snippet，而 snippet 被服务端硬截断到 160 字（session-file.js:331）——
+      // 拿它冒充原文会让用户改完发出时静默丢掉后半段。
+      const editTextReady = detailFull === true && typeof detail === 'string' && detail !== ''
       const deleteBlockedReason = target.running
         ? t('panel.running')
         : state !== 'ready'
@@ -2166,9 +2192,13 @@ window.__ModuleLoader__.load({
                             {
                               type: 'button',
                               className: 'mopsAction',
-                              disabled: !canEdit,
-                              title: pickedIsUser ? t('panel.editHint') : t('panel.branchUserOnly'),
-                              onClick: () => startEdit(detail || pickedLive.snippet || ''),
+                              disabled: !canEdit || !editTextReady,
+                              title: !pickedIsUser
+                                ? t('panel.branchUserOnly')
+                                : !editTextReady
+                                  ? t('panel.editNotReady')
+                                  : t('panel.editHint'),
+                              onClick: () => startEdit(detail),
                             },
                             t('panel.edit'),
                           ),
@@ -2463,23 +2493,40 @@ window.__ModuleLoader__.load({
      * 为什么不能靠 aria-label：官方文案有 8 种语言（zh/en/ja/es/fr/de/ru/pt），
      * 逐个匹配等于把 i18n 表抄进来。也不能靠 class：CSS Modules 会哈希前缀
      * （实测 0.2.0-rc.2 是 `xzv4MW_`，0.2.1 起变过）。
-     * 唯一稳定的是**图标几何**：官方 `IconBranchOutline16` 的 path d 是常量
-     * （packages/client/ui-primitives/src/icons/index.tsx:149）。
-     * 我们自己的分叉按钮复用同一 path，所以必须显式排除。
+     *
+     * ⚠️ 也不能靠 `<path d="…">`（0.12.0 的错误做法，0.13.1 修）：0.2.2-alpha.2 的
+     * 图标已改为 **sprite 复用**，官方组件长这样（见已安装 app bundle 的工厂函数）：
+     *
+     *   <svg data-icon="dsw-icon-branch-outline-regular" aria-hidden="true">
+     *     <use href="#dsw-icon-branch-outline-regular"/>
+     *   </svg>
+     *
+     * DOM 里**根本没有 `<path>`**，`M13.0762…` 在整个已安装 dsh 里 0 次命中。
+     * 唯一稳定的是 `data-icon` 的 id：`dsw-icon-${name}-${size}`（工厂 `Qv`），
+     * name 来自 ui-primitives 的图标表，属契约级常量。
+     *
+     * 我们自己的分叉按钮也故意用同一图标，所以必须按 class 显式排除。
      *
      * @param btn - 候选按钮（任意元素；非 button 的宿主节点返回 false）
      * @returns 是否官方 branch 按钮
      */
-    const HOST_BRANCH_D_PREFIX = 'M13.0762 1.37207'
+    const HOST_BRANCH_ICON_ID = 'dsw-icon-branch-outline-regular'
     const HOST_BRANCH_CLASS = 'mopsUserFork'
     function isHostBranchButton(btn) {
       if (!btn || typeof btn.querySelector !== 'function') return false
       const cls = String((btn.classList && btn.classList.value) || btn.className || '')
       if (cls.split(/\s+/).includes(HOST_BRANCH_CLASS)) return false
+      // 首选 sprite 形态：<svg data-icon="dsw-icon-branch-outline-regular">
+      const svg = btn.querySelector('svg')
+      if (svg && svg.getAttribute('data-icon') === HOST_BRANCH_ICON_ID) return true
+      // 兼容旧宿主的内联 path 形态（0.2.0-rc.x）：仍接受官方几何前缀
       const path = btn.querySelector('svg path')
       const d = path ? path.getAttribute('d') || '' : ''
       return d.startsWith(HOST_BRANCH_D_PREFIX)
     }
+
+    /** 旧宿主的内联 path 几何前缀（仅作兼容回退，不是主判据）。 */
+    const HOST_BRANCH_D_PREFIX = 'M13.0762 1.37207'
 
     /**
      * 把文本预置成某个会话的草稿（新会话刚 fork 出来时输入框是空的）。
@@ -2498,6 +2545,26 @@ window.__ModuleLoader__.load({
       } catch (e) {
         console.warn('[message-ops] writeSessionDraft failed:', e)
         return false
+      }
+    }
+
+    /**
+     * 读回某会话的已保存草稿文本（宿主同一存储键）。
+     * @param sessionId - 会话 id
+     * @returns 文本；存储里没有该会话、或格式不可解析时返回 null
+     */
+    function readSessionDraft(sessionId) {
+      try {
+        if (!sessionId || typeof localStorage === 'undefined') return null
+        const raw = localStorage.getItem(FORK_SESSION_STORAGE_PREFIX + sessionId)
+        if (raw == null) return null
+        const parsed = JSON.parse(raw)
+        const draft = parsed && typeof parsed === 'object' ? parsed.draft : undefined
+        if (typeof draft === 'string') return draft
+        if (draft && typeof draft === 'object' && typeof draft.text === 'string') return draft.text
+        return null
+      } catch {
+        return null
       }
     }
 
@@ -3588,7 +3655,7 @@ window.__ModuleLoader__.load({
             const row = rows && rows.find(r => r.seq === seq)
             if (!row) {
               ensureAssign(sid)
-              notifyDone(__t('errorPrefix') + (__t('revert.unresolved') || 'revert target verification failed'), 'error')
+              notifyDone(__t('errorPrefix') + __t('slot.revertUnmatched'), 'error')
               return
             }
             btn.disabled = true
@@ -3654,7 +3721,7 @@ window.__ModuleLoader__.load({
             const seq = Number(block.getAttribute('data-mops-seq'))
             const row = rows && rows.find(r => r.seq === seq)
             if (!row) {
-              notifyDone(__t('errorPrefix') + (__t('revert.unresolved') || 'fork target verification failed'), 'error')
+              notifyDone(__t('errorPrefix') + __t('slot.revertUnmatched'), 'error')
               return
             }
             if (!(seq > 0)) {
@@ -4408,7 +4475,7 @@ window.__ModuleLoader__.load({
     return {
       apply,
       inject: ['slots'],
-      __test: { activityTransition, forkBoundaryBefore, isHostBranchButton, writeSessionDraft, HOST_BRANCH_D_PREFIX },
+      __test: { activityTransition, forkBoundaryBefore, isHostBranchButton, writeSessionDraft, HOST_BRANCH_ICON_ID, HOST_BRANCH_D_PREFIX },
     }
   },
 })
