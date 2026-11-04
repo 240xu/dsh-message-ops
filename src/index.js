@@ -6,117 +6,187 @@
  * @module dsh-message-ops
  */
 
-import { zstdCompressSync } from "node:zlib";
-import { open as openFile, truncate as truncateFile, stat as statFile } from "node:fs/promises";
-import { isSessionId, sessionIdVariants, findSessionDirs, readSessionFileAsync, listMessages, computeShadowed, messageText, messageTextFull, turnBounds, markCommitted } from "./session-file.js";
-import { restoreNoticeText, planRevertFromEvents, planDeleteFromEvents, nextSeqFrom, buildMarkerEvent, buildRestoreNoticeEvent, buildReplayEvent, planNoticeWindow, noticeWindowPreamble, noticeWindowPostamble, sessionLogOf, alignLiveTurnCursor,
-  OpsError, planRevert, planDelete, planRestore, applyRestore, applySurfaceReplace,
-  restoreProgress, pendingRestoreTurns, buildRestoreIndex, restoreProgressFromIndex, pendingRestoreTurnsFromIndex,
-  isTrustedApiRequest, isJsonContentType, webAuthGate,
-} from "./ops-core.js";
-import { deleteSessionToTrash, listTrash, restoreTrash, purgeTrash, resolveSessionTitle } from "./session-trash.js";
+import { zstdCompressSync } from 'node:zlib'
+import { open as openFile, truncate as truncateFile, stat as statFile } from 'node:fs/promises'
+import {
+  isSessionId,
+  sessionIdVariants,
+  findSessionDirs,
+  readSessionFileAsync,
+  listMessages,
+  computeShadowed,
+  messageText,
+  messageTextFull,
+  turnBounds,
+  markCommitted,
+} from './session-file.js'
+import {
+  restoreNoticeText,
+  planRevertFromEvents,
+  planDeleteFromEvents,
+  nextSeqFrom,
+  buildMarkerEvent,
+  buildRestoreNoticeEvent,
+  buildReplayEvent,
+  planNoticeWindow,
+  noticeWindowPreamble,
+  noticeWindowPostamble,
+  sessionLogOf,
+  alignLiveTurnCursor,
+  OpsError,
+  planRevert,
+  planDelete,
+  planRestore,
+  applyRestore,
+  applySurfaceReplace,
+  restoreProgress,
+  pendingRestoreTurns,
+  buildRestoreIndex,
+  restoreProgressFromIndex,
+  pendingRestoreTurnsFromIndex,
+  isTrustedApiRequest,
+  isJsonContentType,
+  webAuthGate,
+} from './ops-core.js'
+import { deleteSessionToTrash, listTrash, restoreTrash, purgeTrash, resolveSessionTitle } from './session-trash.js'
 
-export const name = "dsh-message-ops";
+export const name = 'dsh-message-ops'
 // 保持 inject 为空：tools 是可选增强而非硬依赖（cordis 的 inject 是
 // 硬依赖声明，缺服务会让整个插件 apply 永远不执行）。工具注册在
 // apply 内部容错探测，见 registerToolTolerantly。
-export const inject = [];
+export const inject = []
 
 function sendJson(res, status, body) {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
-  res.end(payload);
+  const payload = JSON.stringify(body)
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+  res.end(payload)
 }
 
-const MAX_BODY_BYTES = 1024 * 1024; // 评审 P2：无上限的 body 缓存可打爆进程
+const MAX_BODY_BYTES = 1024 * 1024 // 评审 P2：无上限的 body 缓存可打爆进程
 
 async function readJsonBody(req) {
-  const chunks = [];
-  let total = 0;
+  const chunks = []
+  let total = 0
   for await (const c of req) {
-    total += c.length;
-    if (total > MAX_BODY_BYTES) throw new OpsError("request body too large", 413);
-    chunks.push(c);
+    total += c.length
+    if (total > MAX_BODY_BYTES) throw new OpsError('request body too large', 413)
+    chunks.push(c)
   }
-  if (chunks.length === 0) return {};
-  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
-  catch { return null; }
+  if (chunks.length === 0) return {}
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  } catch {
+    return null
+  }
 }
 
 /** 统一入口围栏：全部 /api/message-ops/* 路由先过这一层（三层信任 + 宿主 BrowserAuth cookie）。 */
 async function fence(targetCtx, req, res) {
   if (!isTrustedApiRequest(req)) {
-    sendJson(res, 403, { ok: false, error: "untrusted request origin (loopback Host + same-origin only)" });
-    return false;
+    sendJson(res, 403, { ok: false, error: 'untrusted request origin (loopback Host + same-origin only)' })
+    return false
   }
   // 0.10.8：宿主同条件 GET 被读全量（审计缺口）。宿主 /api admit = 三层围栏
   // 之外还要 BrowserAuth cookie（无 cookie → 401）；前端同源 fetch 自动带
   // cookie，取数不受影响。无 credentials 服务 = 老宿主旧围栏；有服务但
   // 记录不可读 = 401 fail-closed（webAuthGate 内部告警一次）。
   if (!(await webAuthGate(targetCtx, req))) {
-    sendJson(res, 401, { ok: false, error: "unauthorized (browser auth cookie required; reopen the URL printed by dsh web)" });
-    return false;
+    sendJson(res, 401, { ok: false, error: 'unauthorized (browser auth cookie required; reopen the URL printed by dsh web)' })
+    return false
   }
-  return true;
+  return true
 }
 
 /** 写操作围栏：入口信任 + Content-Type 必须 application/json（CSRF 纵深）。 */
 async function writeFence(targetCtx, req, res) {
-  if (!(await fence(targetCtx, req, res))) return false;
+  if (!(await fence(targetCtx, req, res))) return false
   if (!isJsonContentType(req)) {
-    sendJson(res, 415, { ok: false, error: "content-type must be application/json" });
-    return false;
+    sendJson(res, 415, { ok: false, error: 'content-type must be application/json' })
+    return false
   }
-  return true;
+  return true
 }
 
 /** POST body 读取（信任围栏之后）：413/400 语义区分。 */
 async function readFencedBody(req, res) {
-  try { return await readJsonBody(req); }
-  catch (err) {
-    sendJson(res, err instanceof OpsError ? err.status : 400, { ok: false, error: String(err && err.message ? err.message : err) });
-    return undefined;
+  try {
+    return await readJsonBody(req)
+  } catch (err) {
+    sendJson(res, err instanceof OpsError ? err.status : 400, { ok: false, error: String(err && err.message ? err.message : err) })
+    return undefined
   }
 }
 
 /** 从 sessions 注册表解析（两种 id 拼写都试）。 */
-let __resolveSource = null; // 诊断：最近一次 resolveSession 的失败原因
+let __resolveSource = null // 诊断：最近一次 resolveSession 的失败原因
 function resolveSession(ctx, sessionId) {
   // 宿主自己的取法是 `this.ctx.sessions.get(id)`（api-session-controller 同款）；
   // 实测 `ctx.get("sessions")` 在 inject 子 fiber 下解析到的注册表**查不到视图已
   // 加载的会话**（dock 已渲染但 get 双变体 miss —— agents.get 同 ctx 却命中），
   // 故属性优先、ctx.get 兜底，两处都试全变体。
-  const candidates = [];
-  try { if (ctx && ctx.sessions) candidates.push(["prop", ctx.sessions]); } catch { /* no proxy */ }
-  try { const svc = ctx.get("sessions"); if (svc) candidates.push(["get", svc]); } catch { /* absent */ }
-  if (candidates.length === 0) { __resolveSource = "no-sessions-service"; return undefined; }
-  const variants = sessionIdVariants(sessionId);
-  const tried = [];
+  const candidates = []
+  try {
+    if (ctx && ctx.sessions) candidates.push(['prop', ctx.sessions])
+  } catch {
+    /* no proxy */
+  }
+  try {
+    const svc = ctx.get('sessions')
+    if (svc) candidates.push(['get', svc])
+  } catch {
+    /* absent */
+  }
+  if (candidates.length === 0) {
+    __resolveSource = 'no-sessions-service'
+    return undefined
+  }
+  const variants = sessionIdVariants(sessionId)
+  const tried = []
   for (const [src, svc] of candidates) {
-    if (typeof svc.get !== "function") { tried.push(src + ":no-get"); continue; }
+    if (typeof svc.get !== 'function') {
+      tried.push(src + ':no-get')
+      continue
+    }
     for (const variant of variants) {
-      const s = svc.get(variant);
-      if (s !== undefined) { __resolveSource = "hit via " + src + ".get " + String(variant).slice(0, 24); return s; }
+      const s = svc.get(variant)
+      if (s !== undefined) {
+        __resolveSource = 'hit via ' + src + '.get ' + String(variant).slice(0, 24)
+        return s
+      }
     }
     // get 键错位兜底：list() 扫描（集群 face 的 list() 返回 live 实例数组，
     // 实测 get 双变体 miss 时 list 里可能有 —— 按 id/sessionId 匹配）
-    if (typeof svc.list === "function") {
+    if (typeof svc.list === 'function') {
       try {
-        const arr = svc.list();
+        const arr = svc.list()
         if (Array.isArray(arr)) {
-          const hit = arr.find((x) => x && (variants.includes(x.id) || variants.includes(x.sessionId)));
-          if (hit) { __resolveSource = "hit via " + src + ".list() n=" + arr.length; return hit; }
-          tried.push(src + ":list-n=" + arr.length + " ids=" + arr.slice(0, 3).map((x) => String(x && (x.id || x.sessionId) || "?").slice(0, 18)).join("|"));
+          const hit = arr.find(x => x && (variants.includes(x.id) || variants.includes(x.sessionId)))
+          if (hit) {
+            __resolveSource = 'hit via ' + src + '.list() n=' + arr.length
+            return hit
+          }
+          tried.push(
+            src +
+              ':list-n=' +
+              arr.length +
+              ' ids=' +
+              arr
+                .slice(0, 3)
+                .map(x => String((x && (x.id || x.sessionId)) || '?').slice(0, 18))
+                .join('|'),
+          )
         } else {
-          tried.push(src + ":list-" + typeof arr);
+          tried.push(src + ':list-' + typeof arr)
         }
-      } catch (e) { tried.push(src + ":list-threw " + String(e && e.message).slice(0, 30)); }
-      continue;
+      } catch (e) {
+        tried.push(src + ':list-threw ' + String(e && e.message).slice(0, 30))
+      }
+      continue
     }
-    tried.push(src + ":miss");
+    tried.push(src + ':miss')
   }
-  __resolveSource = tried.join(",") + " tried=" + variants.length + " first=" + String(variants[0]).slice(0, 30);
-  return undefined;
+  __resolveSource = tried.join(',') + ' tried=' + variants.length + ' first=' + String(variants[0]).slice(0, 30)
+  return undefined
 }
 
 /** 是否有 live agent 正占用该会话。 */
@@ -130,40 +200,77 @@ function resolveSession(ctx, sessionId) {
  * 引用在 mutation 完成后 release（final reference 触发 teardown，须先 flush）。
  */
 async function acquireSession(ctx, sessionId) {
-  const direct = resolveSession(ctx, sessionId);
-  if (direct !== undefined) return { session: direct, release() {} };
-  const owners = [];
+  const direct = resolveSession(ctx, sessionId)
+  if (direct !== undefined) return { session: direct, release() {} }
+  const owners = []
   // reflect 层：api-session-controller 把 ISessions（ClientSessions，带 retain）经
   // `rootCtx.reflect.provide("sessions", this)` 挂在根上；普通 ctx.get 取到的是
   // 近端同名对象层（get/list 有、retain 无）——必须走 reflect.get 才是契约面。
-  try { if (ctx && ctx.reflect && typeof ctx.reflect.get === "function") owners.push(["reflect", ctx.reflect.get("sessions", false)]); } catch { /* not provided */ }
-  try { if (ctx && ctx.sessions) owners.push(["prop", ctx.sessions]); } catch { /* getter threw */ }
-  try { const svc = ctx.get("sessions"); if (svc) owners.push(["get", svc]); } catch { /* absent */ }
-  const holders = owners.filter(([, o]) => o && typeof o.retain === "function");
-  if (holders.length === 0) {
-    const why = owners.length === 0
-      ? "no-owner (prop-absent && get-absent)"
-      : owners.map(([src, o]) => src + ":no-retain(" + (o == null ? "null" : typeof o) + ")").join(",");
-    __resolveSource = (__resolveSource || "") + " | ISessions:" + why;
-    return null;
-  }
-  const isess = holders[0][1];
-  let ref = null;
   try {
-    ref = isess.retain(sessionId, { source: "controllerOperation" });
-    const binding = await ref.ready;
-    const face = binding && binding.session;
-    if (!face) { __resolveSource = "retain-ready-no-session-face"; try { ref.release(); } catch { /* */ } return null; }
-    __resolveSource = "acquired via ISessions.retain";
-    return { session: face, release: () => { try { ref.release(); } catch { /* already released */ } } };
+    if (ctx && ctx.reflect && typeof ctx.reflect.get === 'function') owners.push(['reflect', ctx.reflect.get('sessions', false)])
+  } catch {
+    /* not provided */
+  }
+  try {
+    if (ctx && ctx.sessions) owners.push(['prop', ctx.sessions])
+  } catch {
+    /* getter threw */
+  }
+  try {
+    const svc = ctx.get('sessions')
+    if (svc) owners.push(['get', svc])
+  } catch {
+    /* absent */
+  }
+  const holders = owners.filter(([, o]) => o && typeof o.retain === 'function')
+  if (holders.length === 0) {
+    const why =
+      owners.length === 0
+        ? 'no-owner (prop-absent && get-absent)'
+        : owners.map(([src, o]) => src + ':no-retain(' + (o == null ? 'null' : typeof o) + ')').join(',')
+    __resolveSource = (__resolveSource || '') + ' | ISessions:' + why
+    return null
+  }
+  const isess = holders[0][1]
+  let ref = null
+  try {
+    ref = isess.retain(sessionId, { source: 'controllerOperation' })
+    const binding = await ref.ready
+    const face = binding && binding.session
+    if (!face) {
+      __resolveSource = 'retain-ready-no-session-face'
+      try {
+        ref.release()
+      } catch {
+        /* */
+      }
+      return null
+    }
+    __resolveSource = 'acquired via ISessions.retain'
+    return {
+      session: face,
+      release: () => {
+        try {
+          ref.release()
+        } catch {
+          /* already released */
+        }
+      },
+    }
   } catch (e) {
-    __resolveSource = "retain-failed: " + String(e && e.message).slice(0, 80);
-    if (ref) { try { ref.release(); } catch { /* */ } }
-    return null;
+    __resolveSource = 'retain-failed: ' + String(e && e.message).slice(0, 80)
+    if (ref) {
+      try {
+        ref.release()
+      } catch {
+        /* */
+      }
+    }
+    return null
   }
 }
 
-let __runningSource = null; // 诊断：最近一次 isRunning 的判定来源
+let __runningSource = null // 诊断：最近一次 isRunning 的判定来源
 /**
  * 用**宿主内存日志**补算 marker's committed（0.10.5 · R2 的根治）。
  *
@@ -191,33 +298,36 @@ function applyLiveCommitted(messages, live) {
   // R4（审计）：388 份语料里 360+ 无 marker。原先无条件扫完整个 live.log 才 return，
   // 是请求路径上一个无界的同步 O(log.length) 扫描（最大实测 15178 事件），且不像
   // buildDerived 那样有 framesPerYield 让出点。先判「有没有需要补算的 marker」。
-  let pending = null;
+  let pending = null
   for (const m of messages) {
-    if (m.marker === true && typeof m.seq === "number" && m.committed !== true) {
-      (pending || (pending = [])).push(m);
+    if (m.marker === true && typeof m.seq === 'number' && m.committed !== true) {
+      ;(pending || (pending = [])).push(m)
     }
   }
-  if (!pending) return false;
-  const log = live && Array.isArray(live.log) ? live.log : null;
-  if (!log || log.length === 0) return false;
+  if (!pending) return false
+  const log = live && Array.isArray(live.log) ? live.log : null
+  if (!log || log.length === 0) return false
   // 只要**最大的**真实用户输入 seq：判据是「存在 seq > marker.seq」，用 max 即可，
   // 不必建数组 + sort（扫描本身已 O(log.length)，别再叠 O(n log n)）。
-  let maxUserSeq = -1;
+  let maxUserSeq = -1
   for (const e of log) {
-    if (!e || typeof e.seq !== "number" || e.seq <= maxUserSeq) continue;
-    if (e.type !== "user/message") continue;
-    if (((e.data || {}).source || {}).kind !== "user") continue;
-    maxUserSeq = e.seq;
+    if (!e || typeof e.seq !== 'number' || e.seq <= maxUserSeq) continue
+    if (e.type !== 'user/message') continue
+    if (((e.data || {}).source || {}).kind !== 'user') continue
+    maxUserSeq = e.seq
   }
-  if (maxUserSeq < 0) return false;
+  if (maxUserSeq < 0) return false
   // ⚠️ 遍历**全部** pending marker：审计实测「只补算第一个 + break」是存活突变，
   // 而它对应一个真实 bug —— 用户连续回撤两次时第二个 marker 不被补算，
   // 第二条 dock 行在发消息后不消失（正是用户原话的残留形态）。
-  let touched = 0;
+  let touched = 0
   for (const m of pending) {
-    if (maxUserSeq > m.seq) { m.committed = true; touched++; }
+    if (maxUserSeq > m.seq) {
+      m.committed = true
+      touched++
+    }
   }
-  return touched > 0;
+  return touched > 0
 }
 
 function isRunning(ctx, sessionId) {
@@ -227,30 +337,40 @@ function isRunning(ctx, sessionId) {
   // 原实现把「agents 注册表有条目」直接当 running —— 会话仅在视图中打开
   // 就有条目 → 打开即 409 锁死所有变更操作。必须再比对 status。
   try {
-    const candidates = [];
-    try { if (ctx && ctx.agents) candidates.push(ctx.agents); } catch { /* no proxy */ }
-    try { const svc = ctx.get("agents"); if (svc) candidates.push(svc); } catch { /* absent */ }
-    if (candidates.length === 0) { __runningSource = "no-agents-service"; return false; }
+    const candidates = []
+    try {
+      if (ctx && ctx.agents) candidates.push(ctx.agents)
+    } catch {
+      /* no proxy */
+    }
+    try {
+      const svc = ctx.get('agents')
+      if (svc) candidates.push(svc)
+    } catch {
+      /* absent */
+    }
+    if (candidates.length === 0) {
+      __runningSource = 'no-agents-service'
+      return false
+    }
     for (const svc of candidates) {
-      if (typeof svc.get !== "function") continue;
+      if (typeof svc.get !== 'function') continue
       for (const variant of sessionIdVariants(sessionId)) {
-        const agent = svc.get(variant);
-        if (agent && agent.status === "running") {
-          __runningSource = "agent-status-running";
-          return true;
+        const agent = svc.get(variant)
+        if (agent && agent.status === 'running') {
+          __runningSource = 'agent-status-running'
+          return true
         }
-        if (agent) __runningSource = "agent-status:" + String(agent.status);
+        if (agent) __runningSource = 'agent-status:' + String(agent.status)
       }
     }
-    if (!__runningSource) __runningSource = "no-agent-entry";
-    return false;
+    if (!__runningSource) __runningSource = 'no-agent-entry'
+    return false
   } catch (e) {
-    __runningSource = "threw:" + String(e && e.message).slice(0, 50);
-    return false;
+    __runningSource = 'threw:' + String(e && e.message).slice(0, 50)
+    return false
   }
 }
-
-
 
 /**
  * diskAppend：把新事件作为一个 zstd 帧追加到会话日志（等价持久层 appendLines：
@@ -258,37 +378,45 @@ function isRunning(ctx, sessionId) {
  * 仅用于 store-miss 的 lazy-view 会话——无并发生命周期游标可竞争。
  */
 async function diskAppend(logPath, newEvents) {
-  if (!Array.isArray(newEvents) || newEvents.length === 0) throw new OpsError("diskAppend: empty batch", 400);
-  const jsonl = newEvents.map((e) => JSON.stringify(e)).join("\n") + "\n";
-  const frame = zstdCompressSync(Buffer.from(jsonl, "utf8"));
-  const handle = await openFile(logPath, "a");
-  let closed = false;
-  const closeHandle = async () => { if (closed) return; closed = true; await handle.close(); };
+  if (!Array.isArray(newEvents) || newEvents.length === 0) throw new OpsError('diskAppend: empty batch', 400)
+  const jsonl = newEvents.map(e => JSON.stringify(e)).join('\n') + '\n'
+  const frame = zstdCompressSync(Buffer.from(jsonl, 'utf8'))
+  const handle = await openFile(logPath, 'a')
+  let closed = false
+  const closeHandle = async () => {
+    if (closed) return
+    closed = true
+    await handle.close()
+  }
   try {
-    const { size: before } = await statFile(logPath);
+    const { size: before } = await statFile(logPath)
     try {
-      await handle.writeFile(frame);
-      await handle.sync();
+      await handle.writeFile(frame)
+      await handle.sync()
     } catch (error) {
       try {
-        await closeHandle();
-        await truncateFile(logPath, before);
+        await closeHandle()
+        await truncateFile(logPath, before)
       } catch (rollbackError) {
-        throw new AggregateError([error, rollbackError], `failed to roll back append to "${logPath}"`);
+        throw new AggregateError([error, rollbackError], `failed to roll back append to "${logPath}"`)
       }
-      throw error;
+      throw error
     }
   } finally {
-    await closeHandle();
+    await closeHandle()
   }
 }
 
 function flushSessions(ctx, session) {
-  const sessions = ctx.get("sessions");
-  if (sessions && typeof sessions.flush === "function") {
-    try { return sessions.flush(session); } catch { /* flush 失败不回滚已接受的事件 */ }
+  const sessions = ctx.get('sessions')
+  if (sessions && typeof sessions.flush === 'function') {
+    try {
+      return sessions.flush(session)
+    } catch {
+      /* flush 失败不回滚已接受的事件 */
+    }
   }
-  return undefined;
+  return undefined
 }
 
 // ---------------------------------------------------------------------------
@@ -297,10 +425,11 @@ function flushSessions(ctx, session) {
 
 /** 多 project slug 命中同一 id 时的静默 dirs[0] 是隐患（评审 P2）：显式报歧义。 */
 function pickSessionDir(sessionId) {
-  const dirs = findSessionDirs(sessionId);
-  if (dirs.length === 0) throw new OpsError("session log not found", 404);
-  if (dirs.length > 1) throw new OpsError(`ambiguous session id: found in ${dirs.length} project slugs (${dirs.map((d) => d.dir).join(", ")})`, 409);
-  return dirs[0];
+  const dirs = findSessionDirs(sessionId)
+  if (dirs.length === 0) throw new OpsError('session log not found', 404)
+  if (dirs.length > 1)
+    throw new OpsError(`ambiguous session id: found in ${dirs.length} project slugs (${dirs.map(d => d.dir).join(', ')})`, 409)
+  return dirs[0]
 }
 
 // ---------------------------------------------------------------------------
@@ -336,8 +465,8 @@ function pickSessionDir(sessionId) {
 //  - m.shadowed            ← 判据恒为 computeShadowed（纯文件派生，与 live 无关，
 //    0.9.6 起藏行判据就是它而不是 visible）；但**写在每请求的浅拷贝上**，
 //    缓存对象本身永不被改写 —— 跨请求零串扰。
-const DERIVED_CACHE_MAX = 16;
-const derivedCache = new Map(); // logPath -> { mtimeMs, size, promise }
+const DERIVED_CACHE_MAX = 16
+const derivedCache = new Map() // logPath -> { mtimeMs, size, promise }
 
 /**
  * 真实计算：读日志 → 消息列表 → 遮蔽集 → marker 恢复进度 → turn 边界。
@@ -346,28 +475,28 @@ const derivedCache = new Map(); // logPath -> { mtimeMs, size, promise }
  */
 async function buildDerived(logPath) {
   // 大日志的逐帧解压走异步让出路径，避免阻塞 GUI 事件循环（评审 P1）。
-  const { header, events } = await readSessionFileAsync(logPath);
-  const messages = listMessages(events);
-  const shadowed = computeShadowed(events);
+  const { header, events } = await readSessionFileAsync(logPath)
+  const messages = listMessages(events)
+  const shadowed = computeShadowed(events)
   // 0.8.0 按轮步进：为每个回撤/删除标记附恢复进度与"待恢复轮"。
   // 一次建 seq→text 索引，避免每标记全量扫文本（性能评审点）。
   // P3 惰性：无 marker 的会话（语料 388 份里 360+）整段跳过 —— 既不建
   // seqText 索引，也不扫一遍 events（seqText 为 null 时下面两处都短路：
   // 本循环直接跳过，marker 循环体也一次都不会执行）。
-  const seqText = messages.some((m) => m.marker === true) ? new Map() : null;
-  const restoreIndex = seqText ? buildRestoreIndex(events) : null;
+  const seqText = messages.some(m => m.marker === true) ? new Map() : null
+  const restoreIndex = seqText ? buildRestoreIndex(events) : null
   for (const e of seqText ? events : []) {
-    if (!e || typeof e.seq !== "number") continue;
-    if (e.type !== "user/message" && e.type !== "assistant/message") continue;
+    if (!e || typeof e.seq !== 'number') continue
+    if (e.type !== 'user/message' && e.type !== 'assistant/message') continue
     // 0.10.2：**别把宿主注入行当恢复目标的预览文案**。
     // 实测 dock 展开后 44 行预览里出现 `<system-reminder> Updated instructio…`、
     // `Agent … sent a message`、`Background subagent … finished` —— 用户看到的
     // 「将恢复到这条」根本不是他写的话，直接加剧「不知道恢复到哪去」的困惑
     // （这条困惑正是 0.10.1 修 commit 生命周期的起因）。
     // `sourceKind === 'user'` 是一等字段，只放真实用户输入；assistant 全放（模型输出非注入）。
-    if (e.type === "user/message" && ((e.data || {}).source || {}).kind !== "user") continue;
-    const t = messageText(e);
-    if (t && t.trim()) seqText.set(e.seq, t.trim().replace(/\s+/g, " ").slice(0, 80));
+    if (e.type === 'user/message' && ((e.data || {}).source || {}).kind !== 'user') continue
+    const t = messageText(e)
+    if (t && t.trim()) seqText.set(e.seq, t.trim().replace(/\s+/g, ' ').slice(0, 80))
   }
   // 0.9.1：**reverted** = opencode 语义「回撤边界及其后」。
   //
@@ -379,19 +508,22 @@ async function buildDerived(logPath) {
   // 正确口径：每个活跃回撤标记的 range.start 之后的全部 seq 都算已回撤
   // —— 这正是 opencode 的 `messages.slice(0, boundaryIndex)`（边界自己也不显示）。
   for (const m of messages) {
-    if (!m || m.marker !== true) continue;
-    const prog = restoreProgressFromIndex(restoreIndex, m.seq);
-    if (!prog) { m.restoreComplete = false; m.pendingTurns = []; continue; }
-    m.restoreComplete = prog.complete;
-    m.pendingTurns = pendingRestoreTurnsFromIndex(restoreIndex, m.seq, prog).map((t) => ({
+    if (!m || m.marker !== true) continue
+    const prog = restoreProgressFromIndex(restoreIndex, m.seq)
+    if (!prog) {
+      m.restoreComplete = false
+      m.pendingTurns = []
+      continue
+    }
+    m.restoreComplete = prog.complete
+    m.pendingTurns = pendingRestoreTurnsFromIndex(restoreIndex, m.seq, prog).map(t => ({
       upTo: t.seqs[t.seqs.length - 1],
       count: t.seqs.length,
       // 0.10.2：轮起点常落在注入行上（system-reminder / 后台任务 / 子代理通知），
       // 直接拿它当预览会显示「恢复到 <system-reminder>…」。改为在**该轮的 seq 集合里**
       // 找第一条真实内容；一个都没有才退回 #seq（诚实显示序号，不编造文案）。
-      preview: t.seqs.reduce((hit, seq) => (hit != null ? hit : (seqText.has(seq) ? seqText.get(seq) : null)), null)
-        || ('#' + t.turnSeq),
-    }));
+      preview: t.seqs.reduce((hit, seq) => (hit != null ? hit : seqText.has(seq) ? seqText.get(seq) : null), null) || '#' + t.turnSeq,
+    }))
   }
 
   // ── 0.10.1 marker 的 commit 语义（对齐 opencode）──────────────────────────
@@ -415,20 +547,20 @@ async function buildDerived(logPath) {
   //   注入行各有独立 kind（tool-jobs / agent-instructions / runtime-context /
   //   subagent-settled / model-selection …），restore 重放副本是 plugin:@240xu/...，
   //   三者天然可分 —— **不需要再写一遍 injected 正则**。
-  markCommitted(messages);
+  markCommitted(messages)
 
   // 0.9.4 撤掉 `revertFences` / `m.reverted`（离散区间塌缩成 seq>=min → 全藏）
   // 的复盘见 README「0.9.4 · 修「正文几乎空白」」。
   // 0.9.1：回合页脚/过程条的 node-key id 就是 turn 号，而它们**不是消息**，
   // 无法用「首个带 turn 字段的消息」定位（该 turn 内可能一条消息都没有，
   // 实测 turn 2 就映射不到）。这里直接给 turn/start 的 seq 映射表。
-  const bounds = turnBounds(events);
+  const bounds = turnBounds(events)
   // 用 **turn/end 的 seq** 而不是 turn/start：回撤边界常落在某个 turn **内部**
   // （实测边界 seq 54 在 turn 2 的 [51..62] 之间）。用起始 seq 会漏判该回合的页脚，
   // 用结束 seq 则「边界之前完全在前」的回合自然落选。
-  const turnEndSeq = {};
-  for (const [turn, seq] of bounds.ends) turnEndSeq[turn] = seq;
-  for (const [turn, seq] of bounds.starts) if (!(turn in turnEndSeq)) turnEndSeq[turn] = seq;
+  const turnEndSeq = {}
+  for (const [turn, seq] of bounds.ends) turnEndSeq[turn] = seq
+  for (const [turn, seq] of bounds.starts) if (!(turn in turnEndSeq)) turnEndSeq[turn] = seq
   // 0.12.0 分叉边界：给每条消息挂「它所在 turn 的 turn/start seq」。
   //
   // 为什么不能按 seq-1 切：实测 40 份语料里，真人输入的**前一个事件恒是同一 turn
@@ -438,30 +570,34 @@ async function buildDerived(logPath) {
   // 「这条之前」。
   // 正确边界 = turn/start 的**前一个**事件 seq（= turnStartSeq - 1）；
   // 首个 turn（seq 4）之前只有 seq 0..3 的会话头/permission 事件，也成立。
-  const turnStartSeq = {};
-  for (const [turn, seq] of bounds.starts) turnStartSeq[turn] = seq;
+  const turnStartSeq = {}
+  for (const [turn, seq] of bounds.starts) turnStartSeq[turn] = seq
   // ⚠️ 真人 `user/message` 事件**不带 `turn` 字段**（实测：data 里只有 id/source/message），
   // 它是否属于某轮由投影决定，不是日志里的事实。`system/message`/`assistant/message`
   // 才带 turn/step。所以不能只查 `m.turn` —— 必须扫一遍事件，用「当前开着的 turn」
   // 给每条消息定归属（user 消息恒落在 turn/start 之后、turn/end 之前）。
-  const enclosingTurnStart = new Map(); // message seq -> 所属 turn 的 turn/start seq
-  let openTurnStart = null;
+  const enclosingTurnStart = new Map() // message seq -> 所属 turn 的 turn/start seq
+  let openTurnStart = null
   for (const e of events) {
-    if (!e || typeof e.seq !== "number") continue;
-    if (e.type === "turn/start") { openTurnStart = e.seq; continue; }
-    if (e.type === "turn/end") { openTurnStart = null; continue; }
-    if (e.type !== "user/message" && e.type !== "assistant/message" && e.type !== "system/message") continue;
-    const ownTurn = e.data && e.data.turn;
-    const startSeq = Number.isSafeInteger(ownTurn) && turnStartSeq[ownTurn] != null
-      ? turnStartSeq[ownTurn]
-      : openTurnStart;
-    enclosingTurnStart.set(e.seq, startSeq ?? null);
+    if (!e || typeof e.seq !== 'number') continue
+    if (e.type === 'turn/start') {
+      openTurnStart = e.seq
+      continue
+    }
+    if (e.type === 'turn/end') {
+      openTurnStart = null
+      continue
+    }
+    if (e.type !== 'user/message' && e.type !== 'assistant/message' && e.type !== 'system/message') continue
+    const ownTurn = e.data && e.data.turn
+    const startSeq = Number.isSafeInteger(ownTurn) && turnStartSeq[ownTurn] != null ? turnStartSeq[ownTurn] : openTurnStart
+    enclosingTurnStart.set(e.seq, startSeq ?? null)
   }
   for (const m of messages) {
-    if (!m || typeof m.seq !== "number") continue;
-    m.turnStartSeq = enclosingTurnStart.get(m.seq) ?? null;
+    if (!m || typeof m.seq !== 'number') continue
+    m.turnStartSeq = enclosingTurnStart.get(m.seq) ?? null
   }
-  return { header, messages, shadowed, turnEndSeq };
+  return { header, messages, shadowed, turnEndSeq }
 }
 
 /**
@@ -469,46 +605,46 @@ async function buildDerived(logPath) {
  * 打，mtimeMs+size 不符即重算；同 key 的在途请求共享同一个 Promise。
  */
 async function loadDerived(logPath) {
-  const st = await statFile(logPath);
-  const hit = derivedCache.get(logPath);
+  const st = await statFile(logPath)
+  const hit = derivedCache.get(logPath)
   if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
-    derivedCache.delete(logPath);
-    derivedCache.set(logPath, hit); // LRU touch（Map 插入序 = LRU 序）
-    return hit.promise;
+    derivedCache.delete(logPath)
+    derivedCache.set(logPath, hit) // LRU touch（Map 插入序 = LRU 序）
+    return hit.promise
   }
-  const entry = { mtimeMs: st.mtimeMs, size: st.size, promise: buildDerived(logPath) };
-  derivedCache.delete(logPath);
-  derivedCache.set(logPath, entry);
+  const entry = { mtimeMs: st.mtimeMs, size: st.size, promise: buildDerived(logPath) }
+  derivedCache.delete(logPath)
+  derivedCache.set(logPath, entry)
   while (derivedCache.size > DERIVED_CACHE_MAX) {
-    derivedCache.delete(derivedCache.keys().next().value);
+    derivedCache.delete(derivedCache.keys().next().value)
   }
   // 失败不粘住：读错/半截文件只影响本次，下次 stat 仍会重试。
   entry.promise.catch(() => {
-    if (derivedCache.get(logPath) === entry) derivedCache.delete(logPath);
-  });
-  return entry.promise;
+    if (derivedCache.get(logPath) === entry) derivedCache.delete(logPath)
+  })
+  return entry.promise
 }
 
 async function opsList(targetCtx, sessionId, opts = {}) {
-  if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
-  const compact = opts && opts.compact === true;
-  const { logPath } = pickSessionDir(sessionId);
+  if (!isSessionId(sessionId)) throw new OpsError('invalid sessionId', 400)
+  const compact = opts && opts.compact === true
+  const { logPath } = pickSessionDir(sessionId)
   // 文件派生段（读日志 → 消息 → 遮蔽集 → marker 进度 → turn 边界）走缓存：
   // key = logPath、失效看读前 stat 的 mtimeMs+size，见 loadDerived 注释。
-  const { header, messages: baseMessages, shadowed, turnEndSeq } = await loadDerived(logPath);
+  const { header, messages: baseMessages, shadowed, turnEndSeq } = await loadDerived(logPath)
   // 每请求**浅拷贝**一份再挂 per-request 字段：缓存对象永不被改写，
   // 并发请求之间零串扰（浅拷 5038 个小对象约 1~2ms）。
-  const messages = baseMessages.map((m) => ({ ...m }));
-  const live = resolveSession(targetCtx, sessionId);
+  const messages = baseMessages.map(m => ({ ...m }))
+  const live = resolveSession(targetCtx, sessionId)
   // R2 根治：磁盘派生可能还停在落盘批窗之前，用 live.log 补算 committed。
   // 必须在 messages 浅拷贝之后（绝不改写 derivedCache 里的对象）。
-  applyLiveCommitted(messages, live);
-  const visibleNodes = live && live.surface && Array.isArray(live.surface.nodes) ? new Set(live.surface.nodes) : null;
-  let visibleCount = 0;
-  let shadowedCount = 0;
-  let markerCount = 0;
+  applyLiveCommitted(messages, live)
+  const visibleNodes = live && live.surface && Array.isArray(live.surface.nodes) ? new Set(live.surface.nodes) : null
+  let visibleCount = 0
+  let shadowedCount = 0
+  let markerCount = 0
   for (const m of messages) {
-    m.visible = visibleNodes ? visibleNodes.has(m.seq) : !shadowed.has(m.seq);
+    m.visible = visibleNodes ? visibleNodes.has(m.seq) : !shadowed.has(m.seq)
     // 0.9.6：**shadowed 与 visible 是两套语义，不能混用。**
     //
     // visible = 「是否在**模型 surface** 上」—— 两条路径还不一致：
@@ -519,26 +655,26 @@ async function opsList(targetCtx, sessionId, opts = {}) {
     // shadowed = 「是否落在任一 replace 区间内」—— 这才是「回滚掉的东西」，
     // 且**与会话是否活跃无关**，恒由 computeShadowed(events) 算出。
     // transcript 藏行必须用它；visible 只留给「可回滚目标」（lastRevertable）。
-    m.shadowed = shadowed.has(m.seq);
-    if (m.visible) visibleCount++;
-    if (m.shadowed) shadowedCount++;
-    if (m.marker === true) markerCount++;
+    m.shadowed = shadowed.has(m.seq)
+    if (m.visible) visibleCount++
+    if (m.shadowed) shadowedCount++
+    if (m.marker === true) markerCount++
   }
 
   const visibleMessages = compact
-    ? messages.map((m) => ({
-      seq: m.seq,
-      role: m.role,
-      snippet: m.snippet,
-      time: m.time,
-      visible: m.visible,
-      shadowed: m.shadowed,
-      // 0.12.0：分叉要按**轮**切，不能按 seq-1 切（见 buildDerived 的注释）。
-      // 客户端据此算 fork 边界 = turnStartSeq - 1。只带这一个字段：turn/step
-      // 属于「重」字段，面板的虚拟行用不到（详见 compact 的取舍）。
-      turnStartSeq: m.turnStartSeq ?? null,
-    }))
-    : messages;
+    ? messages.map(m => ({
+        seq: m.seq,
+        role: m.role,
+        snippet: m.snippet,
+        time: m.time,
+        visible: m.visible,
+        shadowed: m.shadowed,
+        // 0.12.0：分叉要按**轮**切，不能按 seq-1 切（见 buildDerived 的注释）。
+        // 客户端据此算 fork 边界 = turnStartSeq - 1。只带这一个字段：turn/step
+        // 属于「重」字段，面板的虚拟行用不到（详见 compact 的取舍）。
+        turnStartSeq: m.turnStartSeq ?? null,
+      }))
+    : messages
 
   return {
     ok: true,
@@ -556,83 +692,85 @@ async function opsList(targetCtx, sessionId, opts = {}) {
     markerCount,
     turnEndSeq,
     messages: visibleMessages,
-  };
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Per-session search (full text, beyond the 160-char snippet)
 // ---------------------------------------------------------------------------
-const SEARCH_CACHE_MAX = 8;
-const searchCache = new Map(); // logPath -> { mtimeMs, size, promise }
+const SEARCH_CACHE_MAX = 8
+const searchCache = new Map() // logPath -> { mtimeMs, size, promise }
 
 /** Build the searchable corpus once per log revision (full text, lowercased lazily). */
 async function buildSearchCorpus(logPath) {
-  const { events } = await readSessionFileAsync(logPath);
-  const messages = listMessages(events);
-  const shadowed = computeShadowed(events);
-  const bySeq = new Map();
-  for (const e of events) if (e && typeof e.seq === "number") bySeq.set(e.seq, e);
-  const corpus = [];
+  const { events } = await readSessionFileAsync(logPath)
+  const messages = listMessages(events)
+  const shadowed = computeShadowed(events)
+  const bySeq = new Map()
+  for (const e of events) if (e && typeof e.seq === 'number') bySeq.set(e.seq, e)
+  const corpus = []
   for (const m of messages) {
-    const ev = bySeq.get(m.seq);
-    const text = ev ? messageTextFull(ev) : "";
+    const ev = bySeq.get(m.seq)
+    const text = ev ? messageTextFull(ev) : ''
     corpus.push({
       seq: m.seq,
       type: m.type,
       role: m.role,
       marker: m.marker === true,
       shadowed: shadowed.has(m.seq),
-      text: text || m.snippet || "",
-    });
+      text: text || m.snippet || '',
+    })
   }
-  return corpus;
+  return corpus
 }
 
 async function loadSearchCorpus(logPath) {
-  const st = await statFile(logPath);
-  const hit = searchCache.get(logPath);
+  const st = await statFile(logPath)
+  const hit = searchCache.get(logPath)
   if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
-    searchCache.delete(logPath);
-    searchCache.set(logPath, hit);
-    return hit.promise;
+    searchCache.delete(logPath)
+    searchCache.set(logPath, hit)
+    return hit.promise
   }
-  const entry = { mtimeMs: st.mtimeMs, size: st.size, promise: buildSearchCorpus(logPath) };
-  searchCache.delete(logPath);
-  searchCache.set(logPath, entry);
-  while (searchCache.size > SEARCH_CACHE_MAX) searchCache.delete(searchCache.keys().next().value);
-  entry.promise.catch(() => { if (searchCache.get(logPath) === entry) searchCache.delete(logPath); });
-  return entry.promise;
+  const entry = { mtimeMs: st.mtimeMs, size: st.size, promise: buildSearchCorpus(logPath) }
+  searchCache.delete(logPath)
+  searchCache.set(logPath, entry)
+  while (searchCache.size > SEARCH_CACHE_MAX) searchCache.delete(searchCache.keys().next().value)
+  entry.promise.catch(() => {
+    if (searchCache.get(logPath) === entry) searchCache.delete(logPath)
+  })
+  return entry.promise
 }
 
 function searchSnippet(text, query, radius = 45) {
-  const lower = text.toLowerCase();
-  const at = lower.indexOf(query);
-  const start = at < 0 ? 0 : Math.max(0, at - radius);
-  const end = at < 0 ? Math.min(text.length, 160) : Math.min(text.length, at + query.length + radius);
-  const raw = text.slice(start, end).replace(/\s+/g, " ").trim();
-  return (start > 0 ? "…" : "") + raw.slice(0, 158) + (end < text.length ? "…" : "");
+  const lower = text.toLowerCase()
+  const at = lower.indexOf(query)
+  const start = at < 0 ? 0 : Math.max(0, at - radius)
+  const end = at < 0 ? Math.min(text.length, 160) : Math.min(text.length, at + query.length + radius)
+  const raw = text.slice(start, end).replace(/\s+/g, ' ').trim()
+  return (start > 0 ? '…' : '') + raw.slice(0, 158) + (end < text.length ? '…' : '')
 }
 
 async function opsSearch(targetCtx, sessionId, query, opts = {}) {
-  if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
-  const q = typeof query === "string" ? query.trim() : "";
-  if (q.length === 0) throw new OpsError("query is required", 400);
-  if (q.length > 500) throw new OpsError("query too long (max 500)", 400);
-  const role = opts && typeof opts.role === "string" && opts.role ? opts.role : null;
-  if (role && !["user", "assistant", "system", "tool"].includes(role)) {
-    throw new OpsError("invalid role", 400);
+  if (!isSessionId(sessionId)) throw new OpsError('invalid sessionId', 400)
+  const q = typeof query === 'string' ? query.trim() : ''
+  if (q.length === 0) throw new OpsError('query is required', 400)
+  if (q.length > 500) throw new OpsError('query too long (max 500)', 400)
+  const role = opts && typeof opts.role === 'string' && opts.role ? opts.role : null
+  if (role && !['user', 'assistant', 'system', 'tool'].includes(role)) {
+    throw new OpsError('invalid role', 400)
   }
-  const limit = Number.isSafeInteger(opts && opts.limit) ? Math.max(1, Math.min(100, opts.limit)) : 50;
-  const { logPath } = pickSessionDir(sessionId);
-  const corpus = await loadSearchCorpus(logPath);
-  const needle = q.toLowerCase();
-  const results = [];
-  let total = 0;
+  const limit = Number.isSafeInteger(opts && opts.limit) ? Math.max(1, Math.min(100, opts.limit)) : 50
+  const { logPath } = pickSessionDir(sessionId)
+  const corpus = await loadSearchCorpus(logPath)
+  const needle = q.toLowerCase()
+  const results = []
+  let total = 0
   for (const row of corpus) {
-    if (role && row.role !== role) continue;
-    if (!row.text.toLowerCase().includes(needle)) continue;
-    total++;
-    if (results.length >= limit) continue;
+    if (role && row.role !== role) continue
+    if (!row.text.toLowerCase().includes(needle)) continue
+    total++
+    if (results.length >= limit) continue
     results.push({
       seq: row.seq,
       type: row.type,
@@ -640,40 +778,37 @@ async function opsSearch(targetCtx, sessionId, query, opts = {}) {
       marker: row.marker,
       shadowed: row.shadowed,
       snippet: searchSnippet(row.text, needle),
-    });
+    })
   }
-  return { ok: true, query: q, role, limit, total, truncated: total > results.length, results };
+  return { ok: true, query: q, role, limit, total, truncated: total > results.length, results }
 }
 
 /** 测试钩子（非公开 API）：直接驱动 list / search 与文件派生缓存。 */
-export const _internals = { opsList, opsSearch, loadDerived, loadSearchCorpus, derivedCache, searchCache };
+export const _internals = { opsList, opsSearch, loadDerived, loadSearchCorpus, derivedCache, searchCache }
 
 async function opsCommit(targetCtx, mode, sessionId, seq) {
-  if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
-  if (!Number.isSafeInteger(seq) || seq < 0) throw new OpsError("invalid seq", 400);
-  if (isRunning(targetCtx, sessionId)) throw new OpsError("session is running; stop it first", 409);
-  const { logPath } = pickSessionDir(sessionId);
-  const { header, events } = await readSessionFileAsync(logPath);
+  if (!isSessionId(sessionId)) throw new OpsError('invalid sessionId', 400)
+  if (!Number.isSafeInteger(seq) || seq < 0) throw new OpsError('invalid seq', 400)
+  if (isRunning(targetCtx, sessionId)) throw new OpsError('session is running; stop it first', 409)
+  const { logPath } = pickSessionDir(sessionId)
+  const { header, events } = await readSessionFileAsync(logPath)
   // 0.8.2：空闲会话（实测 340/364）没有打开的 turn/step → 用自足的**合成 turn**
   // 承载 notice，而不是拒绝。引擎 append-only 插不进已有 step，但合成一整个 turn 合法
   //��已对官方校验闸实测：append 型 / 单节点 replace / 多节点 replace 全 PASS，遮蔽受保护头正确拒绝）。
   // 带 reason:"message-ops"，UI 与审计可识别，不与真实模型轮次混淆。
-  let win = planNoticeWindow(events);
-  const notice = mode === "delete"
-    ? `[消息删除] 已遮蔽 seq ${seq}`
-    : null; // revert 文案含 shadowed 数量，规划后拼
-  const acq = await acquireSession(targetCtx, sessionId);
+  let win = planNoticeWindow(events)
+  const notice = mode === 'delete' ? `[消息删除] 已遮蔽 seq ${seq}` : null // revert 文案含 shadowed 数量，规划后拼
+  const acq = await acquireSession(targetCtx, sessionId)
   if (acq !== null && acq.session !== undefined) {
     try {
-      const session = acq.session;
-      const liveEvents = sessionLogOf(session);
-      if (liveEvents) win = planNoticeWindow(liveEvents);
-      const turnStep = { turn: win.turn, step: win.step };
+      const session = acq.session
+      const liveEvents = sessionLogOf(session)
+      if (liveEvents) win = planNoticeWindow(liveEvents)
+      const turnStep = { turn: win.turn, step: win.step }
       // 0.5.4（P0）：v4 准入要求 system/message 带正 turn/step——缺字段时持久层
       // encodeEventBatch 的 SessionFormatError 未捕获会**打死整个 dsh 进程**。
-      const plan = mode === "delete" ? planDelete(session.surface, seq) : planRevert(session.surface, seq);
-      const text = mode === "delete" ? notice
-        : `[消息回滚] 已回滚到 seq ${seq}（含）之后的 ${plan.shadowedSeqs.length} 个节点`;
+      const plan = mode === 'delete' ? planDelete(session.surface, seq) : planRevert(session.surface, seq)
+      const text = mode === 'delete' ? notice : `[消息回滚] 已回滚到 seq ${seq}（含）之后的 ${plan.shadowedSeqs.length} 个节点`
       // 0.8.2：会话 store 命中时走引擎路径 —— 同样要先开合成 turn 窗口，
       // 否则 notice 落在已关闭的 turn/step 里，加载端拒绝整份历史。
       // 0.10.8 孤儿护栏：plan 校验（planRevert/planDelete 的 409 拒绝）本就在
@@ -695,146 +830,187 @@ async function opsCommit(targetCtx, mode, sessionId, seq) {
         if (closed) return
         closed = true
         for (const post of noticeWindowPostamble(win)) {
-          try { session.append(post.kind, post.data) } catch { /* 引擎拒：维持原错误/继续 */ }
+          try {
+            session.append(post.kind, post.data)
+          } catch {
+            /* 引擎拒：维持原错误/继续 */
+          }
         }
       }
       try {
-        for (const pre of noticeWindowPreamble(win)) session.append(pre.kind, pre.data);
-        const event = applySurfaceReplace(session, plan.startSeq, plan.endSeq, plan.shadowedSeqs, text, turnStep);
+        for (const pre of noticeWindowPreamble(win)) session.append(pre.kind, pre.data)
+        const event = applySurfaceReplace(session, plan.startSeq, plan.endSeq, plan.shadowedSeqs, text, turnStep)
         // 必须闭合：否则引擎内存里 turn 永远开着 → isRunning 恒真 → 后续操作全被 409
         closeWindow()
-        const aligned = win.synthetic ? alignLiveTurnCursor(targetCtx, session, win.turn) : false;
-        flushSessions(targetCtx, session);
+        const aligned = win.synthetic ? alignLiveTurnCursor(targetCtx, session, win.turn) : false
+        flushSessions(targetCtx, session)
         return {
-          ok: true, mode, seq,
+          ok: true,
+          mode,
+          seq,
           syntheticTurn: win.synthetic === true,
           // 0.11.4：暴露对齐结果。live 路径必须 true；disk 路径（store-miss）没有
           // 内存 agent，false 属正常。若 live 也 false，下一条真实消息就会重号。
           turnAligned: aligned,
           shadowedCount: plan.shadowedSeqs.length,
           eventSeq: event && event.seq != null ? event.seq : null,
-        };
+        }
       } catch (err) {
         // 只补闭合**尚未发生**的窗口；已闭合过就绝不再写第二遍。
         closeWindow()
-        throw err;
+        throw err
       }
     } finally {
-      acq.release();
+      acq.release()
     }
   }
   // store-miss（lazy-view 只读盘会话）→ 磁盘路径：镜像引擎字段直接追加 zstd 帧
-  const plan = mode === "delete" ? planDeleteFromEvents(events, seq) : planRevertFromEvents(events, seq);
-  const text = mode === "delete" ? notice
-    : `[消息回滚] 已回滚到 seq ${seq}（含）之后的 ${plan.shadowedSeqs.length} 个节点`;
+  const plan = mode === 'delete' ? planDeleteFromEvents(events, seq) : planRevertFromEvents(events, seq)
+  const text = mode === 'delete' ? notice : `[消息回滚] 已回滚到 seq ${seq}（含）之后的 ${plan.shadowedSeqs.length} 个节点`
   // 0.8.2：磁盘路径同样把 marker 包进合成 turn（裸 zstd 写、零校验，写错就是整份日志报废）
-  const baseTime = Date.now();
-  let cursor = nextSeqFrom(events);
+  const baseTime = Date.now()
+  let cursor = nextSeqFrom(events)
   const batch = noticeWindowPreamble(win).map((e, i) => ({
-    type: e.kind, seq: cursor++, time: baseTime + i, data: e.data,
-  }));
+    type: e.kind,
+    seq: cursor++,
+    time: baseTime + i,
+    data: e.data,
+  }))
   const marker = buildMarkerEvent({
-    seq: cursor++, time: baseTime + batch.length, turnStep: { turn: win.turn, step: win.step }, text, version: header?.version ?? 4,
-    startSeq: plan.startSeq, endSeq: plan.endSeq, shadowedSeqs: plan.shadowedSeqs,
-  });
-  batch.push(marker);
-  let tail = marker.time + 1;
-  for (const e of noticeWindowPostamble(win)) batch.push({ type: e.kind, seq: cursor++, time: tail++, data: e.data });
-  await diskAppend(logPath, batch);
+    seq: cursor++,
+    time: baseTime + batch.length,
+    turnStep: { turn: win.turn, step: win.step },
+    text,
+    version: header?.version ?? 4,
+    startSeq: plan.startSeq,
+    endSeq: plan.endSeq,
+    shadowedSeqs: plan.shadowedSeqs,
+  })
+  batch.push(marker)
+  let tail = marker.time + 1
+  for (const e of noticeWindowPostamble(win)) batch.push({ type: e.kind, seq: cursor++, time: tail++, data: e.data })
+  await diskAppend(logPath, batch)
   return {
-    ok: true, mode, seq, disk: true, syntheticTurn: win.synthetic === true,
+    ok: true,
+    mode,
+    seq,
+    disk: true,
+    syntheticTurn: win.synthetic === true,
     shadowedCount: plan.shadowedSeqs.length,
     eventSeq: marker.seq,
-  };
+  }
 }
 
 // 0.8.0：upToSeq 可选 —— 给定则按轮步进恢复（只重放到该 seq，后续仍遮蔽）。
 // 0.8.1：opts.discard —— 不重放内容，仅停用标记（清贴条）。
 async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq, discard) {
-  if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
-  if (!Number.isSafeInteger(restoreSeq) || restoreSeq < 0) throw new OpsError("invalid seq", 400);
-  if (upToSeq !== undefined && (!Number.isSafeInteger(upToSeq) || upToSeq < 0)) throw new OpsError("invalid upToSeq", 400);
-  if (isRunning(targetCtx, sessionId)) throw new OpsError("session is running; stop it first", 409);
-  const { logPath } = pickSessionDir(sessionId);
-  const { events } = await readSessionFileAsync(logPath);
+  if (!isSessionId(sessionId)) throw new OpsError('invalid sessionId', 400)
+  if (!Number.isSafeInteger(restoreSeq) || restoreSeq < 0) throw new OpsError('invalid seq', 400)
+  if (upToSeq !== undefined && (!Number.isSafeInteger(upToSeq) || upToSeq < 0)) throw new OpsError('invalid upToSeq', 400)
+  if (isRunning(targetCtx, sessionId)) throw new OpsError('session is running; stop it first', 409)
+  const { logPath } = pickSessionDir(sessionId)
+  const { events } = await readSessionFileAsync(logPath)
   // 0.8.0（B1 修复）：步进恢复必须排除先前轮次已重放的源 seq，
   // 否则每轮从区间头重放 → 消息副本成倍出现。
   // 合成 turn 承载 notice 的完整理由见 opsCommit() 处（0.8.2，实测 340/364 空闲会话）。
-  const buildPlan = (sourceEvents) => {
-    const window = planNoticeWindow(sourceEvents);
-    const progress = restoreProgress(sourceEvents, restoreSeq);
-    const restorePlan = planRestore(sourceEvents, restoreSeq, upToSeq, progress ? progress.restoredSeqs : null);
-    restorePlan.turnStep = { turn: window.turn, step: window.step };
-    restorePlan.window = window;
-    if (discard) restorePlan.discard = true;
+  const buildPlan = sourceEvents => {
+    const window = planNoticeWindow(sourceEvents)
+    const progress = restoreProgress(sourceEvents, restoreSeq)
+    const restorePlan = planRestore(sourceEvents, restoreSeq, upToSeq, progress ? progress.restoredSeqs : null)
+    restorePlan.turnStep = { turn: window.turn, step: window.step }
+    restorePlan.window = window
+    if (discard) restorePlan.discard = true
     if (restorePlan.replayable.length === 0 && progress && !progress.complete && progress.pendingSeqs.length > 0) {
       // 请求的 upTo 之前已全部重放过 → 只补一条进度 notice（不重复重放）
-      restorePlan.upToSeq = upToSeq != null ? Math.min(upToSeq, restorePlan.endSeq) : restorePlan.endSeq;
+      restorePlan.upToSeq = upToSeq != null ? Math.min(upToSeq, restorePlan.endSeq) : restorePlan.endSeq
     }
-    return { win: window, plan: restorePlan };
-  };
-  let { win, plan } = buildPlan(events);
-  const acq = await acquireSession(targetCtx, sessionId);
+    return { win: window, plan: restorePlan }
+  }
+  let { win, plan } = buildPlan(events)
+  const acq = await acquireSession(targetCtx, sessionId)
   if (acq !== null && acq.session !== undefined) {
     // 0.10.8 孤儿护栏（与 opsCommit 同型）：planRestore/进度校验本就在 preamble
     // 之前完成；applyRestore 里的引擎 append 若抛（如 replay 坐标错开），
     // preamble 已落——闭合合成 turn 再原样抛出，不留常开孤儿窗口。
     try {
-      const liveEvents = sessionLogOf(acq.session);
-      if (liveEvents) ({ win, plan } = buildPlan(liveEvents));
-      for (const pre of noticeWindowPreamble(win)) acq.session.append(pre.kind, pre.data);
+      const liveEvents = sessionLogOf(acq.session)
+      if (liveEvents) ({ win, plan } = buildPlan(liveEvents))
+      for (const pre of noticeWindowPreamble(win)) acq.session.append(pre.kind, pre.data)
       const result = applyRestore(acq.session, plan, {
-        flush: () => { flushSessions(targetCtx, acq.session); },
-      });
-      for (const post of noticeWindowPostamble(win)) acq.session.append(post.kind, post.data);
-      const aligned = win.synthetic ? alignLiveTurnCursor(targetCtx, acq.session, win.turn) : false;
-      return { ok: true, ...result, turnAligned: aligned, discarded: plan.discard === true, upToSeq: plan.upToSeq, restoredSourceSeqs: plan.replayable.map((i) => i.seq), range: { startSeq: plan.startSeq, endSeq: plan.endSeq } };
+        flush: () => {
+          flushSessions(targetCtx, acq.session)
+        },
+      })
+      for (const post of noticeWindowPostamble(win)) acq.session.append(post.kind, post.data)
+      const aligned = win.synthetic ? alignLiveTurnCursor(targetCtx, acq.session, win.turn) : false
+      return {
+        ok: true,
+        ...result,
+        turnAligned: aligned,
+        discarded: plan.discard === true,
+        upToSeq: plan.upToSeq,
+        restoredSourceSeqs: plan.replayable.map(i => i.seq),
+        range: { startSeq: plan.startSeq, endSeq: plan.endSeq },
+      }
     } catch (err) {
       for (const post of noticeWindowPostamble(win)) {
-        try { acq.session.append(post.kind, post.data); } catch { /* postamble 被引擎拒：维持原错误上抛 */ }
+        try {
+          acq.session.append(post.kind, post.data)
+        } catch {
+          /* postamble 被引擎拒：维持原错误上抛 */
+        }
       }
-      throw err;
+      throw err
     } finally {
-      acq.release();
+      acq.release()
     }
   }
   // store-miss → 磁盘路径：说明事件 + 重放事件批量追加（一个帧）
-  let cursor = nextSeqFrom(events);
-  const baseTime = Date.now();
-  const version = (await readSessionFileAsync(logPath)).header?.version ?? 4;
+  let cursor = nextSeqFrom(events)
+  const baseTime = Date.now()
+  const version = (await readSessionFileAsync(logPath)).header?.version ?? 4
   const batch = noticeWindowPreamble(win).map((e, i) => ({
-    type: e.kind, seq: cursor++, time: baseTime + i, data: e.data,
-  }));
-  const noticeBase = baseTime + batch.length;
-  batch.push(buildRestoreNoticeEvent({
-    seq: cursor++, time: noticeBase, turnStep: plan.turnStep, version,
-    text: plan.discard
-      ? `[消息操作] 回撤标记 seq ${plan.restoreSeq} 已停用（丢弃）：区间内容保持遮蔽、未重放；日志原文仍在，可搜索`
-      : restoreNoticeText(plan),
-    restoreSeq: plan.restoreSeq,
-    discard: plan.discard === true,
-    // 0.11.4：把本轮实际重放的源 seq 落进 notice，restoreProgress 才能累计进度、
-    // 下一轮 excludeSeqs 才不会重复重放同一批消息（详见 ops-core 该函数注释）。
-    restoredSourceSeqs: plan.discard ? [] : plan.replayable.map((i) => i.seq),
-  }));
-  let offset = 0;
+    type: e.kind,
+    seq: cursor++,
+    time: baseTime + i,
+    data: e.data,
+  }))
+  const noticeBase = baseTime + batch.length
+  batch.push(
+    buildRestoreNoticeEvent({
+      seq: cursor++,
+      time: noticeBase,
+      turnStep: plan.turnStep,
+      version,
+      text: plan.discard
+        ? `[消息操作] 回撤标记 seq ${plan.restoreSeq} 已停用（丢弃）：区间内容保持遮蔽、未重放；日志原文仍在，可搜索`
+        : restoreNoticeText(plan),
+      restoreSeq: plan.restoreSeq,
+      discard: plan.discard === true,
+      // 0.11.4：把本轮实际重放的源 seq 落进 notice，restoreProgress 才能累计进度、
+      // 下一轮 excludeSeqs 才不会重复重放同一批消息（详见 ops-core 该函数注释）。
+      restoredSourceSeqs: plan.discard ? [] : plan.replayable.map(i => i.seq),
+    }),
+  )
+  let offset = 0
   for (const item of plan.discard ? [] : plan.replayable) {
-    batch.push(buildReplayEvent({ seq: cursor++, time: noticeBase + (++offset), item, turnStep: plan.turnStep, version }));
+    batch.push(buildReplayEvent({ seq: cursor++, time: noticeBase + ++offset, item, turnStep: plan.turnStep, version }))
   }
-  let tail = noticeBase + offset + 1;
-  for (const e of noticeWindowPostamble(win)) batch.push({ type: e.kind, seq: cursor++, time: tail++, data: e.data });
-  await diskAppend(logPath, batch);
+  let tail = noticeBase + offset + 1
+  for (const e of noticeWindowPostamble(win)) batch.push({ type: e.kind, seq: cursor++, time: tail++, data: e.data })
+  await diskAppend(logPath, batch)
   return {
-    ok: true, disk: true, syntheticTurn: win.synthetic === true,
+    ok: true,
+    disk: true,
+    syntheticTurn: win.synthetic === true,
     restoredCount: plan.replayable.length,
     upToSeq: plan.upToSeq,
-    restoredSourceSeqs: plan.replayable.map((i) => i.seq),
+    restoredSourceSeqs: plan.replayable.map(i => i.seq),
     skipped: plan.skipped,
-    eventSeqs: batch.map((e) => e.seq),
+    eventSeqs: batch.map(e => e.seq),
     range: { startSeq: plan.startSeq, endSeq: plan.endSeq },
-  };
+  }
 }
-
 
 // ---------------------------------------------------------------------------
 // Agent 工具 message_ops（容错注册）
@@ -847,75 +1023,83 @@ async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq, discard) {
  */
 export function createMessageOpsTool({ defineTool, ops, ctx }) {
   return defineTool({
-    name: "message_ops",
+    name: 'message_ops',
     description:
-      "Manage DSH conversation messages: list messages with visibility, revert to a seq (surface replace shadows the tail), delete a single message, restore (replay) messages shadowed by a previous revert. These are the message-level operations dsh does NOT provide natively (use the built-in session/fork for branching and /export for archives). Sessions must not be running for mutating actions.",
+      'Manage DSH conversation messages: list messages with visibility, revert to a seq (surface replace shadows the tail), delete a single message, restore (replay) messages shadowed by a previous revert. These are the message-level operations dsh does NOT provide natively (use the built-in session/fork for branching and /export for archives). Sessions must not be running for mutating actions.',
     parameters: {
       action: {
-        type: "string",
+        type: 'string',
         required: true,
-        enum: ["list", "revert", "delete", "restore"],
-        description: "Which operation to perform.",
+        enum: ['list', 'revert', 'delete', 'restore'],
+        description: 'Which operation to perform.',
       },
       sessionId: {
-        type: "string",
+        type: 'string',
         required: true,
-        description: "Target session id (uuid or session-<uuid> form).",
+        description: 'Target session id (uuid or session-<uuid> form).',
       },
       seq: {
-        type: "integer",
-        description: "revert/delete: the target seq. restore: the seq of the revert/delete marker event. Ignored by list.",
+        type: 'integer',
+        description: 'revert/delete: the target seq. restore: the seq of the revert/delete marker event. Ignored by list.',
       },
       upToSeq: {
-        type: "integer",
+        type: 'integer',
       },
     },
     output: {
-      schema: { type: "string" },
-      render(_args, value) { return [{ type: "text", text: value }]; },
+      schema: { type: 'string' },
+      render(_args, value) {
+        return [{ type: 'text', text: value }]
+      },
     },
     async execute(args) {
-      const action = args.action;
-      const sessionId = String(args.sessionId || "").trim();
+      const action = args.action
+      const sessionId = String(args.sessionId || '').trim()
       try {
-        let result;
+        let result
         // 0.5.2（P1）：ops 自 0.2.1 起为 async——不 await 会把 Promise 直接送进 renderResult，
         // list/restore 必抛 TypeError（测试桩曾是同步的故漏检）。
         switch (action) {
-          case "list": result = await ops.list(ctx, sessionId); break;
-          case "revert": result = await ops.revert(ctx, sessionId, args.seq); break;
-          case "delete": result = await ops.delete(ctx, sessionId, args.seq); break;
-          case "restore": result = await ops.restore(ctx, sessionId, args.seq); break;
-          default: throw new OpsError(`unknown action: ${action}`, 400);
+          case 'list':
+            result = await ops.list(ctx, sessionId)
+            break
+          case 'revert':
+            result = await ops.revert(ctx, sessionId, args.seq)
+            break
+          case 'delete':
+            result = await ops.delete(ctx, sessionId, args.seq)
+            break
+          case 'restore':
+            result = await ops.restore(ctx, sessionId, args.seq)
+            break
+          default:
+            throw new OpsError(`unknown action: ${action}`, 400)
         }
-        return renderResult(action, result);
+        return renderResult(action, result)
       } catch (e) {
-        return `${action} failed: ${e && e.message ? e.message : e}`;
+        return `${action} failed: ${e && e.message ? e.message : e}`
       }
     },
-  });
+  })
 }
 
 /** 工具结果 → 模型可读的多行文本。 */
 function renderResult(action, r) {
   switch (action) {
-    case "list": {
-      const lines = [
-        `session ${r.session.id}`,
-        `running: ${r.running}; total: ${r.total}; visible: ${r.visibleCount}`,
-      ];
+    case 'list': {
+      const lines = [`session ${r.session.id}`, `running: ${r.running}; total: ${r.total}; visible: ${r.visibleCount}`]
       for (const m of r.messages) {
-        lines.push(`seq ${m.seq} [${m.visible ? "visible" : "shadowed"}] ${m.role}: ${m.snippet}`);
+        lines.push(`seq ${m.seq} [${m.visible ? 'visible' : 'shadowed'}] ${m.role}: ${m.snippet}`)
       }
-      return lines.join("\n");
+      return lines.join('\n')
     }
-    case "revert":
-    case "delete":
-      return `${r.mode} ok: shadowed ${r.shadowedCount} node(s) from seq ${r.seq}; marker event seq ${r.eventSeq}`;
-    case "restore":
-      return `restore ok: replayed ${r.restoredCount} message(s) from range ${r.range.startSeq}..${r.range.endSeq} (${r.skipped} skipped); appended event seqs ${r.eventSeqs.join(", ")}`;
+    case 'revert':
+    case 'delete':
+      return `${r.mode} ok: shadowed ${r.shadowedCount} node(s) from seq ${r.seq}; marker event seq ${r.eventSeq}`
+    case 'restore':
+      return `restore ok: replayed ${r.restoredCount} message(s) from range ${r.range.startSeq}..${r.range.endSeq} (${r.skipped} skipped); appended event seqs ${r.eventSeqs.join(', ')}`
     default:
-      return JSON.stringify(r);
+      return JSON.stringify(r)
   }
 }
 
@@ -925,28 +1109,33 @@ function renderResult(action, r) {
  */
 function registerToolTolerantly(ctx) {
   function tryRegister(targetCtx) {
-    const tools = targetCtx.get("tools");
-    if (!tools || typeof tools.register !== "function") return false;
+    const tools = targetCtx.get('tools')
+    if (!tools || typeof tools.register !== 'function') return false
     // 动态 import：包缺失时只跳过工具，不拖垮插件的 HTTP 面。
-    import("@deepseek-ai/dsh-tools")
+    import('@deepseek-ai/dsh-tools')
       .then(({ defineTool }) => {
         const ops = {
           list: (c, id) => opsList(c, id),
-          revert: (c, id, seq) => opsCommit(c, "revert", id, seq),
-          delete: (c, id, seq) => opsCommit(c, "delete", id, seq),
+          revert: (c, id, seq) => opsCommit(c, 'revert', id, seq),
+          delete: (c, id, seq) => opsCommit(c, 'delete', id, seq),
           restore: (c, id, seq, upToSeq) => opsRestore(c, id, seq, upToSeq),
-        };
-        tools.register(createMessageOpsTool({ defineTool, ops, ctx: targetCtx }));
+        }
+        tools.register(createMessageOpsTool({ defineTool, ops, ctx: targetCtx }))
       })
       // 0.9.0：不再静默吞错。原先 catch(() => {}) 让「工具注册成功与否」完全无从诊断
       // （实测日志里 defineTool / ERR_MODULE_NOT_FOUND 零命中）。
-      .catch((e) => {
-        console.warn('[message-ops] defineTool 注册失败，工具不可用（其余功能不受影响）:', e && (e.code || e.message) ? (e.code || e.message) : e)
-      });
-    return true;
+      .catch(e => {
+        console.warn(
+          '[message-ops] defineTool 注册失败，工具不可用（其余功能不受影响）:',
+          e && (e.code || e.message) ? e.code || e.message : e,
+        )
+      })
+    return true
   }
-  if (tryRegister(ctx)) return;
-  ctx.inject(["tools"], (sub) => { tryRegister(sub); });
+  if (tryRegister(ctx)) return
+  ctx.inject(['tools'], sub => {
+    tryRegister(sub)
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -956,176 +1145,255 @@ function registerToolTolerantly(ctx) {
 export function apply(ctx) {
   // 诊断（0.5.4 调试）：会话状态服务解析情况
   try {
-    const names = ["sessions", "agents", "sessionController", "sessionList", "session-manager"];
-    const parts = names.map((n) => { const v = ctx.get(n); return n + "=" + (v == null ? String(v) : typeof v); });
-    const ses = ctx.get("sessions");
-    const hasList = ses && ses.list != null;
-    const hasSnap = hasList && typeof ses.list.getSnapshot === "function";
-    console.log("[message-ops] session services: " + parts.join(" ") + " | sessions.list=" + hasList + " getSnapshot=" + hasSnap + (ses ? " keys=" + Object.keys(ses).slice(0, 12).join("|") : ""));
-  } catch (e) { console.log("[message-ops] probe failed: " + e); }
+    const names = ['sessions', 'agents', 'sessionController', 'sessionList', 'session-manager']
+    const parts = names.map(n => {
+      const v = ctx.get(n)
+      return n + '=' + (v == null ? String(v) : typeof v)
+    })
+    const ses = ctx.get('sessions')
+    const hasList = ses && ses.list != null
+    const hasSnap = hasList && typeof ses.list.getSnapshot === 'function'
+    console.log(
+      '[message-ops] session services: ' +
+        parts.join(' ') +
+        ' | sessions.list=' +
+        hasList +
+        ' getSnapshot=' +
+        hasSnap +
+        (ses ? ' keys=' + Object.keys(ses).slice(0, 12).join('|') : ''),
+    )
+  } catch (e) {
+    console.log('[message-ops] probe failed: ' + e)
+  }
   function registerHttp(host, targetCtx) {
     // --- GET /api/message-ops/messages：消息列表（只读） ---------------------
-    targetCtx.effect(() => host.register({
-      kind: "exact",
-      path: "/api/message-ops/messages",
-      handler: async (req, res) => {
-        if (req.method !== "GET") return sendJson(res, 405, { ok: false, error: "method not allowed" });
-        if (!(await fence(targetCtx, req, res))) return;
-        try {
-          const url = new URL(req.url, "http://localhost");
-          return sendJson(res, 200, await opsList(targetCtx, url.searchParams.get("sessionId") || "", {
-            compact: url.searchParams.get("view") === "compact",
-          }));
-        } catch (err) {
-          return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
-        }
-      },
-    }), "dsh-message-ops: messages route");
+    targetCtx.effect(
+      () =>
+        host.register({
+          kind: 'exact',
+          path: '/api/message-ops/messages',
+          handler: async (req, res) => {
+            if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: 'method not allowed' })
+            if (!(await fence(targetCtx, req, res))) return
+            try {
+              const url = new URL(req.url, 'http://localhost')
+              return sendJson(
+                res,
+                200,
+                await opsList(targetCtx, url.searchParams.get('sessionId') || '', {
+                  compact: url.searchParams.get('view') === 'compact',
+                }),
+              )
+            } catch (err) {
+              return sendJson(res, err instanceof OpsError ? err.status : 500, {
+                ok: false,
+                error: String(err && err.message ? err.message : err),
+              })
+            }
+          },
+        }),
+      'dsh-message-ops: messages route',
+    )
 
     // --- GET /api/message-ops/search：会话内全文搜索（服务端，匹配 snippet 之外） --
-    targetCtx.effect(() => host.register({
-      kind: "exact",
-      path: "/api/message-ops/search",
-      handler: async (req, res) => {
-        if (req.method !== "GET") return sendJson(res, 405, { ok: false, error: "method not allowed" });
-        if (!(await fence(targetCtx, req, res))) return;
-        try {
-          const url = new URL(req.url, "http://localhost");
-          const limitRaw = Number.parseInt(url.searchParams.get("limit") || "", 10);
-          return sendJson(res, 200, await opsSearch(
-            targetCtx,
-            url.searchParams.get("sessionId") || "",
-            url.searchParams.get("q") || "",
-            {
-              role: url.searchParams.get("role") || null,
-              limit: Number.isSafeInteger(limitRaw) ? limitRaw : undefined,
-            },
-          ));
-        } catch (err) {
-          return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
-        }
-      },
-    }), "dsh-message-ops: search route");
+    targetCtx.effect(
+      () =>
+        host.register({
+          kind: 'exact',
+          path: '/api/message-ops/search',
+          handler: async (req, res) => {
+            if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: 'method not allowed' })
+            if (!(await fence(targetCtx, req, res))) return
+            try {
+              const url = new URL(req.url, 'http://localhost')
+              const limitRaw = Number.parseInt(url.searchParams.get('limit') || '', 10)
+              return sendJson(
+                res,
+                200,
+                await opsSearch(targetCtx, url.searchParams.get('sessionId') || '', url.searchParams.get('q') || '', {
+                  role: url.searchParams.get('role') || null,
+                  limit: Number.isSafeInteger(limitRaw) ? limitRaw : undefined,
+                }),
+              )
+            } catch (err) {
+              return sendJson(res, err instanceof OpsError ? err.status : 500, {
+                ok: false,
+                error: String(err && err.message ? err.message : err),
+              })
+            }
+          },
+        }),
+      'dsh-message-ops: search route',
+    )
 
     // --- GET /api/message-ops/text：单条消息全文（0.5.2 引用按钮按需取） ----------
     // assistant 消息的 fullText 不在 messages 列表里（载荷控制），quote 点击时单取。
-    targetCtx.effect(() => host.register({
-      kind: "exact",
-      path: "/api/message-ops/text",
-      handler: async (req, res) => {
-        if (req.method !== "GET") return sendJson(res, 405, { ok: false, error: "method not allowed" });
-        if (!(await fence(targetCtx, req, res))) return;
-        try {
-          const url = new URL(req.url, "http://localhost");
-          const sessionId = url.searchParams.get("sessionId") || "";
-          const seq = Number.parseInt(url.searchParams.get("seq") || "", 10);
-          if (!isSessionId(sessionId)) throw new OpsError("invalid sessionId", 400);
-          if (!Number.isSafeInteger(seq) || seq < 0) throw new OpsError("invalid seq", 400);
-          // seq 0 在日志头里是结构事件区（permission/preset 等，实测恒非消息），
-          // messageText 恒空串；引用按钮不可能引用它，直接 404 而不是 200 {text:""}。
-          if (seq === 0) throw new OpsError("no quotable message at seq 0", 404);
-          const { logPath } = pickSessionDir(sessionId);
-          const { events } = await readSessionFileAsync(logPath);
-          const ev = events.find((e) => e && e.seq === seq);
-          if (!ev) throw new OpsError("seq not found", 404);
-          // 0.10.8：宿主会把长文本拆成多段 content（seq 6830 实测 321+7954+20），
-          // 只回首段 = 摘要拦腰截断。messageTextFull 与 messageText 同一条
-          // 「合格 text 段」口径，聚合改为全量拼接。
-          return sendJson(res, 200, { ok: true, seq, text: messageTextFull(ev) });
-        } catch (err) {
-          return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
-        }
-      },
-    }), "dsh-message-ops: text route");
+    targetCtx.effect(
+      () =>
+        host.register({
+          kind: 'exact',
+          path: '/api/message-ops/text',
+          handler: async (req, res) => {
+            if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: 'method not allowed' })
+            if (!(await fence(targetCtx, req, res))) return
+            try {
+              const url = new URL(req.url, 'http://localhost')
+              const sessionId = url.searchParams.get('sessionId') || ''
+              const seq = Number.parseInt(url.searchParams.get('seq') || '', 10)
+              if (!isSessionId(sessionId)) throw new OpsError('invalid sessionId', 400)
+              if (!Number.isSafeInteger(seq) || seq < 0) throw new OpsError('invalid seq', 400)
+              // seq 0 在日志头里是结构事件区（permission/preset 等，实测恒非消息），
+              // messageText 恒空串；引用按钮不可能引用它，直接 404 而不是 200 {text:""}。
+              if (seq === 0) throw new OpsError('no quotable message at seq 0', 404)
+              const { logPath } = pickSessionDir(sessionId)
+              const { events } = await readSessionFileAsync(logPath)
+              const ev = events.find(e => e && e.seq === seq)
+              if (!ev) throw new OpsError('seq not found', 404)
+              // 0.10.8：宿主会把长文本拆成多段 content（seq 6830 实测 321+7954+20），
+              // 只回首段 = 摘要拦腰截断。messageTextFull 与 messageText 同一条
+              // 「合格 text 段」口径，聚合改为全量拼接。
+              return sendJson(res, 200, { ok: true, seq, text: messageTextFull(ev) })
+            } catch (err) {
+              return sendJson(res, err instanceof OpsError ? err.status : 500, {
+                ok: false,
+                error: String(err && err.message ? err.message : err),
+              })
+            }
+          },
+        }),
+      'dsh-message-ops: text route',
+    )
 
     // --- POST revert / delete：live-session surface replace ------------------
-    const commitHandler = (mode) => async (req, res) => {
-      if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method not allowed" });
-      if (!(await writeFence(targetCtx, req, res))) return;
-      const body = await readFencedBody(req, res);
-      if (body === undefined) return;
-      if (!body || typeof body !== "object") return sendJson(res, 400, { ok: false, error: "invalid json" });
+    const commitHandler = mode => async (req, res) => {
+      if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'method not allowed' })
+      if (!(await writeFence(targetCtx, req, res))) return
+      const body = await readFencedBody(req, res)
+      if (body === undefined) return
+      if (!body || typeof body !== 'object') return sendJson(res, 400, { ok: false, error: 'invalid json' })
       try {
-        return sendJson(res, 200, await opsCommit(targetCtx, mode, body.sessionId, body.seq));
+        return sendJson(res, 200, await opsCommit(targetCtx, mode, body.sessionId, body.seq))
       } catch (err) {
-        return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
+        return sendJson(res, err instanceof OpsError ? err.status : 500, {
+          ok: false,
+          error: String(err && err.message ? err.message : err),
+        })
       }
-    };
+    }
 
-    targetCtx.effect(() => host.register({
-      kind: "exact", path: "/api/message-ops/revert", handler: commitHandler("revert"),
-    }), "dsh-message-ops: revert route");
+    targetCtx.effect(
+      () =>
+        host.register({
+          kind: 'exact',
+          path: '/api/message-ops/revert',
+          handler: commitHandler('revert'),
+        }),
+      'dsh-message-ops: revert route',
+    )
 
-    targetCtx.effect(() => host.register({
-      kind: "exact", path: "/api/message-ops/delete", handler: commitHandler("delete"),
-    }), "dsh-message-ops: delete route");
-
+    targetCtx.effect(
+      () =>
+        host.register({
+          kind: 'exact',
+          path: '/api/message-ops/delete',
+          handler: commitHandler('delete'),
+        }),
+      'dsh-message-ops: delete route',
+    )
 
     // --- POST restore：回滚恢复（重放语义，见 ops-core.js 注释） --------------
-    targetCtx.effect(() => host.register({
-      kind: "exact",
-      path: "/api/message-ops/restore",
-      handler: async (req, res) => {
-        if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method not allowed" });
-        if (!(await writeFence(targetCtx, req, res))) return;
-        const body = await readFencedBody(req, res);
-        if (body === undefined) return;
-        if (!body || typeof body !== "object") return sendJson(res, 400, { ok: false, error: "invalid json" });
-        try {
-          // 0.8.0：body.upToSeq 存在 → 按轮步进恢复（只到该 seq）
-          return sendJson(res, 200, await opsRestore(targetCtx, body.sessionId, body.seq, body.upToSeq != null ? Number(body.upToSeq) : undefined, body.discard === true));
-        } catch (err) {
-          return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
-        }
-      },
-    }), "dsh-message-ops: restore route");
+    targetCtx.effect(
+      () =>
+        host.register({
+          kind: 'exact',
+          path: '/api/message-ops/restore',
+          handler: async (req, res) => {
+            if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'method not allowed' })
+            if (!(await writeFence(targetCtx, req, res))) return
+            const body = await readFencedBody(req, res)
+            if (body === undefined) return
+            if (!body || typeof body !== 'object') return sendJson(res, 400, { ok: false, error: 'invalid json' })
+            try {
+              // 0.8.0：body.upToSeq 存在 → 按轮步进恢复（只到该 seq）
+              return sendJson(
+                res,
+                200,
+                await opsRestore(
+                  targetCtx,
+                  body.sessionId,
+                  body.seq,
+                  body.upToSeq != null ? Number(body.upToSeq) : undefined,
+                  body.discard === true,
+                ),
+              )
+            } catch (err) {
+              return sendJson(res, err instanceof OpsError ? err.status : 500, {
+                ok: false,
+                error: String(err && err.message ? err.message : err),
+              })
+            }
+          },
+        }),
+      'dsh-message-ops: restore route',
+    )
 
     // --- Session trash：删除整条会话（可逆），列表 / 恢复 / 永久清理 ----------
-    targetCtx.effect(() => host.register({
-      kind: "exact",
-      path: "/api/message-ops/session/trash",
-      handler: async (req, res) => {
-        if (req.method !== "GET") return sendJson(res, 405, { ok: false, error: "method not allowed" });
-        if (!(await fence(targetCtx, req, res))) return;
-        try {
-          return sendJson(res, 200, { ok: true, entries: await listTrash(targetCtx, { purgeExpired: true }) });
-        } catch (err) {
-          return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
-        }
-      },
-    }), "dsh-message-ops: session trash route");
+    targetCtx.effect(
+      () =>
+        host.register({
+          kind: 'exact',
+          path: '/api/message-ops/session/trash',
+          handler: async (req, res) => {
+            if (req.method !== 'GET') return sendJson(res, 405, { ok: false, error: 'method not allowed' })
+            if (!(await fence(targetCtx, req, res))) return
+            try {
+              return sendJson(res, 200, { ok: true, entries: await listTrash(targetCtx, { purgeExpired: true }) })
+            } catch (err) {
+              return sendJson(res, err instanceof OpsError ? err.status : 500, {
+                ok: false,
+                error: String(err && err.message ? err.message : err),
+              })
+            }
+          },
+        }),
+      'dsh-message-ops: session trash route',
+    )
 
-    const sessionAction = (path, action) => targetCtx.effect(() => host.register({
-      kind: "exact",
-      path,
-      handler: async (req, res) => {
-        if (req.method !== "POST") return sendJson(res, 405, { ok: false, error: "method not allowed" });
-        if (!(await writeFence(targetCtx, req, res))) return;
-        const body = await readFencedBody(req, res);
-        if (body === undefined) return;
-        if (!body || typeof body !== "object") return sendJson(res, 400, { ok: false, error: "invalid json" });
-        try {
-          return sendJson(res, 200, await action(targetCtx, body));
-        } catch (err) {
-          return sendJson(res, err instanceof OpsError ? err.status : 500, { ok: false, error: String(err && err.message ? err.message : err) });
-        }
-      },
-    }), "dsh-message-ops: " + path);
+    const sessionAction = (path, action) =>
+      targetCtx.effect(
+        () =>
+          host.register({
+            kind: 'exact',
+            path,
+            handler: async (req, res) => {
+              if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: 'method not allowed' })
+              if (!(await writeFence(targetCtx, req, res))) return
+              const body = await readFencedBody(req, res)
+              if (body === undefined) return
+              if (!body || typeof body !== 'object') return sendJson(res, 400, { ok: false, error: 'invalid json' })
+              try {
+                return sendJson(res, 200, await action(targetCtx, body))
+              } catch (err) {
+                return sendJson(res, err instanceof OpsError ? err.status : 500, {
+                  ok: false,
+                  error: String(err && err.message ? err.message : err),
+                })
+              }
+            },
+          }),
+        'dsh-message-ops: ' + path,
+      )
 
-    sessionAction("/api/message-ops/session/delete", (c, b) =>
-      deleteSessionToTrash(c, b.sessionId, b.confirmTitle));
-    sessionAction("/api/message-ops/session/restore", (c, b) =>
-      restoreTrash(c, b.trashId));
-    sessionAction("/api/message-ops/session/purge", (c, b) =>
-      purgeTrash(c, b.trashId));
-
+    sessionAction('/api/message-ops/session/delete', (c, b) => deleteSessionToTrash(c, b.sessionId, b.confirmTitle))
+    sessionAction('/api/message-ops/session/restore', (c, b) => restoreTrash(c, b.trashId))
+    sessionAction('/api/message-ops/session/purge', (c, b) => purgeTrash(c, b.trashId))
   }
 
-  const ws = ctx.get("webServer");
-  if (ws !== undefined) registerHttp(ws, ctx);
-  else ctx.inject(["webServer"], (sub) => registerHttp(sub.webServer, sub));
+  const ws = ctx.get('webServer')
+  if (ws !== undefined) registerHttp(ws, ctx)
+  else ctx.inject(['webServer'], sub => registerHttp(sub.webServer, sub))
 
-  registerToolTolerantly(ctx);
+  registerToolTolerantly(ctx)
 }
 
-export default { name, inject, apply };
+export default { name, inject, apply }

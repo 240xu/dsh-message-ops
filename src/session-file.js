@@ -11,37 +11,37 @@
  * @module dsh-message-ops/session-file
  */
 
-import fs from "node:fs";
-import path from "node:path";
-import os from "node:os";
-import { constants, zstdCompressSync, zstdDecompressSync } from "node:zlib";
+import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
+import { constants, zstdCompressSync, zstdDecompressSync } from 'node:zlib'
 
-const ZSTD_MAGIC = 0xfd2fb528;
+const ZSTD_MAGIC = 0xfd2fb528
 
 /** 带语义状态码的操作错误（单点：HTTP 直接映射 status，工具端转失败文本）。 */
 export class OpsError extends Error {
   constructor(message, status = 400) {
-    super(message);
-    this.status = status;
+    super(message)
+    this.status = status
   }
 }
 
 /** messageText 的「合格 text 段」选择口径（单点）：type==='text' 且非空白。 */
 function textSegments(e) {
-  const msg = e && e.data && e.data.message;
-  const content = msg && Array.isArray(msg.content) ? msg.content : (e && e.data && e.data.content);
-  if (!Array.isArray(content)) return [];
-  const out = [];
+  const msg = e && e.data && e.data.message
+  const content = msg && Array.isArray(msg.content) ? msg.content : e && e.data && e.data.content
+  if (!Array.isArray(content)) return []
+  const out = []
   for (const c of content) {
-    if (c && c.type === "text" && typeof c.text === "string" && c.text.trim()) out.push(c.text);
+    if (c && c.type === 'text' && typeof c.text === 'string' && c.text.trim()) out.push(c.text)
   }
-  return out;
+  return out
 }
 
 /** 从 message 事件提取首个非空 text 块（listMessages / ops-core 共用单点）。 */
 export function messageText(e) {
-  const segs = textSegments(e);
-  return segs.length ? segs[0] : "";
+  const segs = textSegments(e)
+  return segs.length ? segs[0] : ''
 }
 
 /**
@@ -54,15 +54,15 @@ export function messageText(e) {
  * "\\n\\n" 恰好还原段落边界，也不会把「。」「#」硬粘成一行）。
  */
 export function messageTextFull(e) {
-  const segs = textSegments(e);
-  return segs.join("\n\n");
+  const segs = textSegments(e)
+  return segs.join('\n\n')
 }
 
 /** 与 DSH 宿主一致：帧带 checksum（ZSTD_c_checksumFlag=1）。 */
 function compressFrame(input) {
-  return zstdCompressSync(Buffer.from(input, "utf8"), {
+  return zstdCompressSync(Buffer.from(input, 'utf8'), {
     params: { [constants.ZSTD_c_checksumFlag]: 1 },
-  });
+  })
 }
 
 /**
@@ -71,41 +71,41 @@ function compressFrame(input) {
  * @returns {{end:number}|{error:'truncated'|'malformed'}}
  */
 function zstdFrameEnd(buf, start) {
-  if (start + 4 > buf.length || buf.readUInt32LE(start) !== ZSTD_MAGIC) return { error: "malformed" };
-  let p = start + 4;
-  if (p >= buf.length) return { error: "truncated" };
-  const fhd = buf[p++];
-  if ((fhd & 0x18) !== 0) return { error: "malformed" };
-  const fcsFlag = fhd >> 6;
-  const singleSegment = (fhd >> 5) & 1;
-  const checksum = (fhd >> 2) & 1;
-  const dictFlag = fhd & 3;
+  if (start + 4 > buf.length || buf.readUInt32LE(start) !== ZSTD_MAGIC) return { error: 'malformed' }
+  let p = start + 4
+  if (p >= buf.length) return { error: 'truncated' }
+  const fhd = buf[p++]
+  if ((fhd & 0x18) !== 0) return { error: 'malformed' }
+  const fcsFlag = fhd >> 6
+  const singleSegment = (fhd >> 5) & 1
+  const checksum = (fhd >> 2) & 1
+  const dictFlag = fhd & 3
   if (!singleSegment) {
-    if (p >= buf.length) return { error: "truncated" };
-    p += 1;
+    if (p >= buf.length) return { error: 'truncated' }
+    p += 1
   }
-  const dictSize = [0, 1, 2, 4][dictFlag];
-  const fcsSize = fcsFlag === 0 ? (singleSegment ? 1 : 0) : [0, 2, 4, 8][fcsFlag];
-  p += dictSize + fcsSize;
-  if (p > buf.length) return { error: "truncated" };
+  const dictSize = [0, 1, 2, 4][dictFlag]
+  const fcsSize = fcsFlag === 0 ? (singleSegment ? 1 : 0) : [0, 2, 4, 8][fcsFlag]
+  p += dictSize + fcsSize
+  if (p > buf.length) return { error: 'truncated' }
   for (;;) {
-    if (p + 3 > buf.length) return { error: "truncated" };
-    const bh = buf[p] | (buf[p + 1] << 8) | (buf[p + 2] << 16);
-    p += 3;
-    const last = bh & 1;
-    const type = (bh >> 1) & 3;
-    const size = bh >>> 3;
-    if (type === 3) return { error: "malformed" };
-    const payload = type === 1 ? 1 : size;
-    if (p + payload > buf.length) return { error: "truncated" };
-    p += payload;
-    if (last) break;
+    if (p + 3 > buf.length) return { error: 'truncated' }
+    const bh = buf[p] | (buf[p + 1] << 8) | (buf[p + 2] << 16)
+    p += 3
+    const last = bh & 1
+    const type = (bh >> 1) & 3
+    const size = bh >>> 3
+    if (type === 3) return { error: 'malformed' }
+    const payload = type === 1 ? 1 : size
+    if (p + payload > buf.length) return { error: 'truncated' }
+    p += payload
+    if (last) break
   }
   if (checksum) {
-    if (p + 4 > buf.length) return { error: "truncated" };
-    p += 4;
+    if (p + 4 > buf.length) return { error: 'truncated' }
+    p += 4
   }
-  return { end: p };
+  return { end: p }
 }
 
 /**
@@ -114,26 +114,26 @@ function zstdFrameEnd(buf, start) {
  * @returns {{frames: {start:number,end:number}[], tornStart?: number}}
  */
 export function scanZstdFrames(buf) {
-  const frames = [];
-  let offset = 0;
+  const frames = []
+  let offset = 0
   while (offset < buf.length) {
-    const start = offset;
-    if (buf.length - offset < 4) return { frames, tornStart: start };
+    const start = offset
+    if (buf.length - offset < 4) return { frames, tornStart: start }
     if (buf.readUInt32LE(offset) !== ZSTD_MAGIC) {
-      throw new Error(`corrupt zstd session log: invalid frame magic at byte ${offset}`);
+      throw new Error(`corrupt zstd session log: invalid frame magic at byte ${offset}`)
     }
-    const parsed = zstdFrameEnd(buf, offset);
-    if (parsed.error === "truncated") {
-      frames.push({ start, end: buf.length });
-      return { frames, tornStart: start };
+    const parsed = zstdFrameEnd(buf, offset)
+    if (parsed.error === 'truncated') {
+      frames.push({ start, end: buf.length })
+      return { frames, tornStart: start }
     }
     if (parsed.error) {
-      throw new Error(`corrupt zstd session log: malformed frame at byte ${offset}`);
+      throw new Error(`corrupt zstd session log: malformed frame at byte ${offset}`)
     }
-    frames.push({ start, end: parsed.end });
-    offset = parsed.end;
+    frames.push({ start, end: parsed.end })
+    offset = parsed.end
   }
-  return { frames };
+  return { frames }
 }
 
 /**
@@ -145,16 +145,23 @@ export function scanZstdFrames(buf) {
  * 撕裂行（JSON.parse 失败）按宿主「完整前缀」语义跳过。
  */
 function collectHeaderAndEvents(text, events) {
-  let header = null;
-  for (const line of text.split("\n")) {
-    const t = line.trim();
-    if (!t) continue;
-    let json;
-    try { json = JSON.parse(t); } catch { continue; /* torn record: skip */ }
-    if (!header && json && typeof json === "object" && json.type === "session") { header = json; continue; }
-    events.push(json);
+  let header = null
+  for (const line of text.split('\n')) {
+    const t = line.trim()
+    if (!t) continue
+    let json
+    try {
+      json = JSON.parse(t)
+    } catch {
+      continue /* torn record: skip */
+    }
+    if (!header && json && typeof json === 'object' && json.type === 'session') {
+      header = json
+      continue
+    }
+    events.push(json)
   }
-  return header;
+  return header
 }
 
 /**
@@ -162,64 +169,68 @@ function collectHeaderAndEvents(text, events) {
  * 逐行扫描路径，见 collectHeaderAndEvents。
  */
 export function readSessionFile(file) {
-  const buf = fs.readFileSync(file);
-  const { frames } = scanZstdFrames(buf);
-  if (frames.length === 0) throw new Error("empty or header-less session log");
-  const events = [];
-  let header = null;
+  const buf = fs.readFileSync(file)
+  const { frames } = scanZstdFrames(buf)
+  if (frames.length === 0) throw new Error('empty or header-less session log')
+  const events = []
+  let header = null
   for (const f of frames) {
-    const text = zstdDecompressSync(buf.subarray(f.start, f.end)).toString("utf8");
-    const found = collectHeaderAndEvents(text, events);
-    if (!header) header = found;
+    const text = zstdDecompressSync(buf.subarray(f.start, f.end)).toString('utf8')
+    const found = collectHeaderAndEvents(text, events)
+    if (!header) header = found
   }
-  if (!header) throw new Error(`session log ${file}: no {type:"session"} header line in any frame`);
-  return { header, events };
+  if (!header) throw new Error(`session log ${file}: no {type:"session"} header line in any frame`)
+  return { header, events }
 }
 
 /** Read only the first zstd frame (header); a damaged body cannot block titles. */
 export function readSessionHeader(file) {
-  const buf = fs.readFileSync(file);
+  const buf = fs.readFileSync(file)
   if (buf.length < 4 || buf.readUInt32LE(0) !== ZSTD_MAGIC) {
-    throw new Error(`session log ${file}: no zstd header frame`);
+    throw new Error(`session log ${file}: no zstd header frame`)
   }
-  const parsed = zstdFrameEnd(buf, 0);
-  if (parsed.error) throw new Error(`session log ${file}: ${parsed.error} header frame`);
-  const text = zstdDecompressSync(buf.subarray(0, parsed.end)).toString("utf8");
-  for (const line of text.split("\n")) {
-    const t = line.trim();
-    if (!t) continue;
-    let json;
-    try { json = JSON.parse(t); } catch { continue; }
-    if (json && typeof json === "object" && json.type === "session") return json;
+  const parsed = zstdFrameEnd(buf, 0)
+  if (parsed.error) throw new Error(`session log ${file}: ${parsed.error} header frame`)
+  const text = zstdDecompressSync(buf.subarray(0, parsed.end)).toString('utf8')
+  for (const line of text.split('\n')) {
+    const t = line.trim()
+    if (!t) continue
+    let json
+    try {
+      json = JSON.parse(t)
+    } catch {
+      continue
+    }
+    if (json && typeof json === 'object' && json.type === 'session') return json
   }
-  throw new Error(`session log ${file}: no {type:"session"} header line in the first frame`);
+  throw new Error(`session log ${file}: no {type:"session"} header line in the first frame`)
 }
 
 /** 物化整份日志：header 帧（恰一行）+ 单一事件帧（全部事件行）。 */
 export function encodeSessionFile(header, events) {
-  const headerText = JSON.stringify(header) + "\n";
-  const bodyText = events.map((e) => JSON.stringify(e)).join("\n") + "\n";
-  return Buffer.concat([compressFrame(headerText), compressFrame(bodyText)]);
+  const headerText = JSON.stringify(header) + '\n'
+  const bodyText = events.map(e => JSON.stringify(e)).join('\n') + '\n'
+  return Buffer.concat([compressFrame(headerText), compressFrame(bodyText)])
 }
 
 /** 会话根目录（尊重 DSH_HOME；Windows/Termux 通吃）。 */
 export function sessionsRoot() {
-  const home = process.env.DSH_HOME || path.join(os.homedir(), ".dsh");
-  return path.join(home, "sessions");
+  const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh')
+  return path.join(home, 'sessions')
 }
 
-const SESSION_ID_RE = /^(session-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SESSION_ID_RE = /^(session-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export function isSessionId(v) {
-  return typeof v === "string" && SESSION_ID_RE.test(v);
+  return typeof v === 'string' && SESSION_ID_RE.test(v)
 }
 
 /** 会话 id 的两种拼写（带/不带 session- 前缀）。 */
 export function sessionIdVariants(sessionId) {
-  const variants = new Set([sessionId]);
-  if (sessionId.startsWith("session-")) variants.add(sessionId.slice("session-".length));
-  else variants.add(`session-${sessionId}`);
-  return [...variants];
+  const variants = new Set([sessionId])
+  if (sessionId.startsWith('session-')) variants.add(sessionId.slice('session-'.length))
+  else variants.add(`session-${sessionId}`)
+  return [...variants]
 }
 
 /**
@@ -228,35 +239,47 @@ export function sessionIdVariants(sessionId) {
  * @returns {{dir: string, logPath: string}[]}
  */
 export function findSessionDirs(sessionId) {
-  const root = sessionsRoot();
-  let slugs = [];
-  try { slugs = fs.readdirSync(root, { withFileTypes: true }); } catch { return []; }
-  const variants = sessionIdVariants(sessionId);
-  const found = [];
+  const root = sessionsRoot()
+  let slugs = []
+  try {
+    slugs = fs.readdirSync(root, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const variants = sessionIdVariants(sessionId)
+  const found = []
   for (const slug of slugs) {
-    if (!slug.isDirectory()) continue;
+    if (!slug.isDirectory()) continue
     for (const variant of variants) {
-      const dir = path.join(root, slug.name, variant);
+      const dir = path.join(root, slug.name, variant)
       try {
-        if (!fs.statSync(dir).isDirectory()) continue;
-      } catch { continue; }
+        if (!fs.statSync(dir).isDirectory()) continue
+      } catch {
+        continue
+      }
       // 探测序列（用户实测 DSH 已升级 v4 格式）：v4 → v3 → 旧单帧，
       // 高版本优先；文件名与 header.version 对应，读取逻辑三格式同构。
-      let logPath = null;
-      for (const name of ["session.v4.jsonl.zstd", "session.v3.jsonl.zstd", "session.jsonl.zstd"]) {
-        const candidate = path.join(dir, name);
-        try { fs.statSync(candidate); logPath = candidate; break; } catch { /* probe next */ }
+      let logPath = null
+      for (const name of ['session.v4.jsonl.zstd', 'session.v3.jsonl.zstd', 'session.jsonl.zstd']) {
+        const candidate = path.join(dir, name)
+        try {
+          fs.statSync(candidate)
+          logPath = candidate
+          break
+        } catch {
+          /* probe next */
+        }
       }
-      if (!logPath) continue;
-      if (!found.some((f) => f.dir === dir)) found.push({ dir, logPath });
+      if (!logPath) continue
+      if (!found.some(f => f.dir === dir)) found.push({ dir, logPath })
     }
   }
-  return found;
+  return found
 }
 
 /** 新建会话 id（与宿主同款 session-<uuid> 拼写）。 */
 export function newSessionId() {
-  return `session-${crypto.randomUUID()}`;
+  return `session-${crypto.randomUUID()}`
 }
 
 /** 从事件流提取消息级列表（user/assistant/system message + tool/call 摘要）。 */
@@ -271,69 +294,75 @@ export function newSessionId() {
  * @returns {{starts: Map<number, number>, ends: Map<number, number>}}
  */
 export function turnBounds(events) {
-  const starts = new Map();
-  const ends = new Map();
+  const starts = new Map()
+  const ends = new Map()
   for (const e of events) {
-    if (!e || typeof e.seq !== "number") continue;
-    const t = e.data && e.data.turn;
-    if (!Number.isSafeInteger(t)) continue;
-    if (e.type === "turn/start") starts.set(t, e.seq);
-    else if (e.type === "turn/end") ends.set(t, e.seq);
+    if (!e || typeof e.seq !== 'number') continue
+    const t = e.data && e.data.turn
+    if (!Number.isSafeInteger(t)) continue
+    if (e.type === 'turn/start') starts.set(t, e.seq)
+    else if (e.type === 'turn/end') ends.set(t, e.seq)
   }
-  return { starts, ends };
+  return { starts, ends }
 }
 
 export function listMessages(events) {
-  const syntheticTurns = new Set();
+  const syntheticTurns = new Set()
   for (const e of events) {
-    if (e && e.type === "turn/start" && e.data && e.data.reason === "message-ops"
-      && Number.isSafeInteger(e.data.turn)) syntheticTurns.add(e.data.turn);
+    if (e && e.type === 'turn/start' && e.data && e.data.reason === 'message-ops' && Number.isSafeInteger(e.data.turn))
+      syntheticTurns.add(e.data.turn)
   }
-  const messages = [];
+  const messages = []
   for (const e of events) {
-    if (!e || typeof e.seq !== "number") continue;
-    if (e.type === "user/message" || e.type === "assistant/message" || e.type === "system/message") {
-      const text = messageText(e);
-      const msg = e.data && e.data.message;
+    if (!e || typeof e.seq !== 'number') continue
+    if (e.type === 'user/message' || e.type === 'assistant/message' || e.type === 'system/message') {
+      const text = messageText(e)
+      const msg = e.data && e.data.message
       // id：宿主持久化的消息身份（user 在 data.id、assistant 在 data.message.id），
       // 供 0.2.0 assistant-actions 槽（ownerProps={messageId}）反查 seq。
       // marker：本事件是 revert/delete 落定的 replace 标记 → 对话框据此提供「恢复」模式。
-      const isReplaceMarker = !!(e.surfaceOp && typeof e.surfaceOp === "object" && e.surfaceOp.op === "replace");
+      const isReplaceMarker = !!(e.surfaceOp && typeof e.surfaceOp === 'object' && e.surfaceOp.op === 'replace')
       messages.push({
         seq: e.seq,
         type: e.type,
-        role: (msg && msg.role) || (e.type === "user/message" ? "user" : e.type === "assistant/message" ? "assistant" : "system"),
+        role: (msg && msg.role) || (e.type === 'user/message' ? 'user' : e.type === 'assistant/message' ? 'assistant' : 'system'),
         id: (msg && msg.id) || e.data.id || null,
         marker: isReplaceMarker,
-        snippet: text.replace(/\s+/g, " ").trim().slice(0, 160),
+        snippet: text.replace(/\s+/g, ' ').trim().slice(0, 160),
         // 0.4.0 composer 回填：user 消息携带全文（revert 后 setDraft 原文）
-        fullText: e.type === "user/message" ? text : null,
+        fullText: e.type === 'user/message' ? text : null,
         // 0.4.1 dock：replace 标记携带范围与来源（区分手工回撤 vs compaction）
-        range: isReplaceMarker && e.surfaceOp.startSeq != null && e.surfaceOp.endSeq != null
-          ? { start: e.surfaceOp.startSeq, end: e.surfaceOp.endSeq } : null,
+        range:
+          isReplaceMarker && e.surfaceOp.startSeq != null && e.surfaceOp.endSeq != null
+            ? { start: e.surfaceOp.startSeq, end: e.surfaceOp.endSeq }
+            : null,
         sourceKind: (e.data && e.data.source && e.data.source.kind) || null,
         // 0.4.2：恢复标记引用（restore 的 notice 事件带回它所恢复的标记 seq）
-        restoresSeq: (e.type === "system/message" && e.data && typeof e.data.restoresSeq === "number")
-          ? e.data.restoresSeq : null,
+        restoresSeq: e.type === 'system/message' && e.data && typeof e.data.restoresSeq === 'number' ? e.data.restoresSeq : null,
         time: e.time ?? null,
         turn: (e.data && e.data.turn) ?? null,
         syntheticTurn: syntheticTurns.has(e.data && e.data.turn) || undefined,
         // 0.9.1：assistant 节点的宿主 node-key 是 `14:assistant-step<turn>:<step>`，
         // 没有 step 就无法把渲染行映射回日志 seq → 回滚时助手回答藏不掉。
         step: (e.data && e.data.step) ?? null,
-      });
-    } else if (e.type === "tool/call") {
-      const d = e.data || {};
-      const name = d.name || (d.call && d.call.name) || "tool";
+      })
+    } else if (e.type === 'tool/call') {
+      const d = e.data || {}
+      const name = d.name || (d.call && d.call.name) || 'tool'
       messages.push({
-        seq: e.seq, type: "tool/call", role: "tool", snippet: `[tool] ${name}`,
-        time: e.time ?? null, turn: d.turn ?? null, step: d.step ?? null,
+        seq: e.seq,
+        type: 'tool/call',
+        role: 'tool',
+        snippet: `[tool] ${name}`,
+        time: e.time ?? null,
+        turn: d.turn ?? null,
+        step: d.step ?? null,
         // 0.9.1：工具节点的宿主 node-key 是 `9:tool-call<callId>`
         id: d.callId ?? null,
-      });
+      })
     }
   }
-  return messages;
+  return messages
 }
 
 /**
@@ -342,12 +371,12 @@ export function listMessages(events) {
  * dsh-src 较新副本的 {op:'replace', start, end}；其余视为非法返回 null。
  */
 export function readReplaceOp(e) {
-  const op = e && e.surfaceOp;
-  if (!op || typeof op !== "object" || op.op !== "replace") return null;
-  const startSeq = Number.isSafeInteger(op.startSeq) ? op.startSeq : op.start;
-  const endSeq = Number.isSafeInteger(op.endSeq) ? op.endSeq : op.end;
-  if (!Number.isSafeInteger(startSeq) || !Number.isSafeInteger(endSeq)) return null;
-  return { startSeq, endSeq };
+  const op = e && e.surfaceOp
+  if (!op || typeof op !== 'object' || op.op !== 'replace') return null
+  const startSeq = Number.isSafeInteger(op.startSeq) ? op.startSeq : op.start
+  const endSeq = Number.isSafeInteger(op.endSeq) ? op.endSeq : op.end
+  if (!Number.isSafeInteger(startSeq) || !Number.isSafeInteger(endSeq)) return null
+  return { startSeq, endSeq }
 }
 
 /**
@@ -382,18 +411,18 @@ export function readReplaceOp(e) {
  * @param {Array<object>} messages  listMessages 的输出（会被就地打上 committed）
  */
 export function markCommitted(messages) {
-  const realUserSeqs = [];
+  const realUserSeqs = []
   for (const m of messages) {
-    if (m && m.type === "user/message" && m.sourceKind === "user") realUserSeqs.push(m.seq);
+    if (m && m.type === 'user/message' && m.sourceKind === 'user') realUserSeqs.push(m.seq)
   }
   for (const m of messages) {
-    if (!m || m.marker !== true) continue;
-    m.committed = realUserSeqs.some((seq) => seq > m.seq);
+    if (!m || m.marker !== true) continue
+    m.committed = realUserSeqs.some(seq => seq > m.seq)
   }
-  return messages;
+  return messages
 }
 
-const MAX_SPAN = 1_000_000;
+const MAX_SPAN = 1_000_000
 
 /**
  * M1 护栏：超 span 上限直接抛（fail loud；与 session-search 同款常量与阈值，
@@ -402,10 +431,10 @@ const MAX_SPAN = 1_000_000;
  * 伪造 marker，不允许把它卡死事件循环。
  */
 export function computeShadowed(events) {
-  const shadowed = new Set();
+  const shadowed = new Set()
   for (const e of events) {
-    const range = readReplaceOp(e);
-    if (!range) continue;
+    const range = readReplaceOp(e)
+    if (!range) continue
     // M2′（0.10.9）：反向区间 [start>end] —— 引擎 foldSurface 的替换遮蔽是
     // 「节点索引序重算」（dsh-session/types/surface.js:299-327 replacementRange
     // 用 nodes.indexOf + nodes.slice）。数值方向本身合法，宿主判 clean（语料
@@ -413,25 +442,25 @@ export function computeShadowed(events) {
     // 磁盘口径下唯一等价的推导源是顶层 sourceEventSeqs（折叠凭据 = 被消费的
     // 原事件序列）；无凭据时无法等价推导，保持旧约定忽略。
     if (range.startSeq > range.endSeq) {
-      const src = e.sourceEventSeqs;
-      if (!Array.isArray(src)) continue;
+      const src = e.sourceEventSeqs
+      if (!Array.isArray(src)) continue
       for (const s of src) {
-        if (Number.isInteger(s) && s >= 0 && s < e.seq) shadowed.add(s);
+        if (Number.isInteger(s) && s >= 0 && s < e.seq) shadowed.add(s)
       }
-      continue;
+      continue
     }
     if (range.endSeq - range.startSeq > MAX_SPAN) {
       throw new OpsError(
         `surface replace span too large: [${range.startSeq}..${range.endSeq}] exceeds MAX_SPAN=${MAX_SPAN} — refusing to materialize (corrupt or hostile replace marker?)`,
         404,
-      );
+      )
     }
-    for (let s = range.startSeq; s <= range.endSeq; s++) shadowed.add(s);
+    for (let s = range.startSeq; s <= range.endSeq; s++) shadowed.add(s)
   }
-  return shadowed;
+  return shadowed
 }
 
-const yieldToLoop = () => new Promise((resolve) => setImmediate(resolve));
+const yieldToLoop = () => new Promise(resolve => setImmediate(resolve))
 
 /**
  * readSessionFile 的异步变体：文件读取走 fs.promises.readFile（线程池，
@@ -444,22 +473,22 @@ const yieldToLoop = () => new Promise((resolve) => setImmediate(resolve));
  *   用户提示「仅完整读取，无截断，但本次请求耗时可能较长」。
  */
 export async function readSessionFileAsync(file, { framesPerYield = 8, frameBudget = 500 } = {}) {
-  const buf = await fs.promises.readFile(file);
-  const { frames } = scanZstdFrames(buf);
-  if (frames.length === 0) throw new Error("empty or header-less session log");
-  const events = [];
-  let header = null;
-  let framesSinceYield = 0;
+  const buf = await fs.promises.readFile(file)
+  const { frames } = scanZstdFrames(buf)
+  if (frames.length === 0) throw new Error('empty or header-less session log')
+  const events = []
+  let header = null
+  let framesSinceYield = 0
   for (const f of frames) {
-    const text = zstdDecompressSync(buf.subarray(f.start, f.end)).toString("utf8");
-    const found = collectHeaderAndEvents(text, events);
-    if (!header) header = found;
+    const text = zstdDecompressSync(buf.subarray(f.start, f.end)).toString('utf8')
+    const found = collectHeaderAndEvents(text, events)
+    if (!header) header = found
     if (++framesSinceYield >= framesPerYield) {
-      framesSinceYield = 0;
-      await yieldToLoop();
+      framesSinceYield = 0
+      await yieldToLoop()
     }
   }
-  if (!header) throw new Error(`session log ${file}: no {type:"session"} header line in any frame`);
-  const bodyFrames = frames.length - 1;
-  return { header, events, frameCount: bodyFrames, partial: bodyFrames > frameBudget };
+  if (!header) throw new Error(`session log ${file}: no {type:"session"} header line in any frame`)
+  const bodyFrames = frames.length - 1
+  return { header, events, frameCount: bodyFrames, partial: bodyFrames > frameBudget }
 }

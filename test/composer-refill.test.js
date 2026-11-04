@@ -23,7 +23,7 @@ const pickForRefill = (rows, boundarySeq) => {
 
 /** 与 client.js 的 injected 同构（从源码里截出正则字面量校验覆盖面） */
 const injectedSource = (() => {
-  const m = src.match(/const injected = \(raw\) => (\/[\s\S]*?\/[gimsuy]*)\.test/)
+  const m = src.match(/const injected = \(?raw\)? =>\s*(\/[\s\S]*?\/[gimsuy]*)\.test/)
   return m ? new RegExp(m[1].slice(1, m[1].lastIndexOf('/')), m[1].slice(m[1].lastIndexOf('/') + 1)) : null
 })()
 

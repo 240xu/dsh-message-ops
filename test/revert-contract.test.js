@@ -236,8 +236,19 @@ test('buildRestoreNoticeEvent：discard 时调用方传空数组 → 不写该�
 
 test('磁盘 restore 路径把 plan.replayable 的 seq 传给 notice', () => {
   const src = readFileSync(new URL('../src/index.js', import.meta.url), 'utf8')
-  const block = src.slice(src.indexOf('batch.push(buildRestoreNoticeEvent({'))
-  const call = block.slice(0, block.indexOf('}));') + 4)
+  const at = src.indexOf('buildRestoreNoticeEvent({')
+  assert.ok(at >= 0, '找不到磁盘路径的 buildRestoreNoticeEvent 调用')
+  // 按**大括号**配平抽出参数对象（prettier 会重排换行，不能靠 `}))` 定位）
+  let depth = 0
+  let end = at
+  for (let i = at; i < src.length; i++) {
+    if (src[i] === '{') depth++
+    else if (src[i] === '}') {
+      depth--
+      if (depth === 0) { end = i + 1; break }
+    }
+  }
+  const call = src.slice(at, end).replace(/\s+/g, ' ')
   assert.match(call, /restoredSourceSeqs:\s*plan\.discard \? \[\] : plan\.replayable\.map/,
     '磁盘路径漏写该字段会让 restoreProgress 判 legacy、下一轮重复重放同一批消息')
 })

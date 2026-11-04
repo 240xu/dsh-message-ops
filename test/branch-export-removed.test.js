@@ -67,7 +67,10 @@ test('message_ops tool 的 enum 不含 export', () => {
 
 test('message_ops tool 仍保留核心三操作（revert/delete/restore）', () => {
   const s = read('src/index.js')
+  assert.ok(/enum:\s*\[/.test(s), 'message_ops tool 的 enum 不见了')
+  const enumBlock = s.slice(s.indexOf('enum: ['), s.indexOf(']', s.indexOf('enum: [')))
   for (const op of ['revert', 'delete', 'restore']) {
-    assert.ok(s.includes(`"${op}"`), `tool enum 缺少 ${op}`)
+    // 格式无关：单/双引号都接受（0.13.0 起统一单引号）
+    assert.ok(new RegExp(`['\"]${op}['\"]`).test(enumBlock), `tool enum 缺少 ${op}`)
   }
 })

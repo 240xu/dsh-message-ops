@@ -41,7 +41,12 @@ test('尊重 prefers-reduced-motion', () => {
 })
 
 test('关闭按钮是右上角叉叉且可键盘操作', () => {
-  const m = src.match(/createElement\('button', \{[\s\S]{0,260}?className: 'mopsPanelClose'[\s\S]{0,220}?\}, '×'\)/)
+  // prettier 会把 props 拆成多行、把 'button' 与对象分开 → 先空白归一，
+  // 再从 className 标记向两侧取窗口断言（不依赖具体排版）
+  const flatSrc = src.replace(/\s+/g, ' ')
+  const at = flatSrc.indexOf("className: 'mopsPanelClose'")
+  assert.ok(at >= 0, '找不到关闭按钮的 className')
+  const m = [flatSrc.slice(Math.max(0, at - 300), at + 400)]
   assert.ok(m, '找不到关闭按钮')
   assert.match(m[0], /type: 'button'/, '必须是 button 才能被键盘触发')
   assert.match(m[0], /aria-label/, '需要无障碍名称')

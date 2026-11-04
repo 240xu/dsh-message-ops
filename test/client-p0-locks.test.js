@@ -12,6 +12,23 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'client.js'), 'utf8')
+/** 按大括号配平抽出以 needle 起始的整块（与缩进/换行无关）。 */
+function fnBlock(text, needle) {
+  const at = text.indexOf(needle)
+  if (at < 0) return null
+  let depth = 0
+  let started = false
+  for (let i = at; i < text.length; i++) {
+    const ch = text[i]
+    if (ch === '{') { depth++; started = true }
+    else if (ch === '}') {
+      depth--
+      if (started && depth === 0) return text.slice(at, i + 1)
+    }
+  }
+  return null
+}
+
 
 /** 从源码里截出 `const <name> = { … }` 的对象字面量并求值（引号内跳过花括号）。 */
 function grabDict(name) {

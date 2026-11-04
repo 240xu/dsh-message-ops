@@ -15,7 +15,9 @@ function has(text) {
 
 test('P0 focus：面板有初始焦点、焦点陷阱和背景 inert', () => {
   has("'aria-labelledby': 'mops-panel-title'")
-  has("tabIndex: -1, ref: panelRef")
+  // prettier 会把长属性列表拆行 → 用空白归一后的比对
+  const flat = src.replace(/\s+/g, ' ')
+  assert.ok(flat.includes('tabIndex: -1, ref: panelRef'), '面板缺初始焦点锚（tabIndex/ref）')
   has('focusablesIn(scope)')
   has("setAttribute('inert', '')")
   has('triggerRef.current')

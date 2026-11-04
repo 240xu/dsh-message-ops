@@ -199,7 +199,7 @@ test('F6: dock.restoreHint 双字典存在 + 使用点存在（P0-4 的 must 列
 })
 
 test('F6: 0.10.2 两处核心改动确实存在于源码（防止被整体回退仍绿）', () => {
-  assert.match(indexSrc, /\)\.kind !== "user"\) continue/, 'seqText 的注入行过滤被移除')
+  assert.match(indexSrc, /\)\.kind !== ['"]user['"]\) continue/, 'seqText 的注入行过滤被移除')
   assert.match(indexSrc, /t\.seqs\.reduce\(/, 'preview 的轮内扫描被还原成 seqText.get(t.turnSeq)')
 })
 

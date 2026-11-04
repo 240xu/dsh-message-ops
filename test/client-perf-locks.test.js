@@ -11,23 +11,47 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
 const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'client.js'), 'utf8')
+/** 按大括号配平抽出以 needle 起始的整块（与缩进/换行无关）。 */
+function fnBlock(text, needle) {
+  const at = text.indexOf(needle)
+  if (at < 0) return null
+  let depth = 0
+  let started = false
+  for (let i = at; i < text.length; i++) {
+    const ch = text[i]
+    if (ch === '{') { depth++; started = true }
+    else if (ch === '}') {
+      depth--
+      if (started && depth === 0) return text.slice(at, i + 1)
+    }
+  }
+  return null
+}
+
+/** 从**最后一次**出现 needle 的位置配平抽取（用于"先声明后赋值"的同名变量）。 */
+function lastFnBlock(text, needle) {
+  const at = text.lastIndexOf(needle)
+  if (at < 0) return null
+  return fnBlock(text.slice(at), needle)
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // P2-1 · ensureAssign 三签名门控 + 藏行幂等跳写
 // ═══════════════════════════════════════════════════════════════════════════
 test('P2-1：assignSeqs 有三签名门控（dataSig / domSig / anchorSig）', () => {
-  const ea = src.match(/var ensureAssign = \(sid\) => fetchRows\(sid\)\.then\(\(cache\) => \{[\s\S]*?\n {6}\}\)/)
+  const ea = fnBlock(src, 'var ensureAssign =')
   assert.ok(ea, '找不到 ensureAssign')
-  const body = ea[0]
+  const body = ea
   // ① dataSig = idx.total / shadowed.size / visibleTurns.size
   assert.ok(/idx\.total \+ '\/' \+ idx\.shadowed\.size \+ '\/' \+ idx\.visibleTurns\.size/.test(body), '缺 dataSig')
   // ② domSig = transcript 行数
   assert.ok(/rows\.length/.test(body), '缺 domSig')
   // ③ anchorSig = 每个 user 块的 node-key + 打标状态
   assert.ok(/sigOf\(sid, dataSig, rows\.length, anchors\)/.test(body), '缺签名组装')
-  assert.ok(/var anchorSigOf = \(anchors\) => \{/.test(src), '缺 anchorSig 生成器')
-  const as = src.indexOf('var anchorSigOf')
-  assert.ok(as >= 0 && /getAttribute\('data-mops-seq'\)/.test(src.slice(as, as + 600)),
+  assert.ok(/var anchorSigOf = \(?anchors\)? => \{/.test(src), '缺 anchorSig 生成器')
+  const asBlock = fnBlock(src, 'var anchorSigOf')
+  assert.ok(asBlock && /getAttribute\('data-mops-seq'\)/.test(asBlock),
     'anchorSig 必须包含打标状态（宿主重建块 / CHANGED 摘牌要能被发现）')
   assert.ok(/if \(before !== assignSig\) \{/.test(body), '门控条件缺失 —— 会退回每次全量改写')
   assert.ok(/assignSeqs\(sid, cache, anchors\)/.test(body), 'assignSeqs 必须在门控内')
@@ -37,10 +61,10 @@ test('P2-1：assignSeqs 有三签名门控（dataSig / domSig / anchorSig）', (
 })
 
 test('P2-1 红线：applySurfaceVisibility 保持无条件执行（在门控 if 之外）', () => {
-  const ea = src.match(/var ensureAssign = \(sid\) => fetchRows\(sid\)\.then\(\(cache\) => \{[\s\S]*?\n {6}\}\)/)
+  const ea = fnBlock(src, 'var ensureAssign =')
   assert.ok(ea, '找不到 ensureAssign')
-  const body = ea[0]
-  assert.ok(/\}\n {8}applySurfaceVisibility\(rows, idx\)/.test(body),
+  const body = ea
+  assert.ok(/}\s+applySurfaceVisibility\(rows, idx\)/.test(body),
     '藏行必须无条件跑 —— 这是 0.9.6 修的核心，砍成条件执行 = 隐藏不更新')
   assert.ok(!/if\s*\([^\n]*\)\s*applySurfaceVisibility/.test(body), '不许包进任何 if')
 })
@@ -55,8 +79,8 @@ test('P2-1：藏行改成幂等跳写（判据/时机不变，只省重复 DOM �
   assert.ok(/shouldHide = !idx\.visibleTurns\.has\(String\(hit\.turn\)\)/.test(src), '回合 chrome 判据被改')
   assert.ok(/if \(hit === null\) \{/.test(src) && /unresolved\+\+/.test(src), '查不到必须保持可见')
   // 判定后必须仍然逐行执行（不允许按签名整段跳过）
-  const fn = src.match(/var applySurfaceVisibility = [\s\S]*?\n {6}\};/)
-  assert.ok(fn && !/if \([^)]*Sig[^)]*\) return/.test(fn[0]), '不许按签名跳过整段藏行计算')
+  const fn = fnBlock(src, 'var applySurfaceVisibility =')
+  assert.ok(fn && !/if \([^)]*Sig[^)]*\) return/.test(fn), '不许按签名跳过整段藏行计算')
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -66,15 +90,19 @@ test('P1-2：MO 回调先过滤，matches 与 querySelector 两者都试', () =>
   assert.ok(/nodeType !== 1/.test(src), '非元素节点必须跳过')
   assert.ok(/n\.matches\(MO_SEL\)/.test(src), '新增节点自身可能就是目标')
   assert.ok(/n\.querySelector\(MO_SEL\)/.test(src), '新增子树可能是祖先容器')
-  assert.ok(/catch \{ scheduleScan\(\) \}/.test(src), '过滤自身出错必须放行（宁可多扫一次）')
+  assert.ok(/catch\s*\{\s*scheduleScan\(\)\s*\}/.test(src), '过滤自身出错必须放行（宁可多扫一次）')
   assert.ok(/MO_SEL = '\[data-chat-node-key\]/.test(src), '选择器必须覆盖宿主 chat 行')
   assert.ok(/\[class\*="xzv4MW_actions"\]/.test(src), '选择器必须覆盖官方用户动作行')
 })
 
 test('P1-2：防抖 trailing 200ms + maxWait（连续 mutation 不许无限推迟）', () => {
   assert.ok(/scanPendingSince >= 1000/.test(src), '缺 maxWait —— 流式输出时遮蔽行会长时间保持可见')
-  assert.ok(/setTimeout\(\(\) => \{ scan\._t = null; scanPendingSince = 0; scan\(\) \}, 200\)/.test(src),
-    'trailing 200ms 防抖被改')
+  // 格式无关：压掉空白后比对语义片段（prettier 会把单行箭头拆多行）
+  const flatSrc = src.replace(/\s+/g, ' ')
+  assert.ok(
+    /setTimeout\(\(\) => \{ scan\._t = null;? scanPendingSince = 0;? scan\(\) \}, 200\)/.test(flatSrc),
+    'trailing 200ms 防抖被改',
+  )
 })
 
 test('P1-2：attributeFilter 只盯宿主写入的 data-chat-node-key（不自触发）', () => {
@@ -96,17 +124,17 @@ test('读合并：合并窗口 <1600ms，且兜底档强制走真网络', () => 
   const w = Number(m[1])
   assert.ok(w >= 300, `窗口 ${w}ms 太短，盖不住 dock + openSession 后的 scan`)
   assert.ok(w < 1600, `窗口 ${w}ms ≥1600 会把兜底那一发吞掉`)
-  const rs = src.match(/__refreshSurface = \(sid\) => \{[\s\S]*?\n {6}\}/)
+  const rs = lastFnBlock(src, '__refreshSurface =')
   assert.ok(rs, '找不到 __refreshSurface')
-  assert.ok(/invalidateMessagesMemo\(\)/.test(rs[0]), '兜底档必须先作废窗口再拉，否则吃的是旧响应')
-  assert.ok(/refreshDeadline/.test(rs[0]), '三档必须并成一次（deadline 合并），不是各拉各的')
+  assert.ok(/invalidateMessagesMemo\(\)/.test(rs), '兜底档必须先作废窗口再拉，否则吃的是旧响应')
+  assert.ok(/refreshDeadline/.test(rs), '三档必须并成一次（deadline 合并），不是各拉各的')
 })
 
 test('红线：refillComposer / setDraft 必须发生在首次刷新之前', () => {
   // 悬停回滚按钮：refill → emitChanged → 三连
   const s0 = src.indexOf("notifyDone(__t('done.revert'))")
   assert.ok(s0 >= 0, '找不到 runUserRevert 成功分支')
-  const s1 = src.indexOf('.finally(() => { btn.disabled = false })', s0)
+  const s1 = src.indexOf('btn.disabled = false', s0)
   assert.ok(s1 > s0, '找不到 runUserRevert 收尾')
   const block = src.slice(s0, s1)
   const r = block.indexOf('refillComposer(')
@@ -123,8 +151,8 @@ test('红线：refillComposer / setDraft 必须发生在首次刷新之前', () 
   assert.ok(aw > un, '/undo 必须先回填再走 afterWrite')
 
   // /redo 是「加回内容」，不回填（既有 composer-refill R2 锁的互补）
-  const redo = src.match(/var runRedo = \(\) => \{[\s\S]*?\n {4}\}/)
-  assert.ok(redo && !/refillComposer\(/.test(redo[0]), '/redo 不应回填 composer')
+  const redo = fnBlock(src, 'var runRedo =')
+  assert.ok(redo && !/refillComposer\(/.test(redo), '/redo 不应回填 composer')
 })
 
 test('读合并：所有 message 列表 GET 都走 fetchMessagesJson', () => {
@@ -156,9 +184,9 @@ const fakeSeqOfNodeKey = (key) => {
 }
 
 const loadApplySurfaceVisibility = () => {
-  const m = src.match(/var applySurfaceVisibility = \(root, idx\) => \{[\s\S]*?\n {6}\};/)
+  const m = fnBlock(src, 'var applySurfaceVisibility =')
   assert.ok(m, '源码里抠不出 applySurfaceVisibility')
-  const factory = new Function('seqOfNodeKey', `${m[0]}\nreturn applySurfaceVisibility`)
+  const factory = new Function('seqOfNodeKey', `${m}\nreturn applySurfaceVisibility`)
   return factory(fakeSeqOfNodeKey)
 }
 

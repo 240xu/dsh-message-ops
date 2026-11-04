@@ -7,6 +7,11 @@ DSH web 插件：**消息回滚 + 删除 + 恢复**。只补 dsh 官方**没有*
 >
 > **0.12.0**：消息动作收敛到用户消息（AI 消息的分支入口移除），用户消息动作行新增
 > opencode 式 `Fork from here`，面板内新增「编辑并重发」。详见「用法」。
+>
+> **0.13.0**：代码风格对齐 dsh 官方（prettier：无分号、单引号、`printWidth: 140`、
+> `arrowParens: as-needed`、`trailingComma: all`）。同时把 24 处**依赖源码排版**的
+> 回归锁改成格式无关（按大括号配平抽取 + 空白归一断言）—— 在此之前任何人跑一次
+> formatter 都会让 18 条测试失败，等于格式被测试冻住了。
 
 
 ## 10 秒速查
@@ -885,3 +890,36 @@ min fence=10 → seq>=10 全藏 → 4792/4793 全被隐藏 → 正文几乎空�
 | `src/index.js:1-23` 模块头里的 0.9.0 分支/导出移除段 | 「为什么不重复造轮子（0.9.0 的取舍）」 |
 | `src/index.js:336-340` `revertFences` 塌缩复盘 | 「0.9.4 · 修「正文几乎空白」」 |
 | `src/ops-core.js:551-557` 0.5.7 磁盘路径复盘 | 「0.5.7 · 第四层根因：store-miss 会话的磁盘追加路径」 |
+
+### 0.13.0 · 代码风格官方化 + 拆掉「格式被测试冻住」的问题
+
+**风格**（与 `~/.dsh/deepseek-harness-master/.oxlintrc.json` 的 `@stylistic/*` 规则一致）：
+
+| 规则 | 值 |
+|---|---|
+| `semi` | `never`（无行尾分号） |
+| `quotes` | `single`（`avoidEscape`） |
+| `printWidth` | `140` |
+| `tabWidth` | `2` |
+| `trailingComma` | `all` |
+| `arrowParens` | `as-needed`（单参数去括号） |
+
+`npx prettier --check "src/*.js"` 现在全绿；`npm test` 267（263 pass / 4 skip）。
+
+**为什么这件事以前做不了**：仓库里有 24 处「回归锁」直接对源码原文做正则，而且用
+`'\n    }'` 这类**固定缩进**当函数结尾标记。它们防的是真 bug（藏行不更新、会话损坏、
+双提交防护…），但实现方式让**任何**格式化都会全线变红 —— 于是风格永远不敢动。
+0.13.0 把它们改造成格式无关的两种原语：
+
+```js
+// test/_source.js —— 与缩进/换行/引号风格无关
+flat(text)          // 空白归一：`a\n  b` → `a b`
+blockAt(text, needle) // 从 needle 起按**大括号配平**切出整块
+```
+
+改造后每条锁**断言的仍是同一件事**（例如「`applySurfaceVisibility` 必须在门控 `if`
+之外无条件执行」），只是不再依赖排版。新增 `lastFnBlock` 处理「先 `var x = null`
+后 `x = …` 赋值」的同名情况。
+
+**顺带修的**：`test/user-fork-edit.test.js` 等新测试从一开始就写成格式无关
+（大括号配平 + 真执行），不再重蹈覆辙。
