@@ -6,3 +6,6 @@ node_modules/
 # npm pack 产物：绝不入库（审计 F2：0.10.2 的 tgz 被误提交，
 # 且它是 0.10.1 的构建产物 —— 名实不符，会误导 clone 的人）
 *.tgz
+
+# 设计稿（本地评审用，不入库）
+design-demos/

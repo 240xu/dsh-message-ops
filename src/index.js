@@ -429,6 +429,38 @@ async function buildDerived(logPath) {
   const turnEndSeq = {};
   for (const [turn, seq] of bounds.ends) turnEndSeq[turn] = seq;
   for (const [turn, seq] of bounds.starts) if (!(turn in turnEndSeq)) turnEndSeq[turn] = seq;
+  // 0.12.0 分叉边界：给每条消息挂「它所在 turn 的 turn/start seq」。
+  //
+  // 为什么不能按 seq-1 切：实测 40 份语料里，真人输入的**前一个事件恒是同一 turn
+  // 内的 system/message**（turn/start → agent/inbox/spliced → step/start →
+  // system/message → user/message），按 seq-1 分叉会得到「turn/step 已开、
+  // 但没有 user 消息」的悬空前缀 —— 引擎得补合成 closers，语义也不是用户想要的
+  // 「这条之前」。
+  // 正确边界 = turn/start 的**前一个**事件 seq（= turnStartSeq - 1）；
+  // 首个 turn（seq 4）之前只有 seq 0..3 的会话头/permission 事件，也成立。
+  const turnStartSeq = {};
+  for (const [turn, seq] of bounds.starts) turnStartSeq[turn] = seq;
+  // ⚠️ 真人 `user/message` 事件**不带 `turn` 字段**（实测：data 里只有 id/source/message），
+  // 它是否属于某轮由投影决定，不是日志里的事实。`system/message`/`assistant/message`
+  // 才带 turn/step。所以不能只查 `m.turn` —— 必须扫一遍事件，用「当前开着的 turn」
+  // 给每条消息定归属（user 消息恒落在 turn/start 之后、turn/end 之前）。
+  const enclosingTurnStart = new Map(); // message seq -> 所属 turn 的 turn/start seq
+  let openTurnStart = null;
+  for (const e of events) {
+    if (!e || typeof e.seq !== "number") continue;
+    if (e.type === "turn/start") { openTurnStart = e.seq; continue; }
+    if (e.type === "turn/end") { openTurnStart = null; continue; }
+    if (e.type !== "user/message" && e.type !== "assistant/message" && e.type !== "system/message") continue;
+    const ownTurn = e.data && e.data.turn;
+    const startSeq = Number.isSafeInteger(ownTurn) && turnStartSeq[ownTurn] != null
+      ? turnStartSeq[ownTurn]
+      : openTurnStart;
+    enclosingTurnStart.set(e.seq, startSeq ?? null);
+  }
+  for (const m of messages) {
+    if (!m || typeof m.seq !== "number") continue;
+    m.turnStartSeq = enclosingTurnStart.get(m.seq) ?? null;
+  }
   return { header, messages, shadowed, turnEndSeq };
 }
 
@@ -501,6 +533,10 @@ async function opsList(targetCtx, sessionId, opts = {}) {
       time: m.time,
       visible: m.visible,
       shadowed: m.shadowed,
+      // 0.12.0：分叉要按**轮**切，不能按 seq-1 切（见 buildDerived 的注释）。
+      // 客户端据此算 fork 边界 = turnStartSeq - 1。只带这一个字段：turn/step
+      // 属于「重」字段，面板的虚拟行用不到（详见 compact 的取舍）。
+      turnStartSeq: m.turnStartSeq ?? null,
     }))
     : messages;
 

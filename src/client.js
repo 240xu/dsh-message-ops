@@ -113,6 +113,10 @@ window.__ModuleLoader__.load({
       'op.branchDesc': '复制所选消息（含）之前的全部事件为新会话（原会话不变，非破坏操作）。',
       'slot.revert': '回滚到此条',
       'slot.revertUnmatched': '在日志里定位不到这条消息的 seq（通常是模型写的摘要与渲染文本偏差过大）——请改用「消息操作」对话框。',
+      'slot.fork': '从此条分叉',
+      'slot.forkHint': '复制此条之前的对话到新会话，并把此条原文放回新会话输入框',
+      'slot.forkDone': '已分叉：新会话 {id}',
+      'slot.forkUnavailable': '分叉不可用：会话正在运行，或宿主未提供 session/fork',
       'toast.openNew': '打开新会话',
       'fork.official': '分支完成：新会话 {id}',
       'fork.unavailable': '官方分支不可用：通常是因为会话正在运行，请先停止会话后重试。分支功能由 dsh 内置的 session/fork 提供。',
@@ -179,9 +183,15 @@ window.__ModuleLoader__.load({
       'panel.deleteUnavailable': '会话信息尚未就绪，暂不能删除。',
       'panel.delete': '仅删除此条',
       'panel.deleteHint': '只遮蔽这一条，其他消息不动',
-      'panel.branch': '从此条分支',
-      'panel.branchHint': '复制到此条为止的内容为新会话',
-      'panel.branchDone': '分支已创建：{id}',
+      'panel.branch': '从此条分叉',
+      'panel.branchHint': '复制此条之前的对话到新会话，并把此条原文放回新会话输入框',
+      'panel.branchDone': '已分叉：新会话 {id}',
+      'panel.branchUserOnly': '分叉只对用户消息可用（AI 消息没有可回填的原文）',
+      'panel.edit': '编辑并重发',
+      'panel.editHint': '把此条原文放回输入框，改完直接发送',
+      'panel.editDone': '原文已放回输入框',
+      'panel.editEmpty': '这条消息没有可编辑的文本',
+      'panel.editUnavailable': '编辑器不可写（会话可能正在运行或尚未挂载）',
       'panel.openNew': '打开新会话',
       'panel.revertDone': '回滚已生效',
       'panel.deleteDone': '删除已生效',
@@ -227,6 +237,10 @@ window.__ModuleLoader__.load({
       'op.branchDesc': 'Copies everything up to and including the picked message into a new session (original untouched, non-destructive).',
       'slot.revert': 'Revert to here',
       'slot.revertUnmatched': 'Cannot locate this message seq in the log (usually the model-written summary drifted too far from the rendered text) — use the Message ops dialog instead.',
+      'slot.fork': 'Branch from here',
+      'slot.forkHint': 'Copies the conversation above this message into a new session and puts this message back in the new composer',
+      'slot.forkDone': 'Branched: new session {id}',
+      'slot.forkUnavailable': 'Branch unavailable: the session is running, or the host provides no session/fork',
       'toast.openNew': 'Open new session',
       'fork.official': 'Branched (official fork): new session {id}',
       'fork.unavailable': 'Built-in branch unavailable — usually because the session is running. Stop it and retry. Branching is provided by the dsh built-in session/fork.',
@@ -293,9 +307,15 @@ window.__ModuleLoader__.load({
       'panel.deleteUnavailable': 'Session details are not ready yet; deletion is disabled.',
       'panel.delete': 'Delete only this',
       'panel.deleteHint': 'Shadows only this message',
-      'panel.branch': 'Branch from here',
-      'panel.branchHint': 'Copy everything through this message into a new session',
-      'panel.branchDone': 'Branched: {id}',
+      'panel.branch': 'Fork from here',
+      'panel.branchHint': 'Copy the conversation above this message into a new session and put this message back in the new composer',
+      'panel.branchDone': 'Forked: {id}',
+      'panel.branchUserOnly': 'Fork works on user messages only (assistant messages have no text to hand back)',
+      'panel.edit': 'Edit and resend',
+      'panel.editHint': 'Put this message back in the composer to change and send',
+      'panel.editDone': 'Original text is back in the composer',
+      'panel.editEmpty': 'This message has no editable text',
+      'panel.editUnavailable': 'Composer is not writable (session may be running or not mounted)',
       'panel.openNew': 'Open new session',
       'panel.revertDone': 'Revert applied',
       'panel.deleteDone': 'Delete applied',
@@ -536,16 +556,18 @@ window.__ModuleLoader__.load({
         setBusyMsg(t('busy.' + (mode === 'revert' || mode === 'delete' ? mode : 'branch')))
         setState('busy'); setError(null)
         if (mode === 'branch') {
-          // 0.9.0：分支**只走官方** sessions.fork({atSeq})；失败即拒绝（源会话多半在
-          // 运行），不再回落写盘 —— 被删的磁盘 applyBranch 语义复盘见 README「为什么不重复造轮子」。
-          const forkPath = pickForkPath(__sessionsSvc)
-          if (forkPath.kind !== 'official') {
-            setError(t('fork.unavailable'))
+          // 0.12.0：与面板/消息行同一实现 —— opencode 的 before 语义
+          // （新会话不含此条，原文回新会话输入框）。只对用户消息成立；
+          // 分支不再回落写盘（被删的磁盘 applyBranch 语义复盘见 README）。
+          const pickedRow = picked != null ? messages.find((m) => m.seq === picked) : null
+          if (!pickedRow || pickedRow.role !== 'user') {
+            setError(t('panel.branchUserOnly'))
             setBusyMsg('')
             setState('error')
             return
           }
-          forkPath.fork({ sessionId: target.sessionId, atSeq: picked, increaseTitle: true })
+          Promise.resolve()
+            .then(() => forkFromUserMessage(target.sessionId, picked, pickedRow.fullText || pickedRow.snippet || '', pickedRow.turnStartSeq))
             .then((childId) => {
               setDoneMsg(t('fork.official', { id: String(childId || '') }))
               setBusyMsg('')
@@ -1068,6 +1090,41 @@ window.__ModuleLoader__.load({
         }, 0)
       }, [busy, confirmAction])
 
+      /**
+       * 0.12.0 面板内的「编辑并重发」：把该条用户消息的原文放进编辑器并关掉面板。
+       *
+       * 为什么不自己加一个输入框：编辑器已经有草稿、附件、引用、斜杠命令与提交状态机，
+       * 面板里再复刻一套只会分叉行为。正确做法是**交回官方编辑器**：
+       *   1. `setDraft(text)` 改编辑器内容
+       *   2. `persistDraft()` 落 localStorage —— 否则紧随的 openSession 会用旧草稿覆盖
+       *      （0.11.3 已踩过这个坑，见 refillComposer 注释）
+       *   3. 关面板并聚焦编辑器，用户改完直接回车发出
+       * 语义上与 opencode 的「回撤 → 原文回到 composer」一致；区别是我们不预先回撤，
+       * 由用户决定发不发（发了才产生新的分支上下文）。
+       */
+      const startEdit = useCallback((text) => {
+        if (!target || busy) return
+        const body = typeof text === 'string' ? text : ''
+        if (!body) {
+          setError(t('panel.editEmpty'))
+          return
+        }
+        if (!__inputActions || typeof __inputActions.setDraft !== 'function') {
+          setError(t('panel.editUnavailable'))
+          return
+        }
+        try {
+          __inputActions.setDraft(body)
+          if (typeof __inputActions.persistDraft === 'function') __inputActions.persistDraft()
+        } catch (reason) {
+          setError(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)))
+          return
+        }
+        setDone(t('panel.editDone'))
+        notifyDone(t('panel.editDone'))
+        close()
+      }, [target, busy, t, close])
+
       useEffect(() => {
         if (!open) return undefined
         const onKey = (e) => {
@@ -1328,9 +1385,11 @@ window.__ModuleLoader__.load({
         setDone('')
         try {
           if (mode === 'branch') {
-            const forkPath = pickForkPath(__sessionsSvc)
-            if (forkPath.kind !== 'official') throw new Error(t('fork.unavailable'))
-            const created = await forkPath.fork({ sessionId: target.sessionId, atSeq: picked.seq, increaseTitle: true })
+            // 0.12.0：分叉 = opencode 的 before 语义（新会话不含此条，原文回输入框）。
+            // 非破坏操作，故不受 running 限制（官方 fork 会自己拒绝运行中源会话）。
+            // 取文本用 `detail`（该条全文，pick 时已按 seq 拉好）；非用户消息不带文本。
+            const pickedRole = picked && picked.role
+            const created = await forkFromUserMessage(actionSid, picked.seq, pickedRole === 'user' ? detail : '', picked.turnStartSeq)
             if (sessionRef.current !== actionSid) return
             setChildId(created || null)
             setDone(t('panel.branchDone', { id: String(created || '') }))
@@ -1471,6 +1530,11 @@ window.__ModuleLoader__.load({
       const revertVisibleCount = revertImpact.filter((m) => m.visible).length
       const revertEnd = revertImpact.reduce((max, m) => Math.max(max, m.seq), pickedLive ? pickedLive.seq : 0)
       const expectedDeleteTitle = target.expectedTitle || ''
+      // 0.12.0：分叉/编辑只对**用户消息**成立（与 opencode 一致：fork 的语义是
+      // 「这句话说错了，拿回去重说」，AI 消息没有可回填的原文）。
+      const pickedIsUser = !!pickedLive && pickedLive.role === 'user'
+      const canFork = !busy && !target.running && pickedIsUser && !pickedLive.shadowed && pickedLive.seq > 0
+      const canEdit = pickedIsUser && !pickedLive.shadowed && state === 'ready' && !busy
       const deleteBlockedReason = target.running
         ? t('panel.running')
         : state !== 'ready'
@@ -1599,9 +1663,19 @@ window.__ModuleLoader__.load({
                           ref: deleteOneBtnRef,
                           onClick: () => setConfirmAction('delete'), title: t('panel.deleteHint'),
                         }, t('panel.delete')),
+                        // 0.12.0：编辑只对用户消息可用 —— 直接把原文交回编辑器。
+                        // 无二次确认：它不改日志，只改草稿。
                         React.createElement('button', {
-                          type: 'button', className: 'mopsAction', disabled: !canAct || !!confirmAction,
-                          onClick: () => runAction('branch'), title: t('panel.branchHint'),
+                          type: 'button', className: 'mopsAction', disabled: !canEdit,
+                          title: pickedIsUser ? t('panel.editHint') : t('panel.branchUserOnly'),
+                          onClick: () => startEdit(detail || pickedLive.snippet || ''),
+                        }, t('panel.edit')),
+                        // 分叉同样只对用户消息可用（AI 消息没有可回填的原文），
+                        // 语义 = opencode 的 before：新会话不含此条，原文进新会话输入框。
+                        React.createElement('button', {
+                          type: 'button', className: 'mopsAction', disabled: !canFork || !!confirmAction,
+                          onClick: () => runAction('branch'),
+                          title: pickedIsUser ? t('panel.branchHint') : t('panel.branchUserOnly'),
                         }, t('panel.branch'))),
                       confirmAction
                         ? React.createElement('div', {
@@ -1718,6 +1792,114 @@ window.__ModuleLoader__.load({
         return { kind: 'official', fork: sessionsSvc.fork.bind(sessionsSvc) }
       }
       return { kind: 'disk' }
+    }
+
+    // --- 0.12.0 消息级分叉（opencode 语义：分叉点**排他**，原文回到新会话输入框）-----
+    //
+    // 官方 `sessions.fork(source, boundary)` 的 boundary 是**闭区间**（含该事件）。
+    // opencode 的 fork 是 before 语义（不含该条用户消息）+ 把该条放回新会话 composer。
+    // 两者要一致，就必须把边界退到「该用户消息所在 turn 之前」。
+    //
+    // ⚠️ 不能退到 `seq - 1`。实测 40 份语料：真人输入的前一个事件**恒是同一 turn
+    // 内的 system/message**（turn/start → agent/inbox/spliced → step/start →
+    // system/message → user/message）。按 seq-1 切会得到一个「turn/step 已开、
+    // 却没有任何 user 消息」的悬空前缀，引擎必须补合成 closers，语义也不是
+    // 用户要的「这条之前」。
+    // 正确边界 = 该 turn 的 turn/start seq 的**前一个**事件（`turnStartSeq - 1`）。
+    // 服务端在 `GET /messages?view=compact` 里直接给出 `turnStartSeq`（见
+    // src/index.js buildDerived），客户端不猜。
+    const FORK_SESSION_STORAGE_PREFIX = 'dsh.conversation.'
+
+    /**
+     * 官方 fork 边界（inclusive）：目标用户消息所在 turn 的 turn/start 前一个事件。
+     *
+     * @param seq - 目标用户消息的日志 seq（仅用于无 turn 信息时的保守回退）
+     * @param turnStartSeq - 该消息所在 turn 的 turn/start seq；服务端 compact 视图提供
+     * @returns 可直接作为 `sessions.fork({ atSeq })` 的闭区间边界；不可分叉时 -1
+     */
+    function forkBoundaryBefore(seq, turnStartSeq) {
+      // 首选：按轮切（服务端已给出 turnStartSeq）
+      if (Number.isSafeInteger(turnStartSeq) && turnStartSeq > 0) return turnStartSeq - 1
+      // 回退：没有 turn 信息（老服务端 / 合成行）时退一格。
+      // 这时切点可能落在 turn 内部，官方会补合成 closers —— 结果仍可加载，
+      // 只是前缀边界不如按轮切干净。宁可这样也不静默不分叉。
+      return Number.isSafeInteger(seq) && seq > 0 ? seq - 1 : -1
+    }
+
+    /**
+     * 官方 assistant turn-tail 的 branch 按钮识别（0.12.0）。
+     *
+     * 为什么不能靠 aria-label：官方文案有 8 种语言（zh/en/ja/es/fr/de/ru/pt），
+     * 逐个匹配等于把 i18n 表抄进来。也不能靠 class：CSS Modules 会哈希前缀
+     * （实测 0.2.0-rc.2 是 `xzv4MW_`，0.2.1 起变过）。
+     * 唯一稳定的是**图标几何**：官方 `IconBranchOutline16` 的 path d 是常量
+     * （packages/client/ui-primitives/src/icons/index.tsx:149）。
+     * 我们自己的分叉按钮复用同一 path，所以必须显式排除。
+     *
+     * @param btn - 候选按钮（任意元素；非 button 的宿主节点返回 false）
+     * @returns 是否官方 branch 按钮
+     */
+    const HOST_BRANCH_D_PREFIX = 'M13.0762 1.37207'
+    const HOST_BRANCH_CLASS = 'mopsUserFork'
+    function isHostBranchButton(btn) {
+      if (!btn || typeof btn.querySelector !== 'function') return false
+      const cls = String((btn.classList && btn.classList.value) || btn.className || '')
+      if (cls.split(/\s+/).includes(HOST_BRANCH_CLASS)) return false
+      const path = btn.querySelector('svg path')
+      const d = path ? path.getAttribute('d') || '' : ''
+      return d.startsWith(HOST_BRANCH_D_PREFIX)
+    }
+
+    /**
+     * 把文本预置成某个会话的草稿（新会话刚 fork 出来时输入框是空的）。
+     *
+     * 为什么直接写 localStorage 而不是 `inputActions.setDraft`：fork 出来的是一个**还没
+     * 挂载**的会话，此刻 `inputActions` 仍绑定在源会话上；宿主挂载新会话时会用
+     * `readConversationDraft(sessionId)` 从 localStorage 初始化编辑器。所以**先落盘再
+     * openSession** 才是无竞态的路径（`{ draft: '<text>' }` 是宿主 `parseStoredDraft`
+     * 支持的字符串形态，见 dsh-client-ui-conversation:4455-4456）。
+     */
+    function writeSessionDraft(childSessionId, text) {
+      try {
+        if (!childSessionId || typeof localStorage === 'undefined') return false
+        localStorage.setItem(FORK_SESSION_STORAGE_PREFIX + childSessionId, JSON.stringify({ draft: String(text || '') }))
+        return true
+      } catch (e) {
+        console.warn('[message-ops] writeSessionDraft failed:', e)
+        return false
+      }
+    }
+
+    /** 打开会话（宿主唯一通道）。childId 需要 `session-` 前缀才不会抛 unknown session。 */
+    function openSessionById(sessionId) {
+      try {
+        if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') {
+          __uiWorkspace.openSession(sessionId)
+          return true
+        }
+      } catch (e) {
+        console.warn('[message-ops] openSession failed:', e)
+      }
+      return false
+    }
+
+    /**
+     * 从一条**用户消息**分叉：复制到该条之前，并把该条原文放回新会话输入框。
+     *
+     * @param sessionId - 源会话 id（前缀写法都接受，官方 store 自己归一）。
+     * @param seq - 目标用户消息的日志 seq。
+     * @param text - 该条用户消息原文；缺省时新会话输入框留空。
+     * @returns 新会话 id。
+     * @throws 无官方 fork、seq 无前驱、或宿主拒绝（会话运行中）时抛出可展示的错误。
+     */
+    async function forkFromUserMessage(sessionId, seq, text, turnStartSeq) {
+      const forkPath = pickForkPath(__sessionsSvc)
+      if (forkPath.kind !== 'official') throw new Error(__t('slot.forkUnavailable'))
+      const boundary = forkBoundaryBefore(seq, turnStartSeq)
+      if (boundary < 0) throw new Error(__t('slot.forkUnavailable'))
+      const childId = await forkPath.fork({ sessionId, atSeq: boundary, increaseTitle: true })
+      if (childId && text) writeSessionDraft(childId, text)
+      return childId
     }
 
     // 成功反馈统一出口：devkit 标准 toast 优先，无 devkit 时对话框内文案兜底。
@@ -2303,7 +2485,7 @@ window.__ModuleLoader__.load({
             const injected = (raw) => /^<system-reminder|current\s+runtime\s+context|^<system-Reminder|^background job\s+[\w-]+|^Background subagent\s+[0-9a-f]{8}-|^Agent\s+[0-9a-f]{8}-|^\[model changed:/i.test(String(raw || ''))
             const rows = ((d && d.messages) || [])
               .filter((m) => m && m.role === 'user')
-              .map((m) => ({ seq: m.seq, sn: norm(m.snippet), raw: String(m.snippet == null ? '' : m.snippet), fullText: m.fullText ?? null, visible: m.visible !== false }))
+              .map((m) => ({ seq: m.seq, sn: norm(m.snippet), raw: String(m.snippet == null ? '' : m.snippet), fullText: m.fullText ?? null, visible: m.visible !== false, turnStartSeq: m.turnStartSeq ?? null }))
               .filter((r) => r.sn && !injected(r.raw))
             // 0.9.1：同时产出 node-key 查表索引（隐藏 transcript 用）
             const idx = buildIndex(d)
@@ -2499,13 +2681,18 @@ window.__ModuleLoader__.load({
         const ok = block.getAttribute('data-mops-seq')
         if (ok) {
           btn.disabled = false
-          btn.title = __t('slot.revert')
+          btn.title = __t(btn.classList.contains('mopsUserFork') ? 'slot.forkHint' : 'slot.revert')
           btn.removeAttribute('data-mops-unmatched')
         } else {
           btn.disabled = true
           btn.title = __t('slot.revertUnmatched')
           btn.setAttribute('data-mops-unmatched', '1')
         }
+      }
+      /** 块内全部插件按钮一起同步（回滚 / 分叉同一动作行）。 */
+      var syncBlockButtons = (block) => {
+        if (!block || !block.querySelectorAll) return
+        for (const b of block.querySelectorAll('.mopsUserRevert, .mopsUserFork')) syncEnabled(block, b)
       }
       var assignSeqs = (sid, cache, anchors) => {
         const idx = cache && cache.idx
@@ -2518,11 +2705,11 @@ window.__ModuleLoader__.load({
           const seq = hit === null ? null : hit.seq
           if (seq === null || seq === undefined) {
             b.setAttribute('data-mops-unmatched', '1')
-            syncEnabled(b, b.querySelector && b.querySelector('.mopsUserRevert'))
+            syncBlockButtons(b)
             continue
           }
           b.setAttribute('data-mops-seq', String(seq))
-          syncEnabled(b, b.querySelector && b.querySelector('.mopsUserRevert'))
+          syncBlockButtons(b)
         }
       }
       // 按钮可用性在 assignSeqs 内部**同步**更新（与打标同一次循环）——
@@ -2613,6 +2800,52 @@ window.__ModuleLoader__.load({
             .finally(() => { btn.disabled = false })
           })
       }
+      /**
+       * 0.12.0 用户消息「从此条分叉」：非破坏操作，源会话一字不动。
+       *
+       * opencode 语义 = 复制此条**之前**的对话到一个新会话，并把此条原文放回
+       * 新会话的输入框，让用户改完再发。因此这里要三步：
+       *   1. 解析 seq（点击当下可能还没打标 → 先 ensureAssign 再 fetchRows）
+       *   2. 取该条用户消息的**原文**（列表只携带 snippet，长度会被截断）
+       *   3. fork(boundary = seq - 1) → 把原文写进子会话草稿 → 打开子会话
+       */
+      var runUserFork = (btn, block) => {
+        const sid = __currentSessionId
+        if (!sid) return
+        btn.disabled = true
+        Promise.resolve()
+          .then(() => ensureAssign(sid))
+          .then(() => fetchRows(sid))
+          .then(async (cache) => {
+            const rows = cache && cache.rows
+            const seq = Number(block.getAttribute('data-mops-seq'))
+            const row = rows && rows.find((r) => r.seq === seq)
+            if (!row) {
+              notifyDone(__t('errorPrefix') + (__t('revert.unresolved') || 'fork target verification failed'), 'error')
+              return
+            }
+            if (!(seq > 0)) {
+              notifyDone(__t('slot.forkUnavailable'), 'warn')
+              return
+            }
+            let text = typeof row.fullText === 'string' ? row.fullText : ''
+            if (!text) {
+              try {
+                const res = await fetch('/api/message-ops/text?sessionId=' + encodeURIComponent(bareSessionId(sid)) + '&seq=' + encodeURIComponent(seq))
+                const data = res.ok ? await res.json().catch(() => null) : null
+                if (data && data.ok && typeof data.text === 'string') text = data.text
+              } catch { /* 取全文失败：分叉照做，只是输入框留空 */ }
+            }
+            const childId = await forkFromUserMessage(sid, seq, text, row.turnStartSeq)
+            notifyDone(__t('slot.forkDone', { id: String(childId || '') }))
+            if (childId) openSessionById(childId)
+          })
+          .catch((reason) => {
+            notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
+          })
+          .finally(() => { btn.disabled = false })
+      }
+
       var ensureBtn = (block) => {
         // 官方动作行（含 Copy）：把按钮放到这一行里，与 Copy 同级
         let host = block.querySelector('[class*="xzv4MW_actions"]')
@@ -2640,6 +2873,38 @@ window.__ModuleLoader__.load({
         // 动作行 → 按钮重新挂上」这种情况仍然是 disabled/title 正确的。
         syncEnabled(block, btn)
         return btn
+      }
+
+      /** 0.12.0 分叉按钮：与回滚按钮**同一动作行**（opencode 把 fork 放在 copy/undo 同组）。 */
+      var ensureForkBtn = (block) => {
+        let host = block.querySelector('[class*="xzv4MW_actions"]')
+        if (!host) {
+          host = document.createElement('div')
+          host.className = 'mopsUserActionsRow'
+          block.appendChild(host)
+        }
+        const existing = host.querySelector('.mopsUserFork')
+        if (existing) return existing
+        const btn = document.createElement('button')
+        btn.type = 'button'
+        btn.className = 'mopsUserFork'
+        btn.title = __t('slot.forkHint')
+        btn.setAttribute('aria-label', __t('slot.fork'))
+        // 官方 IconBranchOutline16 的 1:1 路径（packages/client/ui-primitives/src/icons/index.tsx:149）
+        btn.innerHTML = '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="none"><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M13.0762 1.37207C14.0846 1.37228 14.9021 2.19077 14.9023 3.19922C14.9022 4.20772 14.0847 5.02518 13.0762 5.02539C12.2967 5.02539 11.6325 4.53691 11.3701 3.84961H4.35547C4.79397 4.26458 5.15861 4.7644 5.41699 5.33496L7.10645 9.06738C7.88526 10.7875 9.55104 11.9228 11.4189 12.0371C11.7085 11.4109 12.3411 10.9756 13.0762 10.9756C14.0843 10.9759 14.9023 11.7936 14.9023 12.8018C14.9023 13.81 14.0843 14.6277 13.0762 14.6279C12.2534 14.6279 11.5574 14.0832 11.3291 13.335C8.9868 13.1879 6.89981 11.7612 5.92285 9.60352L4.23242 5.87109C3.67503 4.64033 2.44878 3.84961 1.09766 3.84961V2.54883C1.10665 2.54883 1.11601 2.54975 1.125 2.5498L11.3701 2.54883C11.6326 1.86151 12.2969 1.37207 13.0762 1.37207ZM13.0762 12.2764C12.7858 12.2764 12.5508 12.5114 12.5508 12.8018C12.5508 13.0921 12.7858 13.3281 13.0762 13.3281C13.3664 13.3279 13.6025 13.092 13.6025 12.8018C13.6025 12.5115 13.3664 12.2766 13.0762 12.2764ZM13.0762 2.67285C12.7855 2.67285 12.55 2.90861 12.5498 3.19922C12.5499 3.48987 12.7855 3.72559 13.0762 3.72559C13.3667 3.72538 13.6024 3.48975 13.6025 3.19922C13.6023 2.90874 13.3666 2.67306 13.0762 2.67285Z"/></svg>'
+        btn.addEventListener('click', (e) => {
+          e.preventDefault(); e.stopPropagation()
+          if (btn.disabled) return
+          runUserFork(btn, block)
+        })
+        host.appendChild(btn)
+        syncEnabled(block, btn)
+        return btn
+      }
+      // 两个按钮的顺序由 DOM 顺序决定：回滚在前（破坏性更高），分叉在后（非破坏）。
+      var ensureUserActions = (block) => {
+        ensureBtn(block)
+        ensureForkBtn(block)
       }
       // 0.9.7（P0-2 读合并）：把 150/700/1600ms 三档并成**一次**真网络请求，
       // 落点 = 本 burst 第一档 + 1500ms ≈ 原来的 1600ms 那一档。
@@ -2673,13 +2938,41 @@ window.__ModuleLoader__.load({
           const sid = __currentSessionId
           if (!sid) return
           const blocks = userAnchors()
-          for (const b of blocks) ensureBtn(b)
+          for (const b of blocks) ensureUserActions(b)
+          suppressHostBranch()
           // 0.9.1：**始终**刷新（原先只在按钮未打标时刷）——
           // 打标后 transcript 再变化（openSession 重建 / 分页 / restore 重放）
           // 就再也不会重算隐藏，导致「界面停在旧状态，必须重载页面才对」。
           ensureAssign(sid)
         } catch { /* 注入失败不影响会话 */ }
       }
+      /**
+       * 0.12.0 隐藏官方 assistant turn-tail 上的 branch 按钮。
+       *
+       * 产品决定：分叉只属于**用户消息**（opencode 语义 —— fork 的目的是「这句话说错了，
+       * 拿回输入框重说」，AI 消息没有可回填的原文，分叉出去只会得到一个半截对话）。
+       * 官方把 branch 画在 MessageIconActions 里，与 copy 同一行；官方没有开关
+       * （ui-chat 的 Config 只有折叠/性能/链接几项），所以只能在渲染层隐藏。
+       *
+       * 识别方式不用 aria-label（8 种语言各不同），也不用哈希 class，而用
+       * **图标路径前缀**：官方 IconBranchOutline16 的 d 是固定字符串
+       * （packages/client/ui-primitives/src/icons/index.tsx:149）。作用域限定在
+       * `[data-turn-tail]`（官方 TurnTailNodeView 渲染的稳定属性），
+       * 并排除我们自己注入的 .mopsUserFork（它复用同一 path）。
+       */
+      var suppressHostBranch = () => {
+        let hidden = 0
+        for (const btn of document.querySelectorAll('[data-turn-tail] button')) {
+          if (!isHostBranchButton(btn)) continue
+          hidden++
+          if (btn.getAttribute('data-mops-host-branch') !== 'hidden') {
+            btn.setAttribute('data-mops-host-branch', 'hidden')
+            btn.style.display = 'none'
+          }
+        }
+        return hidden
+      }
+
       // 触发：hover / 滚动 / DOM 变化 / 变更事件
       document.addEventListener('mouseover', (e) => {
         try {
@@ -2687,7 +2980,7 @@ window.__ModuleLoader__.load({
           if (!__currentSessionId) return
           const block = e.target.closest('[class*="Sixlwa_userRow"], [data-chat-flow-kind="user"]')
           if (!block) return
-          ensureBtn(block)
+          ensureUserActions(block)
           if (!block.hasAttribute('data-mops-seq')) ensureAssign(__currentSessionId)
         } catch { /* noop */ }
       }, { passive: true })
@@ -2704,7 +2997,7 @@ window.__ModuleLoader__.load({
         //    这是正确性问题，不只是性能。
         // ③ attributeFilter 只盯 data-chat-node-key：本插件不写该属性（写的是
         //    data-mops-seq / hidden），所以不会被自己触发成环。
-        var MO_SEL = '[data-chat-node-key],[data-chat-flow-kind="user"],[class*="xzv4MW_actions"],[class*="_userRow"]'
+        var MO_SEL = '[data-chat-node-key],[data-chat-flow-kind="user"],[class*="xzv4MW_actions"],[class*="_userRow"],[data-turn-tail]'
         var scanPendingSince = 0
         var scheduleScan = () => {
           var now = Date.now()
@@ -2757,9 +3050,9 @@ window.__ModuleLoader__.load({
           tag.textContent = [
             // 不再用 absolute + :hover：按钮作为宿主动作行的子元素，
             // 由宿主 [data-actions-reveal] 统一控制显隐（触屏也跟着宿主走）。
-            '.mopsUserRevert{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary,#9a9aa0);cursor:pointer;padding:0;flex:none}',
-            '.mopsUserRevert:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12))}',
-            '.mopsUserRevert:disabled{opacity:.4;cursor:default}',
+            '.mopsUserRevert,.mopsUserFork{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary,#9a9aa0);cursor:pointer;padding:0;flex:none}',
+            '.mopsUserRevert:hover,.mopsUserFork:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12))}',
+            '.mopsUserRevert:disabled,.mopsUserFork:disabled{opacity:.4;cursor:default}',
             '.mopsUserActionsRow{height:28px;display:flex;align-items:center;gap:8px;margin-left:-6px}',
             '@media (hover:none){.mopsUserActionsRow{opacity:1}}',
           ].join('')
@@ -3146,6 +3439,6 @@ window.__ModuleLoader__.load({
       installUserRevertInjector()
     }
 
-    return { apply, inject: ['slots'], __test: { activityTransition } }
+    return { apply, inject: ['slots'], __test: { activityTransition, forkBoundaryBefore, isHostBranchButton, writeSessionDraft, HOST_BRANCH_D_PREFIX } }
   },
 })

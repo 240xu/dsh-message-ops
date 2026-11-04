@@ -2,8 +2,11 @@
 
 DSH web 插件：**消息回滚 + 删除 + 恢复**。只补 dsh 官方**没有**的能力。
 
-> **0.9.0 是破坏性变更**：移除了本插件的**分支**与 **Markdown 导出**。
+> **0.9.0 是破坏性变更**：移除了本插件的**磁盘分支实现**与 **Markdown 导出**。
 > 两者 dsh 官方都已有（`session/fork` 与 `/api/session.export`），详见下方「为什么不重复造轮子」。
+>
+> **0.12.0**：消息动作收敛到用户消息（AI 消息的分支入口移除），用户消息动作行新增
+> opencode 式 `Fork from here`，面板内新增「编辑并重发」。详见「用法」。
 
 
 ## 10 秒速查
@@ -13,7 +16,7 @@ dsh plugin --profile web add @240xu/dsh-message-ops
 # 重启 dsh web 后，会话头部点 Message ops
 ```
 
-- 能做什么：回滚到任意消息、只删一条、恢复；分支调用官方 session/fork
+- 能做什么：回滚到任意消息、只删一条、恢复、从用户消息分叉（opencode before 语义）、编辑并重发；分支调用官方 session/fork
 - 不能做什么：Markdown 导出（请用官方 `/api/session.export`）
 - 卸载：`dsh plugin --profile web remove @240xu/dsh-message-ops`
 
@@ -40,12 +43,64 @@ dsh plugin --profile web add @240xu/dsh-message-ops
 - **会话头部**的 `Message ops` 按钮 → 右侧 `OpsPanel` 抽屉（消息 / 回收站双 tab）；
   旧 `OpsDialog` 仅 `window.__MOPS_LEGACY_DIALOG === true` 时回退
 - **助手消息** hover 行的 `Revert to here` / `Quote to composer`
-- **用户消息** hover 行的 `Revert to here`
+- **用户消息** hover 行的 `Revert to here` / `Fork from here`（同一动作行，见下）
 - **输入框上方的回撤贴条**：展开后可逐条 `Restore`（消息级恢复入口）
 - **侧栏会话行**的 `...` 菜单
 
-面板流程：**选一条消息 → 回滚 / 仅删除 / 分支 → 破坏性操作二次确认**；
+面板流程：**选一条消息 → 回滚 / 仅删除 / 编辑并重发 / 分叉 → 破坏性操作二次确认**；
 整会话删除在回收站 tab，需输入会话标题确认。
+
+### 0.12.0 · 动作收敛到用户消息（opencode 对齐）
+
+四个决定，都来自「消息动作到底该挂在哪」这一个问题：
+
+1. **分叉只属于用户消息。** fork 的目的不是「复制对话」，而是「这句话说错了，拿回
+   输入框重说」；AI 消息没有可回填的原文，从那里分叉只会得到一个半截上下文。
+   因此：
+   - **助手消息**只剩 `Revert to here` / `Quote to composer`；
+   - **官方 assistant turn-tail 上的 branch 按钮被隐藏**（官方无开关，`ui-chat` 的
+     Config 只有折叠/性能/链接几项）。识别靠**图标几何**而非 aria-label 或哈希
+     class：官方 `IconBranchOutline16` 的 `d` 是常量
+     （`packages/client/ui-primitives/src/icons/index.tsx:149`），8 种语言的按钮
+     文案各不相同，class 前缀每次发版都可能变。作用域限定在 `[data-turn-tail]`
+     内，并排除我们自己注入的 `.mopsUserFork`（它故意复用同一 path）。
+   - **用户消息**的动作行里同时有回滚与分叉，**回滚在前**（破坏性更高的排前面），
+     两者都挂在官方 `.xzv4MW_actions` 里，可见性跟着宿主 hover 走，不做悬浮层。
+2. **分叉是 before 语义，且按「轮」切 —— 不是 `seq - 1`。** opencode 的
+   `POST /fork` 用 `before` 做**排他**边界（`projector.ts`:
+   `type === "before" ? lt(seq, ...) : lte(...)`，issue #35786 也写明 exclusive）；
+   dsh 官方 `sessions.fork(source, boundary)` 的 boundary 是**闭区间**。
+   直觉做法是 `seq - 1`，但实测 40 份语料后否掉了：**真人输入的前一个事件恒是
+   同一 turn 内的 `system/message`**（真实形状
+   `turn/start → agent/inbox/spliced → step/start → system/message → user/message`），
+   按 `seq - 1` 切会得到一个「turn/step 已开、却没有任何 user 消息」的悬空前缀，
+   引擎只能补合成 closers，语义也不是「这条之前」。
+   正确边界 = 该消息所在 turn 的 `turn/start` 的**前一个**事件：
+
+   ```js
+   forkBoundaryBefore(seq, turnStartSeq) {
+     if (Number.isSafeInteger(turnStartSeq) && turnStartSeq > 0) return turnStartSeq - 1
+     return Number.isSafeInteger(seq) && seq > 0 ? seq - 1 : -1   // 老服务端回退
+   }
+   ```
+
+   `turnStartSeq` 由服务端在 `GET /messages?view=compact` 里给出（`src/index.js`
+   `buildDerived`）。注意**真人 `user/message` 事件本身不带 `turn` 字段**——
+   归属靠扫一遍事件、用「当前开着的 turn」判定；`system/message` /
+   `assistant/message` 才自带 turn/step。没有 turn 信息时退回 `seq - 1`
+   （边界可能落在 turn 内部，官方会补 closers，结果仍可加载）。
+   返回 `-1` 表示不可分叉（首条消息没有「之前」）。
+3. **原文回到新会话的输入框。** fork 成功后把该条用户消息原文写进
+   `localStorage["dsh.conversation." + childId] = { draft: text }`，再
+   `uiWorkspace.openSession(childId)`。直接写存储而不是 `inputActions.setDraft`，
+   是因为 fork 出来的会话**还没挂载**，此刻 `inputActions` 仍绑在源会话上；宿主挂载
+   新会话时会用 `readConversationDraft(sessionId)` 从同一键初始化编辑器
+   （`dsh-client-ui-conversation:4539-4554`，`parseStoredDraft` 接受字符串形态的 draft）。
+4. **面板里直接「编辑并重发」。** 不自己复刻输入框（那会分叉草稿/附件/引用/斜杠
+   命令/提交状态机一整套行为），而是把原文交回官方编辑器：`setDraft(text)` →
+   `persistDraft()`（不落盘会被紧随的 `openSession` 用旧草稿覆盖，0.11.3 已踩过）→
+   关面板。改完直接回车发出，等价于 opencode 的「回撤 → 原文回 composer」，区别是
+   我们不预先回撤，发不发由用户决定。
 
 ## 安装
 

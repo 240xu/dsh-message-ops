@@ -66,6 +66,11 @@ test('compact view drops heavy fields but keeps visibility state and counts', as
   assert.equal(compact.messages[0].type, undefined, 'compact must not carry event type')
   assert.equal(compact.messages[0].marker, undefined, 'compact must not carry per-row marker flags')
   assert.equal(compact.messages[0].restoresSeq, undefined, 'compact must not carry per-row restore pointers')
+  // 0.12.0：分叉边界要按轮切，所以 compact 必须带 turnStartSeq 字段。
+  // 该 fixture 没有 turn/start 事件 → 值必须是显式 null（不是 undefined），
+  // 让客户端能区分「没有这个字段」与「这条消息不在任何 turn 里」。
+  assert.ok('turnStartSeq' in compact.messages[0], 'compact 必须带 turnStartSeq，否则客户端只能退回 seq-1')
+  assert.equal(compact.messages[0].turnStartSeq, null, '无 turn 结构时必须是 null，不能是 undefined')
   assert.equal(compact.messages[1].shadowed, true)
   assert.equal(compact.messages[2].shadowed, true)
   assert.equal(compact.shadowedCount, 2)
@@ -101,4 +106,39 @@ test('search rejects empty and overlong queries', async (t) => {
   const { ctx } = setup(t)
   await assert.rejects(() => _internals.opsSearch(ctx, SID, '  '), (e) => e.status === 400)
   await assert.rejects(() => _internals.opsSearch(ctx, SID, 'x'.repeat(501)), (e) => e.status === 400)
+})
+
+test('compact 的 turnStartSeq 精确指向该消息所在 turn 的 turn/start', async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'mops-turn-'))
+  const prev = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  t.after(() => {
+    if (prev === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = prev
+    fs.rmSync(home, { recursive: true, force: true })
+  })
+  const dir = path.join(home, 'sessions', '--tmp-project--', SID)
+  fs.mkdirSync(dir, { recursive: true })
+  const header = { type: 'session', id: SID, version: 4, createdAt: 1790000000000 }
+  // 真实形状：turn/start → agent/inbox/spliced → step/start → system/message → user/message
+  const events = [
+    { type: 'turn/start', seq: 4, time: 4, data: { turn: 1 } },
+    { type: 'agent/inbox/spliced', seq: 5, time: 5, data: {} },
+    { type: 'step/start', seq: 6, time: 6, data: { turn: 1, step: 1 } },
+    { type: 'system/message', seq: 7, time: 7, data: { turn: 1, step: 1, message: { role: 'system', content: [{ type: 'text', text: 'sys' }] } } },
+    { type: 'user/message', seq: 8, time: 8, data: { id: 'u1', turn: 1, source: { kind: 'user' }, message: { role: 'user', content: [{ type: 'text', text: 'hi' }] } } },
+    { type: 'turn/end', seq: 9, time: 9, data: { turn: 1, reason: { kind: 'completed' } } },
+    { type: 'turn/start', seq: 10, time: 10, data: { turn: 2 } },
+    { type: 'step/start', seq: 11, time: 11, data: { turn: 2, step: 1 } },
+    { type: 'user/message', seq: 12, time: 12, data: { id: 'u2', turn: 2, source: { kind: 'user' }, message: { role: 'user', content: [{ type: 'text', text: 'again' }] } } },
+  ]
+  fs.writeFileSync(path.join(dir, 'session.v4.jsonl.zstd'), encodeSessionFile(header, events))
+  const ctx = { get: () => undefined }
+  const compact = await _internals.opsList(ctx, SID, { compact: true })
+  const u1 = compact.messages.find((m) => m.seq === 8)
+  const u2 = compact.messages.find((m) => m.seq === 12)
+  assert.equal(u1.turnStartSeq, 4, 'turn 1 的消息必须指向 seq 4 的 turn/start')
+  assert.equal(u2.turnStartSeq, 10, 'turn 2 的消息必须指向 seq 10 的 turn/start')
+  // 边界 = turnStartSeq - 1 → 切在上一轮 turn/end（seq 9），不是 turn 内部
+  assert.equal(u2.turnStartSeq - 1, 9, '按轮切：turn 2 的分叉边界应落在 turn 1 的 turn/end')
 })
