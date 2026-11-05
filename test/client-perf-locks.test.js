@@ -92,7 +92,21 @@ test('P1-2：MO 回调先过滤，matches 与 querySelector 两者都试', () =>
   assert.ok(/n\.querySelector\(MO_SEL\)/.test(src), '新增子树可能是祖先容器')
   assert.ok(/catch\s*\{\s*scheduleScan\(\)\s*\}/.test(src), '过滤自身出错必须放行（宁可多扫一次）')
   assert.ok(/MO_SEL = '\[data-chat-node-key\]/.test(src), '选择器必须覆盖宿主 chat 行')
-  assert.ok(/\[class\*="xzv4MW_actions"\]/.test(src), '选择器必须覆盖官方用户动作行')
+  assert.ok(/\[class\*="_actions"\]/.test(src), '选择器必须覆盖官方用户动作行（哈希无关）')
+})
+
+test('回归：官方动作行类名换哈希后不得重复注入（幂等 + 哈希无关）', () => {
+  // dsh 0.2.1-rc.5 起官方动作行类名从 xzv4MW_actions 变成 <hash>_actions；写死前缀
+  // 让 ensureBtn 每次都新建一行（+28px），又反过来触发更多扫描 → 按钮竖列增殖。
+  const btn = fnBlock(src, 'var ensureBtn =')
+  const fork = fnBlock(src, 'var ensureForkBtn =')
+  for (const [name, body] of [['ensureBtn', btn], ['ensureForkBtn', fork]]) {
+    assert.ok(body, `找不到 ${name}`)
+    assert.ok(/\[class\*="_actions"\]/.test(body), `${name} 必须用哈希无关的 _actions 后缀定位宿主行`)
+    assert.ok(/mopsUserActionsRow/.test(body), `${name} 必须保留自造行兜底`)
+    assert.ok(/\.remove\(\)/.test(body), `${name} 必须先清理重复注入的行/按钮`)
+  }
+  assert.ok(!/\[class\*="xzv4MW_actions"\]/.test(src), '不得再依赖写死的哈希前缀')
 })
 
 test('P1-2：防抖 trailing 200ms + maxWait（连续 mutation 不许无限推迟）', () => {

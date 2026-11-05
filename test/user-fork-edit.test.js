@@ -70,9 +70,9 @@ test('用户消息动作行同时注入回滚与分叉（回滚在前）', () =>
   assert.ok(revertAt < forkAt, '回滚是破坏性更高的动作，必须排在分叉之前')
 })
 
-test('分叉按钮挂进官方动作行（.xzv4MW_actions），不是自造悬浮层', () => {
+test('分叉按钮挂进官方动作行（哈希无关的 _actions 后缀），不是自造悬浮层', () => {
   const body = block('ensureForkBtn')
-  assert.match(body, /xzv4MW_actions/, '必须复用宿主动作行，可见性才跟着宿主 hover 走')
+  assert.match(body, /\[class\*="_actions"\]/, '必须复用宿主动作行，可见性才跟着宿主 hover 走')
   assert.match(body, /mopsUserFork/, '按钮类名必须可被样式与测试识别')
 })
 
