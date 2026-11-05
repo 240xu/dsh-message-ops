@@ -3330,7 +3330,8 @@ window.__ModuleLoader__.load({
     }
 
     // --- 0.7.0 用户消息「回滚」按钮（DOM 注入，挂在官方动作行内）-------------------
-    // 官方用户消息的动作行 = .xzv4MW_actions（含 Copy，height28，位于消息下方 16px），
+    // 官方用户消息的动作行 = <hash>_actions（CSS Module 哈希，当前构建为 ._1KfHza_actions；
+    // 含 Copy，height28，位于消息下方 16px），
     // 可见性由宿主 [data-actions-reveal] 控制。把按钮 append 进该行、与 Copy 同级同层，
     // 可见性天然继承宿主动作行（不再自己玩 hover）。0.6.0 的 absolute 覆盖教训见 README「历史事故记录」#2。
     function installUserRevertInjector() {
@@ -3567,9 +3568,9 @@ window.__ModuleLoader__.load({
         return { hidden, unresolved, shown }
       }
 
-      // 用户消息锚点：优先官方 Sixlwa_userRow（含 .xzv4MW_actions），回退 flow-kind 属性
+      // 用户消息锚点：优先官方用户行（_userRow 类名后缀），回退 flow-kind 属性
       // 锚点 = 每条用户消息自己的容器（一个块只算一次）：
-      // 从官方动作行 .xzv4MW_actions 反查最近的消息容器，最贴近"一条消息"的粒度。
+      // 从官方动作行（[class*="_actions"]，哈希无关）反查最近的消息容器，最贴近"一条消息"的粒度。
       var userAnchors = () => {
         const out = []
         const seen = new Set()
@@ -3579,7 +3580,9 @@ window.__ModuleLoader__.load({
             out.push(el)
           }
         }
-        const rows = Array.from(document.querySelectorAll('[class*="xzv4MW_actions"]'))
+        // 官方动作行的类名是 CSS Module 哈希（当前构建为 <hash>_actions），写死前缀在
+        // 宿主换哈希后恒为 null；这里用 hash-immune 的 _actions 后缀定位。
+        const rows = Array.from(document.querySelectorAll('[class*="_actions"]'))
         for (const r of rows) {
           const block =
             r.closest('[data-chat-flow-kind="user"]') ||
@@ -3799,7 +3802,17 @@ window.__ModuleLoader__.load({
 
       var ensureBtn = block => {
         // 官方动作行（含 Copy）：把按钮放到这一行里，与 Copy 同级
-        let host = block.querySelector('[class*="xzv4MW_actions"]')
+        // 幂等：官方动作行类名是 CSS Module 哈希，写死前缀在宿主换哈希后恒为 null →
+        // 每次扫描都会新建一行，行高 +28px 又反过来触发更多扫描（正反馈）。先清掉
+        // 多余的行/按钮，再用 hash-immune 的 _actions 后缀定位宿主行。
+        const staleRows = block.querySelectorAll('.mopsUserActionsRow')
+        for (let i = 1; i < staleRows.length; i++) staleRows[i].remove()
+        const staleReverts = block.querySelectorAll('.mopsUserRevert')
+        for (let i = 1; i < staleReverts.length; i++) staleReverts[i].remove()
+        const foundRevert = block.querySelector('.mopsUserRevert')
+        if (foundRevert) return foundRevert
+        let host =
+          block.querySelector('[class*="_actions"]') || block.querySelector('.mopsUserActionsRow')
         if (!host) {
           host = document.createElement('div')
           host.className = 'mopsUserActionsRow'
@@ -3830,7 +3843,15 @@ window.__ModuleLoader__.load({
 
       /** 0.12.0 分叉按钮：与回滚按钮**同一动作行**（opencode 把 fork 放在 copy/undo 同组）。 */
       var ensureForkBtn = block => {
-        let host = block.querySelector('[class*="xzv4MW_actions"]')
+        // 幂等：同上（宿主重建动作行 / 重复扫描都不得新增第二行）。
+        const staleRows2 = block.querySelectorAll('.mopsUserActionsRow')
+        for (let i = 1; i < staleRows2.length; i++) staleRows2[i].remove()
+        const staleForks = block.querySelectorAll('.mopsUserFork')
+        for (let i = 1; i < staleForks.length; i++) staleForks[i].remove()
+        const foundFork = block.querySelector('.mopsUserFork')
+        if (foundFork) return foundFork
+        let host =
+          block.querySelector('[class*="_actions"]') || block.querySelector('.mopsUserActionsRow')
         if (!host) {
           host = document.createElement('div')
           host.className = 'mopsUserActionsRow'
@@ -3944,7 +3965,7 @@ window.__ModuleLoader__.load({
           try {
             if (!e || !e.target || !e.target.closest) return
             if (!__currentSessionId) return
-            const block = e.target.closest('[class*="Sixlwa_userRow"], [data-chat-flow-kind="user"]')
+            const block = e.target.closest('[data-chat-flow-kind="user"], [class*="_userRow"]')
             if (!block) return
             ensureUserActions(block)
             if (!block.hasAttribute('data-mops-seq')) ensureAssign(__currentSessionId)
@@ -3967,7 +3988,7 @@ window.__ModuleLoader__.load({
         //    这是正确性问题，不只是性能。
         // ③ attributeFilter 只盯 data-chat-node-key：本插件不写该属性（写的是
         //    data-mops-seq / hidden），所以不会被自己触发成环。
-        var MO_SEL = '[data-chat-node-key],[data-chat-flow-kind="user"],[class*="xzv4MW_actions"],[class*="_userRow"],[data-turn-tail]'
+        var MO_SEL = '[data-chat-node-key],[data-chat-flow-kind="user"],[class*="_actions"],[class*="_userRow"],[data-turn-tail],[data-actions-reveal]'
         var scanPendingSince = 0
         var scheduleScan = () => {
           var now = Date.now()
@@ -4456,6 +4477,9 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
+      // 同一 ctx 只应用一次：重复 apply 会挂多套监听器，让扫描次数翻倍。
+      if (apply.__mopsAppliedCtx === ctx) return
+      apply.__mopsAppliedCtx = ctx
       __sessionsSvc = ctx.get('sessions')
       __uiWorkspace = typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : null
       if (!__uiWorkspace) {
