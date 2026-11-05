@@ -60,11 +60,15 @@ test('compact view drops heavy fields but keeps visibility state and counts', as
   assert.equal(compact.messages[0].fullText, undefined, 'compact must not carry fullText')
   assert.equal(compact.messages[0].turn, undefined, 'compact must not carry turn')
   assert.equal(compact.messages[0].step, undefined, 'compact must not carry step')
-  assert.equal(compact.messages[0].range, undefined, 'compact must not carry range')
+  // 0.14.0：range / marker 从「重字段」改为**必需字段** —— dock 靠它们区分
+  // 「这行是 marker」并显示它遮蔽的区间。不带的话客户端只能拿 marker 自己的
+  // seq 当恢复目标，产生自噬记录（实测 5 条）。它们是小对象/布尔，不属重字段。
+  assert.ok('range' in compact.messages[0], 'compact must carry range for marker rows (dock target fix)')
+  assert.ok('marker' in compact.messages[0], 'compact must carry the marker flag (dock filtering)')
   assert.equal(compact.messages[0].sourceKind, undefined, 'compact must not carry sourceKind')
   assert.equal(compact.messages[0].id, undefined, 'compact must not carry message ids')
   assert.equal(compact.messages[0].type, undefined, 'compact must not carry event type')
-  assert.equal(compact.messages[0].marker, undefined, 'compact must not carry per-row marker flags')
+  assert.equal(compact.messages[0].marker, false, '非 marker 行必须是显式 false（不是 undefined）')
   assert.equal(compact.messages[0].restoresSeq, undefined, 'compact must not carry per-row restore pointers')
   // 0.12.0：分叉边界要按轮切，所以 compact 必须带 turnStartSeq 字段。
   // 该 fixture 没有 turn/start 事件 → 值必须是显式 null（不是 undefined），
