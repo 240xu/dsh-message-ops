@@ -19,6 +19,7 @@ import {
   messageTextFull,
   turnBounds,
   markCommitted,
+  readReplaceOp,
 } from './session-file.js'
 import {
   restoreNoticeText,
@@ -516,6 +517,20 @@ async function buildDerived(logPath) {
       continue
     }
     m.restoreComplete = prog.complete
+    // 0.14.0（dock 目标修复）：把 marker 遮蔽的**区间**暴露出去。
+    //
+    // 旧实现让 dock 拿 `mk.seq`（marker **自己**的 seq）去调 /restore。而
+    // opsRestore 的第一件事是 `planRestore(events, restoreSeq, ...)` —— 它要求
+    // `restoreSeq` 本身是**带 replace 区间的那条 marker**，于是语义正确；
+    // 但 dock 同时把 `mk.seq` 当"要恢复到哪"展示给用户、还在 pendingTurns 里
+    // 用 `mk.seq` 拼 rowKey —— 一旦这一行代表的是"已提交过的旧 marker"或
+    // 空内容的合成 marker，用户点下去就会把**另一条 marker 自己**遮蔽掉，
+    // 产生一条新的、content 为空的 replace 记录（实测 seq 3424/3658/3689/
+    // 3721/3746 全是这么来的）。
+    //
+    // 正向修法：range 是 marker 的语义本体（"我遮蔽了谁"），dock 只该用它。
+    const range = readReplaceOp(events.find(x => x && x.seq === m.seq) || null)
+    if (range) m.range = range
     m.pendingTurns = pendingRestoreTurnsFromIndex(restoreIndex, m.seq, prog).map(t => ({
       upTo: t.seqs[t.seqs.length - 1],
       count: t.seqs.length,
@@ -673,6 +688,17 @@ async function opsList(targetCtx, sessionId, opts = {}) {
         // 客户端据此算 fork 边界 = turnStartSeq - 1。只带这一个字段：turn/step
         // 属于「重」字段，面板的虚拟行用不到（详见 compact 的取舍）。
         turnStartSeq: m.turnStartSeq ?? null,
+        // 0.14.0（dock 目标修复）：客户端必须能识别「这行是 marker」并拿到它
+        // 遮蔽的区间。旧 compact 只给 role/snippet，于是 dock 只能拿 marker
+        // **自己的** seq 当恢复目标、也只能拿 marker 自己的文案当预览 ——
+        // 用户看到「#3417 · [消息回滚] 已回滚到 seq 3410…」，点恢复又把 marker
+        // 自己遮蔽一次（实测 5 条空 replace）。
+        marker: m.marker === true,
+        range: m.range ?? null,
+        // 0.14.0：dock 的 activeMarkers 判据就是这两个字段 —— 不投影出去，
+        // 客户端拿到 undefined 会把**已恢复完毕**的 marker 继续列在待恢复列表里。
+        restoreComplete: m.restoreComplete === true,
+        committed: m.committed === true,
       }))
     : messages
 

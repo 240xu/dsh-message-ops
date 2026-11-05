@@ -105,12 +105,18 @@ test('R2：不再用静默 catch 吞掉 setDraft 失败', () => {
   assert.ok(!/catch \{ \/\* 回填失败不阻断 \*\/ \}/.test(m[0]))
 })
 
-test('回填必须落盘：setDraft 不持久化，openSession 会覆盖成空草稿', () => {
+test('回填必须落盘：改为直接写宿主草稿键（0.14.0 起，比 persistDraft 更可靠）', () => {
+  // 为什么不再断 persistDraft：0.14.0 实测「点回滚 → 原文没进输入框」。
+  // 原因是 refillComposer 之后**紧接着** openSession 重建视图，新挂载走
+  // readConversationDraft(sid) 从 localStorage 初始化；而 persistDraft 依赖
+  // bindDraftPersistence 绑定的 writer，会话处于 blank/hero 或视图未挂载时
+  // 该函数存在但空转。直接写同一个存储键才是无竞态的权威路径
+  // ——与 fork 回填 writeSessionDraft 同一机制。
   const fn = src.match(/var refillComposer = [\s\S]*?\n    \}/)
   assert.ok(fn, '找不到 refillComposer')
-  assert.match(fn[0], /__inputActions\.setDraft\(/, '仍应设置编辑器')
-  assert.match(fn[0], /__inputActions\.persistDraft\(/,
-    'setDraft 只改编辑器不写 localStorage；必须 persistDraft()，否则紧随的 openSession 会从旧草稿重读并覆盖')
+  assert.match(fn[0], /writeSessionDraft\(/, '必须直接写宿主草稿存储键（openSession 之后读到的就是它）')
+  assert.match(fn[0], /__inputActions\.setDraft\(/, '同时尽力更新活着的编辑器（视图不重建的路径）')
+  assert.match(fn[0], /return persisted \|\| editorSet/, '必须诚实返回是否真的回填成功')
 })
 
 test('对话框入口直接 setDraft 时也必须 persistDraft', () => {

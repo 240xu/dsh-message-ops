@@ -53,7 +53,12 @@ test('会话草稿写入点与宿主读取点同键同形', () => {
   //       parseStoredDraft 接受 { draft: '<text>' } 的字符串形态
   assert.match(src, /FORK_SESSION_STORAGE_PREFIX = 'dsh\.conversation\.'/, 'localStorage 键前缀必须与宿主一致')
   const body = block('writeSessionDraft')
-  assert.match(body, /JSON\.stringify\(\{ draft:/, '必须写成 { draft: <string> }，否则宿主 parseStoredDraft 读不出来')
+  // 0.14.0：改成**合并**写入 `{ ...base, draft }`，不再是裸 `{ draft }`。
+  // 原因：同一个键里宿主还存 view / viewRequest（会话视图偏好）；回填现在作用在
+  // 正在使用的会话上，整体覆盖会静默清掉用户的视图选择。
+  // 宿主 parseStoredDraft 只要求 `draft` 字段存在且是字符串 —— 合并形态满足。
+  assert.match(body, /draft:\s*String\(text \|\| ''\)/, '必须写入 draft 字符串字段，否则宿主 parseStoredDraft 读不出来')
+  assert.match(body, /\.\.\.base/, '必须在旧对象上合并，保住 view 等字段')
 })
 
 test('用户消息动作行同时注入回滚与分叉（回滚在前）', () => {

@@ -30,6 +30,18 @@ export { messageText }
 /** 带语义状态码的操作错误（单点已迁至 session-file.js，此处仅转出）。 */
 
 /** planRevert：回撤语义 = 遮蔽 targetSeq 及其之后全部可见节点（连续到末尾）。 */
+/**
+ * 该 seq 是否是一条**回撤/删除 marker**（surfaceOp=replace 的 system/message）？
+ *
+ * 0.14.0 护栏：marker 是账本，不是对话。允许拿 marker 当回滚目标会产生一种
+ * 自噬记录 —— 新 marker 遮蔽旧 marker，`content` 为空、`startSeq===endSeq`，
+ * 界面上表现为「恢复之后又多出一条『回滚后的节点』」。实测语料里已经出现过
+ * 5 次（seq 3424/3658/3689/3721/3746），全部由 dock 用 `mk.seq` 当目标造成。
+ */
+export function isMarkerEvent(e) {
+  return !!e && e.type === 'system/message' && readReplaceOp(e) !== null
+}
+
 export function planRevert(surface, targetSeq) {
   const nodes = surface && Array.isArray(surface.nodes) ? surface.nodes : []
   const startIdx = nodes.indexOf(targetSeq)
@@ -985,6 +997,11 @@ export function diskVisibleNodes(events) {
 
 /** 磁盘版 planRevert：target 必须可见，遮蔽 target 之后（含）全部可见节点。 */
 export function planRevertFromEvents(events, targetSeq) {
+  // 0.14.0 护栏：marker 不是对话，不能被回滚（否则产生自噬的空 replace 记录）。
+  const targetEvent = (events ?? []).find(e => e && e.seq === targetSeq)
+  if (isMarkerEvent(targetEvent)) {
+    throw new OpsError(`seq ${targetSeq} is a revert/delete marker, not a message — restore it instead of reverting it`, 409)
+  }
   // 目标用「消息」集合（回滚对象是消息），溯源用「全部 surface」集合（0.8.2 修正）
   const nodes = diskVisibleNodes(events)
   const startIdx = nodes.indexOf(targetSeq)

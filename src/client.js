@@ -2540,7 +2540,24 @@ window.__ModuleLoader__.load({
     function writeSessionDraft(childSessionId, text) {
       try {
         if (!childSessionId || typeof localStorage === 'undefined') return false
-        localStorage.setItem(FORK_SESSION_STORAGE_PREFIX + childSessionId, JSON.stringify({ draft: String(text || '') }))
+        const key = FORK_SESSION_STORAGE_PREFIX + childSessionId
+        // ⚠️ 必须**合并**，不能整体覆盖：同一个键里宿主还存着 `view` /
+        // `viewRequest` 等会话视图偏好（见 dsh-client-ui-conversation 的
+        // readConversationView / persist）。0.12.0 只写 `{draft}` 时，
+        // fork 出的子会话恰好还没有偏好所以没暴露；0.14.0 的回填写在**正在用
+        // 的会话**上，直接覆盖会静默清掉用户的视图选择。
+        let base = {}
+        try {
+          const raw = localStorage.getItem(key)
+          if (raw != null) {
+            const parsed = JSON.parse(raw)
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) base = parsed
+          }
+        } catch {
+          /* 旧值不可解析 → 当作空对象重写（总比抛错好） */
+        }
+        const next = { ...base, draft: String(text || '') }
+        localStorage.setItem(key, JSON.stringify(next))
         return true
       } catch (e) {
         console.warn('[message-ops] writeSessionDraft failed:', e)
@@ -2911,8 +2928,20 @@ window.__ModuleLoader__.load({
       //  SessionRevert.commit() → revert:null → affordance 消失）。
       // 我们是 append-only，marker 不会真消失，所以由服务端按
       // 「marker 之后有无 source.kind==='user' 的真实输入」算出 committed。
-      return (msgs || []).filter(
-        m => m.marker && m.sourceKind !== 'compact-checkpoint' && m.restoreComplete !== true && m.committed !== true,
+      return (
+        (msgs || [])
+          .filter(m => m.marker && m.sourceKind !== 'compact-checkpoint' && m.restoreComplete !== true && m.committed !== true)
+          // 0.14.0：排掉「自噬 marker」—— 它的 replace 区间恰好覆盖**另一条 marker**
+          // （典型是 `startSeq === endSeq === 前一条 marker 的 seq`，content 为空）。
+          // 这种记录不是用户做过的回滚，是旧版 dock 拿 marker 当目标留下的残迹；
+          // 列出来只会让用户点「恢复」再生成一条同样的垃圾。
+          .filter(m => {
+            const rng = m.range
+            if (!rng || !Number.isSafeInteger(rng.startSeq)) return true
+            if (rng.startSeq !== rng.endSeq) return true
+            const target = (msgs || []).find(x => x && x.seq === rng.startSeq)
+            return !(target && target.marker === true)
+          })
       )
     }
 
@@ -3193,12 +3222,28 @@ window.__ModuleLoader__.load({
         )
       const dockRows = []
       for (const mk of markers || []) {
+        // 0.14.0（dock 文案修复）：`mk.snippet` 是 **marker 自己**的正文 ——
+        // 也就是「[消息回滚] 已回滚到 seq N…」这句拼接文案本身。
+        // 用户看到「#3417 · [消息回滚] 已回滚到 seq 3410…」，点「恢复」后
+        // 日志里又落一条遮蔽 marker 自己的空 replace（实测 5 次）。
+        // 正确口径：这一行代表的是「被 marker 遮蔽的那段对话」，文案必须取自
+        // range 区间里的真实内容；区间取不到才显示序号。
+        const rng = mk.range && Number.isSafeInteger(mk.range.startSeq) ? mk.range : null
+        // 预览文案必须描述「被遮蔽的那段」，不能是 marker 自己的 notice 文本。
+        // 区间退化成单点且恰好是另一条 marker 时，这条 marker 是**冗余生成**的，
+        // 直接标出来，别让用户以为它是一轮真实对话。
+        const span = rng ? (rng.endSeq > rng.startSeq ? 'seq ' + rng.startSeq + '..' + rng.endSeq : '#' + rng.startSeq) : ''
+        const rangeSnippet = mk.previewFirst || span
         if (Array.isArray(mk.pendingTurns) && mk.pendingTurns.length > 0) {
           for (const t of mk.pendingTurns) {
-            dockRows.push({ seq: mk.seq, upTo: t.upTo, snippet: t.preview + (t.count > 1 ? ' (+' + (t.count - 1) + ')' : '') })
+            dockRows.push({
+              seq: mk.seq,
+              upTo: t.upTo,
+              snippet: t.preview + (t.count > 1 ? ' (+' + (t.count - 1) + ')' : ''),
+            })
           }
-        } else {
-          dockRows.push({ seq: mk.seq, snippet: mk.snippet })
+        } else if (rng) {
+          dockRows.push({ seq: mk.seq, snippet: rangeSnippet, markerRange: rng })
         }
       }
 
@@ -4226,17 +4271,32 @@ window.__ModuleLoader__.load({
         if (bareSessionId(cache.sid) !== want) return false
         const rows = cache.rows.filter(r => r && typeof r.seq === 'number' && r.seq <= boundarySeq && r.fullText)
         if (!rows.length) return false
-        if (!__inputActions || typeof __inputActions.setDraft !== 'function') return false
-        __inputActions.setDraft(rows[rows.length - 1].fullText)
-        // 关键：不落盘的话，紧随其后的 openSession 会从 localStorage 读回旧草稿。
-        if (typeof __inputActions.persistDraft === 'function') {
+        const text = rows[rows.length - 1].fullText
+        // ── 0.14.0（回填失效修复）────────────────────────────────────────────
+        // 旧实现：`__inputActions.setDraft(text)` + `persistDraft()`，然后调用方
+        // **紧接着** `openSession(sid)` 重建整个会话视图。重建会卸载并重挂
+        // 编辑器，新挂载走 `readConversationDraft(sid)` 从 localStorage 初始化 ——
+        // 也就是说「回填」实际取决于 persistDraft 是否成功落盘，而再叠上
+        // `bindDraftPersistence` 的时序（见 startEdit 处 MED-4 注释），失败时
+        // 用户看到「已回滚」却拿不到原文。
+        //
+        // 唯一无竞态的路径：**直接写宿主的草稿存储键**（writeSessionDraft），
+        // 与 fork 回填同一机制。它是 openSession 之后读到的权威值，不依赖
+        // 编辑器是否已挂载、也不依赖 inputActions 此刻绑在哪个会话上。
+        const persisted = writeSessionDraft(rawSid, text)
+        // 再尽力更新活着的编辑器（视图没重建的路径，例如 dock 内联恢复）。
+        let editorSet = false
+        if (__inputActions && typeof __inputActions.setDraft === 'function') {
           try {
-            __inputActions.persistDraft()
+            __inputActions.setDraft(text)
+            editorSet = true
           } catch (e) {
-            console.warn('[message-ops] persistDraft failed:', e)
+            console.warn('[message-ops] setDraft failed:', e)
           }
         }
-        return true
+        // 诚实返回：落盘成功（openSession 后必能读到）或活着编辑器已更新，任一即为真。
+        // 不再用 `|| true` —— 那会让调用方永远看不到失败。
+        return persisted || editorSet
       } catch (e) {
         // 原来这里 `catch {}` 完全静默 —— 失败了连痕迹都没有，排查时看不到
         console.warn('[message-ops] setDraft failed:', e)
