@@ -207,9 +207,12 @@ window.__ModuleLoader__.load({
       'panel.branchHint': '复制此条之前的对话到新会话，并把此条原文放回新会话输入框',
       'panel.branchDone': '已分叉：新会话 {id}',
       'panel.branchUserOnly': '分叉只对用户消息可用（AI 消息没有可回填的原文）',
-      'panel.edit': '编辑并重发',
-      'panel.editHint': '把此条原文放回输入框，改完直接发送',
-      'panel.editDone': '原文已放回输入框',
+      // 0.17.0（冲突 R2）：行为是「复制原文到输入框」，不修改原消息。
+      // 旧文案「编辑并重发」暗示会改原消息，实测会误导（发出后是新增一条，
+      // 原消息仍在，界面出现两条相似消息）。opencode 也没有消息级编辑。
+      'panel.edit': '复制到输入框',
+      'panel.editHint': '把此条原文复制到输入框；发出后会新增一条消息，不会修改原消息',
+      'panel.editDone': '原文已复制到输入框',
       'panel.editEmpty': '这条消息没有可编辑的文本',
       'panel.editUnavailable': '编辑器不可写（会话可能正在运行或尚未挂载）',
       'panel.editNotReady': '全文尚未就绪（列表只带 160 字摘要）——请重试或改用回滚回填',
@@ -337,9 +340,9 @@ window.__ModuleLoader__.load({
       'panel.branchHint': 'Copy the conversation above this message into a new session and put this message back in the new composer',
       'panel.branchDone': 'Forked: {id}',
       'panel.branchUserOnly': 'Fork works on user messages only (assistant messages have no text to hand back)',
-      'panel.edit': 'Edit and resend',
-      'panel.editHint': 'Put this message back in the composer to change and send',
-      'panel.editDone': 'Original text is back in the composer',
+      'panel.edit': 'Copy to composer',
+      'panel.editHint': 'Copies this text into the composer; sending adds a new message and does not modify the original',
+      'panel.editDone': 'Original text copied to the composer',
       'panel.editEmpty': 'This message has no editable text',
       'panel.editUnavailable': 'Composer is not writable (session may be running or not mounted)',
       'panel.editNotReady': 'Full text is not ready (the list only carries a 160-char snippet) — retry, or use revert to refill',
@@ -1376,25 +1379,33 @@ window.__ModuleLoader__.load({
             setError(t('panel.editEmpty'))
             return
           }
-          if (!__inputActions || typeof __inputActions.setDraft !== 'function') {
+          // ── 0.17.0（冲突 C1）：与 refillComposer 统一成**同一条**回填路径 ──
+          //
+          // 旧实现走 `__inputActions.setDraft` + `persistDraft`，且
+          // `!__inputActions` 就直接失败返回 —— 但 refillComposer（回滚路径）
+          // 早在 0.14.0 就改成了「先写宿主草稿键、再尽力更新编辑器」，不依赖
+          // 编辑器是否已挂载。同一件事两条实现、两种可靠性，必须合并。
+          //
+          // 现在统一为：① writeSessionDraft 落盘（权威值）② 尽力 setDraft
+          // ③ 回读校验（写不进去就报错且不 close，保留 0.13.1 MED-4 的护栏）
+          const sidForDraft = target.sessionId
+          const persisted = writeSessionDraft(sidForDraft, body)
+          let editorSet = false
+          if (__inputActions && typeof __inputActions.setDraft === 'function') {
+            try {
+              __inputActions.setDraft(body)
+              editorSet = true
+            } catch (reason) {
+              console.warn('[message-ops] setDraft failed:', reason)
+            }
+          }
+          // 回读校验：落盘失败才是真风险（编辑器可能没挂载，那不是错误）
+          const stored = readSessionDraft(sidForDraft)
+          if (stored !== body) {
             setError(t('panel.editUnavailable'))
             return
           }
-          try {
-            __inputActions.setDraft(body)
-            if (typeof __inputActions.persistDraft === 'function') __inputActions.persistDraft()
-          } catch (reason) {
-            setError(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)))
-            return
-          }
-          // MED-4：`persistDraft` 存在 ≠ 真的落盘。宿主的 writer 由
-          // `bindDraftPersistence` 在视图挂载时绑定；blank/hero 态或视图未挂载时
-          // 该函数在但空转。于是「setDraft 改的是内存编辑器、随后 close() 关面板、
-          // 宿主重挂会话时从 localStorage 读回旧草稿」→ 用户看到成功却什么都没了。
-          // 判据不能靠函数存在，只能**回读**：写不进存储就当失败，不 close。
-          const sidForDraft = target.sessionId
-          const stored = readSessionDraft(sidForDraft)
-          if (stored != null && stored !== body) {
+          if (!persisted && !editorSet) {
             setError(t('panel.editUnavailable'))
             return
           }
@@ -3721,6 +3732,9 @@ window.__ModuleLoader__.load({
                 }
                 if (!res.ok || !data.ok) throw new Error(data.error || 'HTTP ' + res.status)
                 notifyDone(__t('done.revert'))
+                // 0.17.0（冲突 C2）：按钮路径原先漏了「立刻标遮蔽」，
+                // 导致刷新窗口内重复点击会拿已遮蔽的 seq 去 POST → 409。
+                markRowsShadowedFrom(row.seq)
                 // 0.9.6：统一回填出口 —— 这个入口原先也不回填
                 refillComposer(sid, row.seq)
                 emitChanged()
@@ -4273,6 +4287,28 @@ window.__ModuleLoader__.load({
      *   - AI 时钟按钮  → boundary 是 AI 消息 seq → 取到它之前那条用户消息 ✓
      * 会话不匹配时直接放弃（不跨会话写，避免串台）。
      */
+    /**
+     * 回滚成功后立刻把本地行缓存标成已遮蔽（0.17.0 · 冲突 C2）。
+     *
+     * 为什么必须做：回滚成功后到视图刷新完成之间有一个窗口期，
+     * `rowsCache.rows[*].shadowed` 还是旧值。此时用户再点同一行按钮
+     * （或另一行更靠后的），`runUserRevert` 会拿**已被遮蔽的 seq** 去
+     * POST /revert → 服务端 409 `start seq N not found in surface`。
+     *
+     * 原先只有 `/undo` 路径（`runUndo`）做了这件事，按钮路径漏了 ——
+     * 同一语义两套实现、其中一套少了护栏。这里抽成共享函数，两条路径都调。
+     *
+     * @param boundarySeq - 本次回滚的目标 seq；>= 它的都已不可再回滚
+     */
+    var markRowsShadowedFrom = boundarySeq => {
+      const cache = __peekRowsCache ? __peekRowsCache() : null
+      if (!cache || !Array.isArray(cache.rows)) return
+      for (const r of cache.rows) {
+        if (r && typeof r.seq === 'number' && r.seq >= boundarySeq) r.shadowed = true
+      }
+      cache.at = 0
+    }
+
     var refillComposer = (rawSid, boundarySeq) => {
       try {
         const cache = __peekRowsCache ? __peekRowsCache() : null
@@ -4341,13 +4377,7 @@ window.__ModuleLoader__.load({
           if (!res.ok || !data.ok) throw new Error(data.error || 'HTTP ' + res.status)
           // 0.11.3：立刻把本行标成已遮蔽，否则 afterWrite 的异步刷新窗里
           // 再点一次 /undo 仍会选中同一个 seq → 409。
-          const rowsCache = __peekRowsCache ? __peekRowsCache() : null
-          if (rowsCache && Array.isArray(rowsCache.rows)) {
-            for (const r of rowsCache.rows) {
-              if (r && typeof r.seq === 'number' && r.seq >= target.seq) r.shadowed = true
-            }
-            rowsCache.at = 0
-          }
+          markRowsShadowedFrom(target.seq)
           refillComposer(rawSid, target.seq) // 先回填，再重建视图（与对话框一致）
           afterWrite(rawSid, __t('undo.done.undo'))
         })

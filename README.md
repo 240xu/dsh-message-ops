@@ -891,6 +891,52 @@ min fence=10 → seq>=10 全藏 → 4792/4793 全被隐藏 → 正文几乎空�
 | `src/index.js:336-340` `revertFences` 塌缩复盘 | 「0.9.4 · 修「正文几乎空白」」 |
 | `src/ops-core.js:551-557` 0.5.7 磁盘路径复盘 | 「0.5.7 · 第四层根因：store-miss 会话的磁盘追加路径」 |
 
+### 0.17.0 · 动作入口冲突清理
+
+用户问：「那个编辑并重发是你的吗？你看看有多少是功能冲突的」
+
+**是插件自造的**（`git log -S "panel.editDone"` 只有 `d699ddb` 一次提交），
+opencode 没有消息级编辑。查下来三个真冲突，全部已修：
+
+#### C1 · 回填有两条实现，可靠性不同
+
+| 路径 | 旧实现 | 问题 |
+|---|---|---|
+| `refillComposer`（回滚） | `writeSessionDraft`（0.14.0 起） | 不依赖编辑器，可靠 |
+| `startEdit`（面板编辑） | `__inputActions.setDraft` + `persistDraft`，且 `!__inputActions` **直接失败** | 依赖 `bindDraftPersistence` 绑定的 writer，视图未挂载时空转 |
+
+同一语义两条实现、两种可靠性 → **合并**为同一条路径：
+先 `writeSessionDraft` 落盘（权威值）→ 尽力 `setDraft`（立刻可见）→ 回读校验。
+
+#### R2 · 「编辑并重发」文案误导
+
+`startEdit` **完全不调服务端**（函数体内无 fetch）。它只把原文放回输入框，
+**不遮蔽原消息**。用户改完发出后：
+
+- 日志 **append 一条新 user/message**
+- 原消息 **仍然 visible**，不被遮蔽
+- 界面上出现**两条相似消息**，用户以为「改了」，实际「加了一条」
+
+而旧文案 `编辑并重发` / `Edit and resend` 暗示的是「修改原消息」。
+改为 **`复制到输入框`** / `Copy to composer`，提示补上
+「发出后会新增一条消息，不会修改原消息」。
+
+#### C2 · 防 409 护栏只有一条路径有
+
+`/undo`（`runUndo`）在回滚成功后立刻把 `rowsCache` 里 `>= seq` 的行标成
+`shadowed = true`，注释写明是为了防止刷新窗口内重复点击拿到已遮蔽的 seq。
+**按钮路径 `runUserRevert` 漏了这段** —— 同一语义两套实现，其中一套少了护栏。
+
+抽成共享函数 `markRowsShadowedFrom(boundarySeq)`，两条路径都调。
+
+#### 没动的重复入口（故意的）
+
+`/undo` vs 按钮、`/redo` vs dock 恢复、`message_ops` tool vs UI——
+这些是不同上下文/不同调用方，共用 `ops-core.js` 同一个核，不算冲突。
+详见 `design-demos/conflict-audit-lead.md`。
+
+新增 `test/action-conflict.test.js`（6 条）。测试 298（294 pass / 4 skip）。
+
 ### 0.16.0 · 视觉对齐 opencode（有依据、有取舍）
 
 **方法**：不是照着印象改，而是拉了 `sst/opencode` 源码
