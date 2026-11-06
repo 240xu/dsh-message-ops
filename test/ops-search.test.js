@@ -66,7 +66,10 @@ test('compact view drops heavy fields but keeps visibility state and counts', as
   assert.ok('range' in compact.messages[0], 'compact must carry range for marker rows (dock target fix)')
   assert.ok('marker' in compact.messages[0], 'compact must carry the marker flag (dock filtering)')
   assert.equal(compact.messages[0].sourceKind, undefined, 'compact must not carry sourceKind')
-  assert.equal(compact.messages[0].id, undefined, 'compact must not carry message ids')
+  // 0.15.0：id 从「重字段」改为**必需** —— 客户端用它拼 data-chat-node-key
+  // 反查 seq，是 developer/message（工具清单变更）遮蔽同步的唯一锚点。
+  // 没有 id → byMessageId 查不到 → 那行「+49 tools」回滚后仍然显示。
+  assert.ok('id' in compact.messages[0], 'compact must carry message id (node-key lookup)')
   assert.equal(compact.messages[0].type, undefined, 'compact must not carry event type')
   assert.equal(compact.messages[0].marker, false, '非 marker 行必须是显式 false（不是 undefined）')
   assert.equal(compact.messages[0].restoresSeq, undefined, 'compact must not carry per-row restore pointers')

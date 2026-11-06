@@ -34,6 +34,11 @@ function textSegments(e) {
   const out = []
   for (const c of content) {
     if (c && c.type === 'text' && typeof c.text === 'string' && c.text.trim()) out.push(c.text)
+    // 0.15.0：developer/message 的 tool-registry 变更块不是 text，但它是
+    // **surface 节点**（会进模型上下文），必须给它一个可读摘要 —— 否则
+    // listMessages 拿到空串、snippet 为空，客户端 rows/索引会把它当无效行丢掉。
+    else if (c && c.type === 'tool-addition' && typeof c.toolName === 'string') out.push('+' + c.toolName)
+    else if (c && c.type === 'tool-removal' && typeof c.toolName === 'string') out.push('-' + c.toolName)
   }
   return out
 }
@@ -315,7 +320,21 @@ export function listMessages(events) {
   const messages = []
   for (const e of events) {
     if (!e || typeof e.seq !== 'number') continue
-    if (e.type === 'user/message' || e.type === 'assistant/message' || e.type === 'system/message') {
+    // 0.15.0：把 developer/message 也收进来。
+    //
+    // 为什么必须收：宿主的 `developerMessageDefinition.match` 只看
+    // `event.type === 'developer/message'`，**不检查 surface 遮蔽状态**
+    // （对比 user/message 的 match 有 `isAppendSurfaceEvent(event)` 这道闸）。
+    // 而 `isVisibleChatNode` 又对带 tool-addition/tool-removal 的 context 节点
+    // **强制可见**。结果：回滚时工具清单变更被 surface replace 正确遮蔽了
+    // （模型上下文干净），但界面上那行「+49 tools」照样渲染 —— 用户看到的就是
+    // 「回滚没撤回干净」。
+    //
+    // 我们没法改宿主渲染器，但插件本来就在做渲染层的遮蔽同步
+    // （installUserRevertInjector 按 data-chat-node-key 精确查表藏行）。
+    // 前提是这些事件必须先出现在我们的消息列表里、并带上 id，否则
+    // byMessageId 查不到 → seqOfNodeKey 返回 null → 调用方「保持可见」。
+    if (e.type === 'user/message' || e.type === 'assistant/message' || e.type === 'system/message' || e.type === 'developer/message') {
       const text = messageText(e)
       const msg = e.data && e.data.message
       // id：宿主持久化的消息身份（user 在 data.id、assistant 在 data.message.id），
@@ -325,8 +344,16 @@ export function listMessages(events) {
       messages.push({
         seq: e.seq,
         type: e.type,
-        role: (msg && msg.role) || (e.type === 'user/message' ? 'user' : e.type === 'assistant/message' ? 'assistant' : 'system'),
-        id: (msg && msg.id) || e.data.id || null,
+        role:
+          (msg && msg.role) ||
+          (e.type === 'user/message'
+            ? 'user'
+            : e.type === 'assistant/message'
+              ? 'assistant'
+              : e.type === 'developer/message'
+                ? 'developer'
+                : 'system'),
+        id: (msg && msg.id) || (e.data && e.data.id) || null,
         marker: isReplaceMarker,
         snippet: text.replace(/\s+/g, ' ').trim().slice(0, 160),
         // 0.4.0 composer 回填：user 消息携带全文（revert 后 setDraft 原文）
