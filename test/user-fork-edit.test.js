@@ -109,10 +109,15 @@ test('scan 每轮都会重新隐藏官方 branch（视图重建后仍生效）',
   assert.match(body, /suppressHostBranch\(\)/, 'scan 必须调用抑制函数，否则 openSession 重挂后按钮回来')
 })
 
-test('面板的编辑入口只对用户消息可用，并走 setDraft + persistDraft', () => {
+test('面板的编辑入口只对用户消息可用，且与回滚回填走同一条路径', () => {
   const body = block('startEdit')
   assert.match(body, /setDraft\(body\)/, '必须用官方编辑器写草稿')
-  assert.match(body, /persistDraft\(\)/, '不落盘会被紧随的 openSession 用旧草稿覆盖（0.11.3 已踩过）')
+  // 0.17.0（冲突 C1）：不再走 persistDraft —— 它依赖 bindDraftPersistence 绑定的
+  // writer，视图未挂载时空转。统一改成 writeSessionDraft（直接写宿主草稿键，
+  // 与 refillComposer 同一机制）+ 回读校验。
+  assert.match(body, /writeSessionDraft\(sidForDraft, body\)/, '必须直接写宿主草稿键（与回滚回填同源）')
+  assert.match(body, /readSessionDraft\(sidForDraft\)/, '必须回读校验真的落盘了')
+  assert.doesNotMatch(body, /persistDraft\(\)/, '不该再依赖 persistDraft（视图未挂载时空转）')
   assert.ok(src.includes("pickedIsUser = !!pickedLive && pickedLive.role === 'user'"), '面板必须有用户消息判定')
   assert.match(src, /disabled: !canEdit/, '非用户消息必须禁用编辑')
   assert.match(src, /disabled: !canFork \|\| !!confirmAction/, '非用户消息必须禁用分叉')
