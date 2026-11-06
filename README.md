@@ -891,6 +891,47 @@ min fence=10 → seq>=10 全藏 → 4792/4793 全被隐藏 → 正文几乎空�
 | `src/index.js:336-340` `revertFences` 塌缩复盘 | 「0.9.4 · 修「正文几乎空白」」 |
 | `src/ops-core.js:551-557` 0.5.7 磁盘路径复盘 | 「0.5.7 · 第四层根因：store-miss 会话的磁盘追加路径」 |
 
+### 0.16.0 · 视觉对齐 opencode（有依据、有取舍）
+
+**方法**：不是照着印象改，而是拉了 `sst/opencode` 源码
+（commit `82229fb7`，version 2.2.5，sparse-checkout 取 `packages/app/src` +
+`packages/session-ui` + `packages/client/src`），逐条读 CSS 与组件，产出
+`design-demos/opencode-visual-spec.md`（912 行，64 处 `证据:` 标注）。
+
+**三个反直觉的实证结论**（都做了反向验证）：
+
+1. **opencode 没有「悬停浮出一排按钮」** —— 只有 1 枚 `chevron-down` 按钮
+   （20×20，radius 4px，图标 14px，`ghost-muted` #808080），点击弹出下拉菜单，
+   copy / fork / revert 全在菜单项里。
+2. **revert 后没有任何「变灰 / 删除线 / 半透明」** —— 是**投影层直接过滤**
+   （`message.id < revertMessageID`），被裁的行根本不进虚拟列表。
+   全仓 `data-reverted` / `isReverted` 零命中。
+3. **没有消息级 edit，也没有「已回滚」常驻提示** —— 只有 5s toast 带 Undo
+   + `/undo` `/redo` 斜杠命令。
+
+**本次改动（按用户拍板：保留横排按钮与 dock，只对齐视觉规格）**：
+
+| 项 | 改前 | 改后 | 依据 |
+|---|---|---|---|
+| 图标尺寸 | 15px | **14px** | opencode `size="small"` |
+| 按钮圆角 | 6px（宿主默认） | **4px** | `icon-button.css:29-33` |
+| 图标颜色 | `label-tertiary`(#9a9aa0) | **#808080** | `--v2-icon-icon-muted` |
+| hover 前景 | 不变色 | **转 `label-secondary`** | `icon-button.css:103-106` |
+| 焦点可见 | 无 | **`focus-visible` 2px outline** | 无障碍补齐 |
+| 淡入动画 | 宿主 80ms | **保持 80ms**（不改） | opencode 源码注释明写 "without a fade"；宿主 80ms 已足够短 |
+
+**明确不改的（宿主约束，照抄反而更差）**：
+
+- **20px 按钮尺寸做不到**：DSH 宿主动作行 `.xzv4MW_actions` 已定
+  `height: 28px`，插件内嵌按钮改 20px 会撑裂行高。只能对齐图标与颜色。
+- **不改成 chevron 菜单**：用户明确要「fork 与回撤在同一位置」，改成菜单会推翻
+  这个诉求；且 DSH 无现成菜单浮层体系，要新建 `shell.overlay` 实现。
+- **保留 RevertDock 与确认弹窗**：opencode 的 revert 是轻量 stage+redo，
+  DSH 是 append-only 遮蔽 + 需刷新生效，代价高得多；且 DSH 没有 `/redo`
+  那种便捷恢复入口，删了 dock 会让用户不知道如何恢复。
+- **不引入 `--v2-*` token**：插件全部使用 `--dsw-alias-*`，深色模式自动跟随。
+  引入第二套 token 会出现双轨配色。
+
 ### 0.15.0 · 回滚要「像干净请求」：工具清单变更必须一起消失
 
 用户原话：「我说的撤回，只是不显示我重新发起的请求，就像干净请求。」

@@ -3813,7 +3813,7 @@ window.__ModuleLoader__.load({
         btn.title = __t('slot.revert')
         btn.setAttribute('aria-label', __t('slot.revert'))
         btn.innerHTML =
-          '<svg width="15" height="15" viewBox="0 0 16 16" fill="none"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9" stroke="currentColor" stroke-width="1.2"/><path d="M2.2 2.8v3h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+          '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9" stroke="currentColor" stroke-width="1.2"/><path d="M2.2 2.8v3h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
         btn.addEventListener('click', e => {
           e.preventDefault()
           e.stopPropagation()
@@ -3845,7 +3845,7 @@ window.__ModuleLoader__.load({
         btn.setAttribute('aria-label', __t('slot.fork'))
         // 官方 IconBranchOutline16 的 1:1 路径（packages/client/ui-primitives/src/icons/index.tsx:149）
         btn.innerHTML =
-          '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="none"><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M13.0762 1.37207C14.0846 1.37228 14.9021 2.19077 14.9023 3.19922C14.9022 4.20772 14.0847 5.02518 13.0762 5.02539C12.2967 5.02539 11.6325 4.53691 11.3701 3.84961H4.35547C4.79397 4.26458 5.15861 4.7644 5.41699 5.33496L7.10645 9.06738C7.88526 10.7875 9.55104 11.9228 11.4189 12.0371C11.7085 11.4109 12.3411 10.9756 13.0762 10.9756C14.0843 10.9759 14.9023 11.7936 14.9023 12.8018C14.9023 13.81 14.0843 14.6277 13.0762 14.6279C12.2534 14.6279 11.5574 14.0832 11.3291 13.335C8.9868 13.1879 6.89981 11.7612 5.92285 9.60352L4.23242 5.87109C3.67503 4.64033 2.44878 3.84961 1.09766 3.84961V2.54883C1.10665 2.54883 1.11601 2.54975 1.125 2.5498L11.3701 2.54883C11.6326 1.86151 12.2969 1.37207 13.0762 1.37207ZM13.0762 12.2764C12.7858 12.2764 12.5508 12.5114 12.5508 12.8018C12.5508 13.0921 12.7858 13.3281 13.0762 13.3281C13.3664 13.3279 13.6025 13.092 13.6025 12.8018C13.6025 12.5115 13.3664 12.2766 13.0762 12.2764ZM13.0762 2.67285C12.7855 2.67285 12.55 2.90861 12.5498 3.19922C12.5499 3.48987 12.7855 3.72559 13.0762 3.72559C13.3667 3.72538 13.6024 3.48975 13.6025 3.19922C13.6023 2.90874 13.3666 2.67306 13.0762 2.67285Z"/></svg>'
+          '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="none"><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M13.0762 1.37207C14.0846 1.37228 14.9021 2.19077 14.9023 3.19922C14.9022 4.20772 14.0847 5.02518 13.0762 5.02539C12.2967 5.02539 11.6325 4.53691 11.3701 3.84961H4.35547C4.79397 4.26458 5.15861 4.7644 5.41699 5.33496L7.10645 9.06738C7.88526 10.7875 9.55104 11.9228 11.4189 12.0371C11.7085 11.4109 12.3411 10.9756 13.0762 10.9756C14.0843 10.9759 14.9023 11.7936 14.9023 12.8018C14.9023 13.81 14.0843 14.6277 13.0762 14.6279C12.2534 14.6279 11.5574 14.0832 11.3291 13.335C8.9868 13.1879 6.89981 11.7612 5.92285 9.60352L4.23242 5.87109C3.67503 4.64033 2.44878 3.84961 1.09766 3.84961V2.54883C1.10665 2.54883 1.11601 2.54975 1.125 2.5498L11.3701 2.54883C11.6326 1.86151 12.2969 1.37207 13.0762 1.37207ZM13.0762 12.2764C12.7858 12.2764 12.5508 12.5114 12.5508 12.8018C12.5508 13.0921 12.7858 13.3281 13.0762 13.3281C13.3664 13.3279 13.6025 13.092 13.6025 12.8018C13.6025 12.5115 13.3664 12.2766 13.0762 12.2764ZM13.0762 2.67285C12.7855 2.67285 12.55 2.90861 12.5498 3.19922C12.5499 3.48987 12.7855 3.72559 13.0762 3.72559C13.3667 3.72538 13.6024 3.48975 13.6025 3.19922C13.6023 2.90874 13.3666 2.67306 13.0762 2.67285Z"/></svg>'
         btn.addEventListener('click', e => {
           e.preventDefault()
           e.stopPropagation()
@@ -4040,9 +4040,19 @@ window.__ModuleLoader__.load({
           tag.textContent = [
             // 不再用 absolute + :hover：按钮作为宿主动作行的子元素，
             // 由宿主 [data-actions-reveal] 统一控制显隐（触屏也跟着宿主走）。
-            '.mopsUserRevert,.mopsUserFork{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary,#9a9aa0);cursor:pointer;padding:0;flex:none}',
-            '.mopsUserRevert:hover,.mopsUserFork:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12))}',
-            '.mopsUserRevert:disabled,.mopsUserFork:disabled{opacity:.4;cursor:default}',
+            // 0.16.0 视觉对齐 opencode（sst/opencode @82229fb7 实测规格）：
+            //   · 图标 14px / 描边 1.2（opencode IconButton size="small"）
+            //   · 颜色 #808080（--v2-icon-icon-muted，映射到 DSH 的 label-tertiary）
+            //   · 圆角 4px（opencode）而非宿主默认 6px —— 按钮本身是我们注入的，
+            //     radius 可自由设置；只有 28px 尺寸受宿主动作行高度物理约束
+            //     （宿主 .xzv4MW_actions 已定 height:28px，改小会撑裂行高）。
+            //   · 无淡入动画（opencode 源码注释明写 "Hover actions show and hide
+            //     at once, without a fade"）—— 显隐完全交给宿主 [data-actions-reveal]。
+            '.mopsUserRevert,.mopsUserFork{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;border-radius:4px;background:transparent;color:var(--dsw-alias-label-tertiary,#808080);cursor:pointer;padding:0;flex:none}',
+            '.mopsUserRevert svg,.mopsUserFork svg{width:14px;height:14px;display:block}',
+            '.mopsUserRevert:hover,.mopsUserFork:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));color:var(--dsw-alias-label-secondary,#6b6b70)}',
+            '.mopsUserRevert:disabled,.mopsUserFork:disabled{opacity:.4;cursor:default;background:transparent}',
+            '.mopsUserRevert:focus-visible,.mopsUserFork:focus-visible{outline:2px solid var(--dsw-alias-border-l2,#b8b8b8);outline-offset:1px}',
             '.mopsUserActionsRow{height:28px;display:flex;align-items:center;gap:8px;margin-left:-6px}',
             '@media (hover:none){.mopsUserActionsRow{opacity:1}}',
           ].join('')
