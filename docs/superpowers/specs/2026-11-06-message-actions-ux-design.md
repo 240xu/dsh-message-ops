@@ -157,3 +157,59 @@
 - 不实现「真正的一键撤销回撤」（append-only 日志做不到，也不安全）。
 - 不引入第二套设计 token。
 - 不把面板改造成独立编辑器（面板定位仍是浏览 + 上下文）。
+
+---
+
+## 9. 审计后修订（2026-11-06 晚，Lead 决断，覆盖 §3.2）
+
+### 9.1 决定性发现
+
+profile 里**已安装并实际加载** `@linxin666/dsh-client-ui-message-edit@0.4.14`
+（3080 与 3098 的 bundle graph 均命中）。它注入 `conversation.chat.turnTail` 槽，
+提供的正是用户要的「编辑并重发」：
+
+- 回合末尾一个文字按钮「编辑并重发」/ "Edit and resend"（`lib/client.js:196,208`）
+- 点开是**原地 textarea**（`.gbJVYa_editor`，radius 12px，全 `--dsw-alias-*` token）
+- 提交走 `sessions.fork({atSeq: seq-1})` → `sessions.using(childId)` →
+  `reference.binding.session.prompt([{type:"text",text:editedText}], "queue")`
+  （`lib/client.js:234-245`）—— 这是**官方认可的编辑并重发路径**
+- 源会话不变；Esc 取消、Ctrl/Cmd+Enter 重发、运行中/无 fork 权限禁用
+- README 明确「不会改写原日志、不会回滚后续副作用」
+
+也就是说：**「编辑并重发」不该由本插件实现，它早已由专门插件提供。**
+本插件在 0.12.0/0.17.0/0.18.0 里做的 `panel.edit`、行内铅笔 `mopsUserEdit`、
+`client.js:784` 的老 `setDraft` 路径，全都是与它重复的劣质轮子，且互相矛盾
+（用户看到「编辑并重发为什么还存在」就是这么来的）。
+
+### 9.2 修订后的决断（覆盖 §3.2 与 §3.1）
+
+**删除，不再自己造编辑框。**
+
+1. 删除行内铅笔按钮 `ensureEditBtn` / `runUserEdit` / `.mopsUserEdit` 样式 /
+   `slot.edit*` 文案。用户消息动作行收敛为：`时间 → 宿主Copy → ｜ 回撤 → 分叉`。
+2. 删除面板 `panel.edit` 一组按钮与 `startEdit` 回调、相关文案与状态
+   （`detailFull` / `editTextReady` / `panel.edit*`）。
+3. 删除 `client.js:784-793` 的 `mode==='revert'` 老 `setDraft` 路径。
+   「回滚用户消息后回填原文」仍由 `refillComposer` 承担（属回滚语义，不是编辑入口）。
+4. 编辑并重发交由已装的 `@linxin666/dsh-client-ui-message-edit` 在 **turn-tail** 提供。
+   本插件不再重复暴露入口，也不与之争抢同一动作行。
+5. §3.2 的 `EditResendOverlay` / `shell.overlay` / 「发送并回撤」方案**整个废弃**。
+   用户「点发送才回撤」的时序诉求，由官方插件的 fork 语义天然满足：
+   点保存那一刻才 `fork` + `prompt`，此前源会话零副作用。
+
+### 9.3 对 §3.2 风险的结论
+
+审计确认 `prompt(..., "queue")` 中的 `"queue"` 是官方插件自己在用的提交模式
+（`lib/client.js:243`），不是缺陷。本插件无需触碰 composer 提交管线 —— 这进一步
+印证「不劫持宿主」是正确的，也彻底消除了 §3.2 里那个 submit 歧义。
+
+### 9.4 修订后的实施顺序（4 个独立提交）
+
+1. **收敛编辑入口**：删铅笔 / 面板 edit / 老 setDraft 路径；动作行只剩 回撤 + 分叉。
+   配回归测试证明「本插件不再提供编辑入口」，并说明由 message-edit 插件承担。
+2. **删 AI 时钟**：assistant-actions 槽只渲染引用一个按钮。
+3. **引用重做**：换非 copy 图标、选中片段优先、截断+标注、走官方 insertQuote。
+4. **dock**：去掉 markers 变化触发的自动折叠；恢复=重放语义与文案不变。
+
+§3.3（引用）、§3.4（dock）、§3.5（统一约束）、§5（错误边界）、§6（测试）、
+§8（YAGNI）继续有效，仅 §3.1/§3.2 被本节覆盖。
