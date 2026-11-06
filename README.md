@@ -891,6 +891,65 @@ min fence=10 → seq>=10 全藏 → 4792/4793 全被隐藏 → 正文几乎空�
 | `src/index.js:336-340` `revertFences` 塌缩复盘 | 「0.9.4 · 修「正文几乎空白」」 |
 | `src/ops-core.js:551-557` 0.5.7 磁盘路径复盘 | 「0.5.7 · 第四层根因：store-miss 会话的磁盘追加路径」 |
 
+### 0.15.0 · 回滚要「像干净请求」：工具清单变更必须一起消失
+
+用户原话：「我说的撤回，只是不显示我重新发起的请求，就像干净请求。」
+
+现象：回滚一条用户消息后，主对话流里「新增了 N 个工具」那行**还在**；
+供应商报错（`llm/retry`）相关的重试行也留着。
+
+**根因（全部在宿主实际下发的 bundle 里取证，不是推测）：**
+
+```js
+// 宿主 dsh-client-ui-chat：developerMessageDefinition
+match: (event) => event.type === "developer/message" ? { ... } : null
+```
+
+对比 `user/message` 的 match：
+
+```js
+if (event.type === "user/message")
+  return isAppendSurfaceEvent(event) && !isCompactionCheckpoint(event) ? ... : null
+```
+
+**`user/message` 有 `isAppendSurfaceEvent` 这道闸，`developer/message` 没有。**
+再加上 `isVisibleChatNode` 里对含 `tool-addition`/`tool-removal` 的 context 节点
+**强制可见**：
+
+```js
+node.kind !== "context" || node.data.content.some(b =>
+  b.type === "tool-addition" || b.type === "tool-removal")
+```
+
+结果：surface replace 把工具清单变更事件正确遮蔽了（**模型上下文是干净的**），
+但 UI 照样渲染那一行 —— 用户看到「回滚没撤回干净」。
+
+**修法**（插件侧唯一抓手是渲染层遮蔽同步，宿主渲染器改不了）：
+
+1. `listMessages` 收录 `developer/message`（此前只收 user/assistant/system）。
+   不收 → 遮蔽状态传不到客户端 → `byMessageId` 查不到 → 调用方「保持可见」。
+2. `textSegments` 把 `tool-addition`/`tool-removal` 渲染成 `+name`/`-name`。
+   不转 → snippet 为空串 → 被 rows 的 `r.sn` 过滤条件当无效行丢掉。
+3. compact 投影补 `id`。客户端用 `<kindLen>:<kind><id>`（实测
+   `17:developer-message<uuid>`）拼 `data-chat-node-key` 反查 seq，
+   没有 id 这条链就断了。
+
+实机验证（3096，真实会话 1530 行）：
+
+```
+seq= 458 id=2a306c76-6 shadowed=true | +sidebar_open
+seq= 471 id=deb0ed06-1 shadowed=true | -subagent_codex
+seq= 552 id=b32cdc8b-8 shadowed=true | +subagent_codex
+seq= 700 id=8ea41701-f shadowed=true | +import_chat
+seq=3726 id=61b519dd-d shadowed=true | +browser_click
+```
+
+**没有做的（且不应该做）**：`llm/retry` / `assistant/attempt` 不是 surface 节点，
+它们不进模型上下文，遮蔽它们没有语义意义。如果你在界面上看到重试痕迹，
+那是宿主自己的 `model-retry` / `turn-error` 节点，不在本插件管辖范围。
+
+新增 `test/developer-message-shadow.test.js`（6 条）。测试 292（288 pass / 4 skip）。
+
 ### 0.13.1 · 修第二轮对抗审查的两个 HIGH
 
 **HIGH-1｜隐藏官方 branch 按钮在 0.2.2-alpha.2 上 100% 无效。**

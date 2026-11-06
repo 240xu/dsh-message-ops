@@ -693,6 +693,11 @@ async function opsList(targetCtx, sessionId, opts = {}) {
         // **自己的** seq 当恢复目标、也只能拿 marker 自己的文案当预览 ——
         // 用户看到「#3417 · [消息回滚] 已回滚到 seq 3410…」，点恢复又把 marker
         // 自己遮蔽一次（实测 5 条空 replace）。
+        // 0.15.0：必须带 id —— 客户端用 `<kindLen>:<kind><id>` 拼 data-chat-node-key
+        // 反查 seq（seqOfNodeKey）。developer/message（工具清单变更）的遮蔽同步
+        // 全靠这条链：没有 id → byMessageId 查不到 → 调用方「保持可见」→
+        // 宿主那行「+49 tools」在回滚后照样显示。
+        id: m.id ?? null,
         marker: m.marker === true,
         range: m.range ?? null,
         // 0.14.0：dock 的 activeMarkers 判据就是这两个字段 —— 不投影出去，
