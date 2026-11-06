@@ -133,6 +133,10 @@ window.__ModuleLoader__.load({
       'op.branchDesc': '把此条之前的对话复制到新会话，并把此条原文放回新会话输入框（原会话不变，非破坏操作）。',
       'slot.revert': '回滚到此条',
       'slot.revertUnmatched': '在日志里定位不到这条消息的 seq（通常是模型写的摘要与渲染文本偏差过大）——请改用「消息操作」对话框。',
+      'slot.edit': '编辑（复制原文到输入框）',
+      'slot.editHint': '复制此条原文到输入框；发出后新增一条消息，不修改原消息',
+      'slot.editDone': '原文已复制到输入框',
+      'slot.editNoText': '这条消息没有可复制的文本',
       'slot.fork': '从此条分叉',
       'slot.forkHint': '复制此条之前的对话到新会话，并把此条原文放回新会话输入框',
       'slot.forkDone': '已分叉：新会话 {id}',
@@ -264,6 +268,10 @@ window.__ModuleLoader__.load({
       'slot.revert': 'Revert to here',
       'slot.revertUnmatched':
         'Cannot locate this message seq in the log (usually the model-written summary drifted too far from the rendered text) — use the Message ops dialog instead.',
+      'slot.edit': 'Edit (copy text to composer)',
+      'slot.editHint': 'Copies this text into the composer; sending adds a new message without modifying the original',
+      'slot.editDone': 'Original text copied to the composer',
+      'slot.editNoText': 'This message has no text to copy',
       'slot.fork': 'Branch from here',
       'slot.forkHint': 'Copies the conversation above this message into a new session and puts this message back in the new composer',
       'slot.forkDone': 'Branched: new session {id}',
@@ -428,7 +436,7 @@ window.__ModuleLoader__.load({
       height: 28,
       padding: 0,
       border: 'none',
-      borderRadius: 6,
+      borderRadius: 4,
       background: 'transparent',
       color: 'var(--dsw-alias-label-tertiary, #8a8a8e)',
       cursor: 'pointer',
@@ -552,6 +560,25 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * 面板唤起按钮的图标：官方 `list-pen-outline`（列表 + 笔）。
+     *
+     * 0.18.0 前的 bug：这里用的是**分叉图标**（IconBranch）—— 一个"消息操作"
+     * 面板却长着"分叉"的脸，用户会以为点它是 fork。语义错位就是用户说的
+     * 「唤起它的 UI 显示明显有问题」。
+     *
+     * 「列表 + 笔」同时表达了两件事：浏览消息列表、编辑内容 —— 正是这个面板
+     * 的用途（用户也确认它可以当作"编辑 + AI 对话上下文面板"）。
+     *
+     * 几何取自宿主 icon sprite 的 `dsw-icon-list-pen-outline-regular`
+     * （16 viewBox，描边 1.2，与宿主动作行图标同一套视觉）。
+     */
+    /**
+     * 分叉图标组件。0.18.0 起**不再用于面板唤起按钮**（那曾造成语义错位：
+     * "消息操作"面板长着"分叉"的脸），但保留它是因为 `branchIconMarkup`
+     * 与它共用 `BRANCH_PATH` 常量 —— `test/icon-render.test.js` 锁定了这条同源约束，
+     * 防止两处各画一套分叉几何而慢慢漂移。
+     */
     function BranchIcon() {
       return React.createElement(
         'svg',
@@ -571,6 +598,31 @@ window.__ModuleLoader__.load({
           strokeLinecap: 'round',
           strokeLinejoin: 'round',
           fill: 'none',
+        }),
+      )
+    }
+
+    function OpsPanelIcon() {
+      return React.createElement(
+        'svg',
+        {
+          width: 16,
+          height: 16,
+          viewBox: '0 0 16 16',
+          fill: 'none',
+          xmlns: 'http://www.w3.org/2000/svg',
+          'aria-hidden': 'true',
+          focusable: 'false',
+        },
+        React.createElement('path', { d: 'M4.9375 5.90295H11.0625', stroke: 'currentColor', strokeWidth: 1.2, strokeLinecap: 'round' }),
+        React.createElement('path', { d: 'M4.9375 9.02991H8.27841', stroke: 'currentColor', strokeWidth: 1.2, strokeLinecap: 'round' }),
+        React.createElement('path', {
+          d: 'M12.5 1.32617C13.3039 1.32617 14 1.95171 14 2.77637V7.61328L13 8.68164V2.77637C13 2.55186 12.8007 2.32617 12.5 2.32617H3.5C3.1993 2.32617 3 2.55186 3 2.77637V13.2246C3.00044 13.4489 3.19963 13.6738 3.5 13.6738H8.32812L7.39258 14.6738H3.5C2.69637 14.6738 2.00042 14.0489 2 13.2246V2.77637C2 1.95171 2.69613 1.32617 3.5 1.32617H12.5Z',
+          fill: 'currentColor',
+        }),
+        React.createElement('path', {
+          d: 'M8.97212 14.3693C9.17511 14.5723 9.37811 14.7753 9.5811 14.9783C9.67012 14.8953 9.75914 14.8123 9.84815 14.7293C11.4505 13.2352 13.0528 11.7411 14.6551 10.247C14.7441 10.164 14.8331 10.081 14.9221 9.99803C14.5989 9.6748 14.2756 9.35157 13.9524 9.02834C13.8694 9.11736 13.7864 9.20637 13.7034 9.29539C12.2093 10.8977 10.7152 12.5 9.22113 14.1023C9.13813 14.1913 9.05513 14.2803 8.97212 14.3693Z',
+          fill: 'currentColor',
         }),
       )
     }
@@ -2663,7 +2715,7 @@ window.__ModuleLoader__.load({
           style: btnStyle,
           onClick: openDialog,
         },
-        React.createElement(BranchIcon),
+        React.createElement(OpsPanelIcon),
       )
     }
 
@@ -2857,36 +2909,56 @@ window.__ModuleLoader__.load({
           .finally(() => setBusy(null))
       }
 
-      // 0.5.0 消息引用：官方 InputActions.captureInsertion + insertText（零 DOM hack）
+      // ── 0.18.0：引用改用官方 insertQuote（结构化 QuoteNode）──────────────────
+      //
+      // 旧实现（0.5.0）用 `captureInsertion` + `insertText` 手工拼 `> ` markdown：
+      //
+      //     text.split('\n').map(l => '> ' + l).join('\n') + '\n\n'
+      //
+      // 问题（用户实测反馈「这 UI 做的怎么这么诡异」）：
+      //   1. **不是引用**，是一段普通 markdown 文本 —— 宿主不会渲染成引用块，
+      //      也不会给删除按钮、不进结构化编辑语义；
+      //   2. `captureInsertion` 返回的是**插入位置快照**，用户在菜单里点完到
+      //      文本到达之间若改过草稿，位置就失效，文本会插到奇怪的地方；
+      //   3. 手工拼的 `> ` 会和用户已有内容粘连（无空行分隔时）。
+      //
+      // 宿主其实提供了官方能力（dsh-client-ui-conversation:15369）：
+      //     insertQuote: (text) => this.insertQuote(text)
+      // 它内部走 `draftEditor.insertQuote(text, labels)` →
+      // `$replaceDetectSpanWithNodes([$createQuoteNode(text, labels), Go(" ")])`
+      // 即：在当前光标处插入一个**真正的 QuoteNode**（带 remove 标签、独立 undo），
+      // 并自动补一个空格分隔。这才是"规范"的引用。
       const runQuote = () => {
+        const finish = ok => notifyDone(ok ? t('quote.done') : t('quote.unavailable'), ok ? 'ok' : 'warn')
         try {
-          if (!inputActions || typeof inputActions.captureInsertion !== 'function' || typeof inputActions.insertText !== 'function') {
-            notifyDone(t('quote.unavailable'), 'warn')
+          if (!inputActions || typeof inputActions.insertQuote !== 'function') {
+            finish(false)
             return
           }
-          const span = inputActions.captureInsertion()
-          const insertQuote = text => {
-            if (text == null || text === '') {
-              notifyDone(t('quote.unavailable'), 'warn')
+          const put = text => {
+            if (typeof text !== 'string' || text.trim() === '') {
+              finish(false)
               return
             }
-            const quoted =
-              text
-                .split('\n')
-                .map(l => '> ' + l)
-                .join('\n') + '\n\n'
-            const ok = inputActions.insertText(quoted, span)
-            notifyDone(ok ? t('quote.done') : t('quote.unavailable'), ok ? 'ok' : 'warn')
+            // insertQuote 的返回值是 boolean（是否真的插入了）
+            let ok = false
+            try {
+              ok = inputActions.insertQuote(text.replace(/\r\n?/g, '\n')) !== false
+            } catch (e) {
+              console.warn('[message-ops] insertQuote failed:', e)
+              ok = false
+            }
+            finish(ok)
           }
-          // assistant 消息 fullText 恒 null（列表不携带）→ 按 seq 向服务端取单条全文
+          // assistant 消息 fullText 恒 null（列表不携带）→ 按 seq 取单条全文
           if (fullText != null && fullText !== '') {
-            insertQuote(fullText)
+            put(fullText)
             return
           }
           fetch('/api/message-ops/text?sessionId=' + encodeURIComponent(sessionId) + '&seq=' + encodeURIComponent(seq))
             .then(r => (r.ok ? r.json() : null))
-            .then(d => insertQuote(d && d.ok && typeof d.text === 'string' ? d.text : null))
-            .catch(() => insertQuote(null))
+            .then(d => put(d && d.ok && typeof d.text === 'string' ? d.text : null))
+            .catch(() => put(null))
         } catch (e) {
           notifyDone(t('errorPrefix') + (e && e.message ? e.message : String(e)), 'error')
         }
@@ -3617,10 +3689,16 @@ window.__ModuleLoader__.load({
       // 配不上（data-mops-unmatched）→ 禁用 + 说明原因，绝不留装饰按钮。
       var syncEnabled = (block, btn) => {
         if (!btn) return
+        // 0.18.0：三种按钮各有自己的提示文案（新增编辑按钮后不能都写 revert）
+        const hintKey = btn.classList.contains('mopsUserFork')
+          ? 'slot.forkHint'
+          : btn.classList.contains('mopsUserEdit')
+            ? 'slot.editHint'
+            : 'slot.revert'
         const ok = block.getAttribute('data-mops-seq')
         if (ok) {
           btn.disabled = false
-          btn.title = __t(btn.classList.contains('mopsUserFork') ? 'slot.forkHint' : 'slot.revert')
+          btn.title = __t(hintKey)
           btn.removeAttribute('data-mops-unmatched')
         } else {
           btn.disabled = true
@@ -3631,7 +3709,7 @@ window.__ModuleLoader__.load({
       /** 块内全部插件按钮一起同步（回滚 / 分叉同一动作行）。 */
       var syncBlockButtons = block => {
         if (!block || !block.querySelectorAll) return
-        for (const b of block.querySelectorAll('.mopsUserRevert, .mopsUserFork')) syncEnabled(block, b)
+        for (const b of block.querySelectorAll('.mopsUserRevert, .mopsUserEdit, .mopsUserFork')) syncEnabled(block, b)
       }
       var assignSeqs = (sid, cache, anchors) => {
         const idx = cache && cache.idx
@@ -3842,6 +3920,81 @@ window.__ModuleLoader__.load({
         return btn
       }
 
+      /**
+       * 0.18.0 编辑按钮：与回滚**同一动作行**，铅笔图标。
+       *
+       * 语义 = 把该条原文放回输入框（不遮蔽后续、不修改原消息）。发出后会新增
+       * 一条消息 —— 与面板里的「复制到输入框」是同一件事，两条入口共用
+       * `refillToComposer` 实现，避免又出现"同语义两套实现"。
+       *
+       * 图标取官方 `edit-outline`（宿主 icon sprite 里的 dsw-icon-edit-outline-regular）。
+       */
+      var ensureEditBtn = block => {
+        let host = block.querySelector('[class*="xzv4MW_actions"]')
+        if (!host) {
+          host = document.createElement('div')
+          host.className = 'mopsUserActionsRow'
+          block.appendChild(host)
+        }
+        const existing = host.querySelector('.mopsUserEdit')
+        if (existing) return existing
+        const btn = document.createElement('button')
+        btn.type = 'button'
+        btn.className = 'mopsUserEdit'
+        btn.title = __t('slot.edit')
+        btn.setAttribute('aria-label', __t('slot.edit'))
+        // 铅笔：官方 edit-outline 的几何（16 viewBox）
+        btn.innerHTML =
+          '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="none">' +
+          '<path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M11.9 1.4a1.6 1.6 0 0 1 2.3 0l.4.4a1.6 1.6 0 0 1 0 2.3l-1 1-2.7-2.7 1-1ZM9.8 3.5l2.7 2.7-6.9 6.9a1 1 0 0 1-.4.2l-2.6.7a.5.5 0 0 1-.6-.6l.7-2.6a1 1 0 0 1 .2-.4l6.9-6.9Z"/>' +
+          '</svg>'
+        btn.addEventListener('click', e => {
+          e.preventDefault()
+          e.stopPropagation()
+          if (btn.disabled) return
+          runUserEdit(btn, block)
+        })
+        host.appendChild(btn)
+        syncEnabled(block, btn)
+        return btn
+      }
+
+      /**
+       * 0.18.0 行内编辑：把该条原文放回输入框。
+       *
+       * 直接复用 `refillComposer`（回滚路径用的同一实现）——
+       * 0.17.0 刚把"同语义两套实现"问题清理掉，绝不能在这里再引入一条。
+       */
+      var runUserEdit = (btn, block) => {
+        const sid = __currentSessionId
+        if (!sid) return
+        const seq = Number(block.getAttribute('data-mops-seq'))
+        if (!Number.isFinite(seq)) {
+          notifyDone(__t('errorPrefix') + __t('slot.revertUnmatched'), 'error')
+          return
+        }
+        btn.disabled = true
+        Promise.resolve()
+          .then(() => ensureAssign(sid))
+          .then(() => fetchRows(sid))
+          .then(cache => {
+            const rows = cache && cache.rows
+            const row = rows && rows.find(r => r.seq === seq)
+            if (!row) {
+              notifyDone(__t('errorPrefix') + __t('slot.revertUnmatched'), 'error')
+              return
+            }
+            const ok = refillComposer(sid, seq)
+            notifyDone(ok ? __t('slot.editDone') : __t('slot.editNoText'), ok ? 'ok' : 'warn')
+          })
+          .catch(reason => {
+            notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
+          })
+          .finally(() => {
+            btn.disabled = false
+          })
+      }
+
       /** 0.12.0 分叉按钮：与回滚按钮**同一动作行**（opencode 把 fork 放在 copy/undo 同组）。 */
       var ensureForkBtn = block => {
         let host = block.querySelector('[class*="xzv4MW_actions"]')
@@ -3873,6 +4026,9 @@ window.__ModuleLoader__.load({
       // 两个按钮的顺序由 DOM 顺序决定：回滚在前（破坏性更高），分叉在后（非破坏）。
       var ensureUserActions = block => {
         ensureBtn(block)
+        // 0.18.0：编辑按钮与回滚**同一动作行**（用户要求：和回撤放同一个地方）。
+        // 顺序 = 回滚 → 编辑 → 分叉，破坏性从左到右递减。
+        ensureEditBtn(block)
         ensureForkBtn(block)
       }
       // 0.9.7（P0-2 读合并）：把 150/700/1600ms 三档并成**一次**真网络请求，
@@ -4062,11 +4218,20 @@ window.__ModuleLoader__.load({
             //     （宿主 .xzv4MW_actions 已定 height:28px，改小会撑裂行高）。
             //   · 无淡入动画（opencode 源码注释明写 "Hover actions show and hide
             //     at once, without a fade"）—— 显隐完全交给宿主 [data-actions-reveal]。
-            '.mopsUserRevert,.mopsUserFork{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;border-radius:4px;background:transparent;color:var(--dsw-alias-label-tertiary,#808080);cursor:pointer;padding:0;flex:none}',
-            '.mopsUserRevert svg,.mopsUserFork svg{width:14px;height:14px;display:block}',
-            '.mopsUserRevert:hover,.mopsUserFork:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));color:var(--dsw-alias-label-secondary,#6b6b70)}',
-            '.mopsUserRevert:disabled,.mopsUserFork:disabled{opacity:.4;cursor:default;background:transparent}',
-            '.mopsUserRevert:focus-visible,.mopsUserFork:focus-visible{outline:2px solid var(--dsw-alias-border-l2,#b8b8b8);outline-offset:1px}',
+            '.mopsUserRevert,.mopsUserEdit,.mopsUserFork{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;border-radius:4px;background:transparent;color:var(--dsw-alias-label-tertiary,#808080);cursor:pointer;padding:0;flex:none}',
+            '.mopsUserRevert svg,.mopsUserEdit svg,.mopsUserFork svg{width:14px;height:14px;display:block}',
+            '.mopsUserRevert:hover,.mopsUserEdit:hover,.mopsUserFork:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));color:var(--dsw-alias-label-secondary,#6b6b70)}',
+            '.mopsUserRevert:disabled,.mopsUserEdit:disabled,.mopsUserFork:disabled{opacity:.4;cursor:default;background:transparent}',
+            '.mopsUserRevert:focus-visible,.mopsUserEdit:focus-visible,.mopsUserFork:focus-visible{outline:2px solid var(--dsw-alias-border-l2,#b8b8b8);outline-offset:1px}',
+            // 0.18.0：用户反馈「点时间图标也会回撤」——根因不是绑定错误，而是
+            // 我们的按钮被 appendChild 到宿主 .actions 行末尾，而该行在
+            // data-clock="start"（用户消息）时第一个子元素就是**时间文本**：
+            //   [时间文本 padding-right:12px] 8px [复制] 8px [回滚][编辑][分叉]
+            // 触屏上 28px 按钮的命中区紧贴时间文本，点时间很容易滑到回滚上。
+            // 修：给插件按钮组加一道**视觉与命中分隔**（左侧细线 + 额外间距），
+            // 让"消息元信息（时间/复制）"和"破坏性操作"在视觉上分成两组。
+            '.mopsUserRevert:first-of-type{margin-left:10px;position:relative}',
+            '.mopsUserRevert:first-of-type::before{content:"";position:absolute;left:-9px;top:50%;transform:translateY(-50%);width:1px;height:14px;background:var(--dsw-alias-border-l1,rgba(128,128,128,.28));pointer-events:none}',
             '.mopsUserActionsRow{height:28px;display:flex;align-items:center;gap:8px;margin-left:-6px}',
             '@media (hover:none){.mopsUserActionsRow{opacity:1}}',
           ].join('')

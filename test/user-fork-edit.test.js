@@ -88,7 +88,7 @@ test('分叉图标复用官方 IconBranchOutline16 路径，且显式声明填�
 test('块内按钮统一同步（新增分叉后不能只同步回滚）', () => {
   assert.match(src, /var syncBlockButtons = \(?block\)? =>/, '必须存在块级同步函数')
   const body = block('syncBlockButtons')
-  assert.match(body, /mopsUserRevert, \.mopsUserFork/, '同步范围必须覆盖两个按钮')
+  assert.match(body, /mopsUserRevert, \.mopsUserEdit, \.mopsUserFork/, '同步范围必须覆盖三个按钮（回滚/编辑/分叉）')
   const assignBody = src.slice(src.indexOf('var assignSeqs'), src.indexOf('var assignSig'))
   assert.doesNotMatch(assignBody, /syncEnabled\(b, b\.querySelector/, 'assignSeqs 里不能再只同步单个按钮（会把分叉按钮留在禁用态）')
 })

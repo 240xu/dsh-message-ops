@@ -65,9 +65,12 @@ test('R4：afterWrite 必须传带 session- 前缀的 id 给 openSession', () =>
 
 test('R2：所有 revert 入口都接了 refillComposer', () => {
   const calls = (src.match(/\brefillComposer\(/g) || []).length
-  // 四个回滚入口：runUndo(/undo) + runRevert(AI 时钟) + runUserRevert(悬停) + OpsPanel(A 抽屉)
+  // 五个入口：runUndo(/undo) + runRevert(AI 时钟) + runUserRevert(悬停)
+  //           + OpsPanel(A 抽屉) + runUserEdit(0.18.0 行内编辑按钮)
+  // 0.18.0：编辑按钮**故意复用** refillComposer —— 0.17.0 刚清理掉
+  // "同语义两套实现"，编辑回填绝不能另起一条路径。
   // 注意：定义写法是 `refillComposer = (`，不匹配 `refillComposer(`
-  assert.equal(calls, 4, `refillComposer 调用 ${calls} 处，应为 4 个回滚入口`)
+  assert.equal(calls, 5, `refillComposer 调用 ${calls} 处，应为 5 个（4 回滚 + 1 编辑复用）`)
   assert.ok(/var refillComposer = \(/.test(src), '缺 refillComposer 定义')
   // 反例：restore / redo 不该回填（它们是加回内容，不是删）
   const redo = src.match(/var runRedo = \(\) => \{[\s\S]*?\n    \}/)
