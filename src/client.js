@@ -133,10 +133,6 @@ window.__ModuleLoader__.load({
       'op.branchDesc': '把此条之前的对话复制到新会话，并把此条原文放回新会话输入框（原会话不变，非破坏操作）。',
       'slot.revert': '回滚到此条',
       'slot.revertUnmatched': '在日志里定位不到这条消息的 seq（通常是模型写的摘要与渲染文本偏差过大）——请改用「消息操作」对话框。',
-      'slot.edit': '编辑（复制原文到输入框）',
-      'slot.editHint': '复制此条原文到输入框；发出后新增一条消息，不修改原消息',
-      'slot.editDone': '原文已复制到输入框',
-      'slot.editNoText': '这条消息没有可复制的文本',
       'slot.fork': '从此条分叉',
       'slot.forkHint': '复制此条之前的对话到新会话，并把此条原文放回新会话输入框',
       'slot.forkDone': '已分叉：新会话 {id}',
@@ -167,6 +163,7 @@ window.__ModuleLoader__.load({
       'slot.quote': '引用到输入框',
       'quote.done': '已引用到输入框',
       'quote.unavailable': '引用不可用（输入框不可写或无全文）',
+      'quote.sourcePrefix': '引用自 seq {seq}',
       'undo.label': '回滚上一条消息',
       'undo.desc': '移除最后一条用户消息，原文回填输入框',
       'undo.done.undo': '已回滚上一条消息',
@@ -214,12 +211,6 @@ window.__ModuleLoader__.load({
       // 0.17.0（冲突 R2）：行为是「复制原文到输入框」，不修改原消息。
       // 旧文案「编辑并重发」暗示会改原消息，实测会误导（发出后是新增一条，
       // 原消息仍在，界面出现两条相似消息）。opencode 也没有消息级编辑。
-      'panel.edit': '复制到输入框',
-      'panel.editHint': '把此条原文复制到输入框；发出后会新增一条消息，不会修改原消息',
-      'panel.editDone': '原文已复制到输入框',
-      'panel.editEmpty': '这条消息没有可编辑的文本',
-      'panel.editUnavailable': '编辑器不可写（会话可能正在运行或尚未挂载）',
-      'panel.editNotReady': '全文尚未就绪（列表只带 160 字摘要）——请重试或改用回滚回填',
       'panel.openNew': '打开新会话',
       'panel.revertDone': '回滚已生效',
       'panel.deleteDone': '删除已生效',
@@ -268,10 +259,6 @@ window.__ModuleLoader__.load({
       'slot.revert': 'Revert to here',
       'slot.revertUnmatched':
         'Cannot locate this message seq in the log (usually the model-written summary drifted too far from the rendered text) — use the Message ops dialog instead.',
-      'slot.edit': 'Edit (copy text to composer)',
-      'slot.editHint': 'Copies this text into the composer; sending adds a new message without modifying the original',
-      'slot.editDone': 'Original text copied to the composer',
-      'slot.editNoText': 'This message has no text to copy',
       'slot.fork': 'Branch from here',
       'slot.forkHint': 'Copies the conversation above this message into a new session and puts this message back in the new composer',
       'slot.forkDone': 'Branched: new session {id}',
@@ -303,6 +290,7 @@ window.__ModuleLoader__.load({
       'slot.quote': 'Quote to composer',
       'quote.done': 'Quoted into composer',
       'quote.unavailable': 'Quote unavailable (composer locked or no full text)',
+      'quote.sourcePrefix': 'Quoted from seq {seq}',
       'undo.label': 'Undo last message',
       'undo.desc': 'Remove the last user message and put its original text back into the composer',
       'undo.done.undo': 'Undid the last message',
@@ -348,12 +336,6 @@ window.__ModuleLoader__.load({
       'panel.branchHint': 'Copy the conversation above this message into a new session and put this message back in the new composer',
       'panel.branchDone': 'Forked: {id}',
       'panel.branchUserOnly': 'Fork works on user messages only (assistant messages have no text to hand back)',
-      'panel.edit': 'Copy to composer',
-      'panel.editHint': 'Copies this text into the composer; sending adds a new message and does not modify the original',
-      'panel.editDone': 'Original text copied to the composer',
-      'panel.editEmpty': 'This message has no editable text',
-      'panel.editUnavailable': 'Composer is not writable (session may be running or not mounted)',
-      'panel.editNotReady': 'Full text is not ready (the list only carries a 160-char snippet) — retry, or use revert to refill',
       'panel.openNew': 'Open new session',
       'panel.revertDone': 'Revert applied',
       'panel.deleteDone': 'Delete applied',
@@ -778,19 +760,7 @@ window.__ModuleLoader__.load({
             // `?` 分支把成功文案当错误抛出。对话框 mode 只有 revert|delete|branch，
             // branch 在上面已 return，故 done.restore 分支在此不可达，一并删掉。
             const okMsg = mode === 'revert' ? t('done.revert') : t('done.delete')
-            // 0.4.0 composer 回填（opencode 式）：回滚用户消息 → 原文回填输入框，「编辑重发」零按钮
-            // 0.11.3：必须走统一出口，且要落盘 —— 直接 setDraft 会被随后的
-            // openSession 用 localStorage 里的旧草稿覆盖（见 refillComposer 注释）。
-            if (mode === 'revert' && pickedMsg && pickedMsg.role === 'user' && pickedMsg.fullText) {
-              try {
-                if (__inputActions && typeof __inputActions.setDraft === 'function') {
-                  __inputActions.setDraft(pickedMsg.fullText)
-                  if (typeof __inputActions.persistDraft === 'function') __inputActions.persistDraft()
-                }
-              } catch (e) {
-                console.warn('[message-ops] refill failed:', e)
-              }
-            }
+            // 0.19.0：回填统一由 refillComposer 承担；老 setDraft 路径已删（见 spec §9）。
             setDoneMsg(okMsg)
             setBusyMsg('')
             setState('done')
@@ -1182,7 +1152,6 @@ window.__ModuleLoader__.load({
       const [detail, setDetail] = useState('')
       const [detailState, setDetailState] = useState('idle')
       // MED-5：detail 是**全文**还是 snippet 回退？只有全文才允许「编辑并重发」。
-      const [detailFull, setDetailFull] = useState(false)
       const [tab, setTab] = useState('messages')
       const [hits, setHits] = useState(null)
       const [searching, setSearching] = useState(false)
@@ -1411,63 +1380,6 @@ window.__ModuleLoader__.load({
         }, 0)
       }, [busy, confirmAction])
 
-      /**
-       * 0.12.0 面板内的「编辑并重发」：把该条用户消息的原文放进编辑器并关掉面板。
-       *
-       * 为什么不自己加一个输入框：编辑器已经有草稿、附件、引用、斜杠命令与提交状态机，
-       * 面板里再复刻一套只会分叉行为。正确做法是**交回官方编辑器**：
-       *   1. `setDraft(text)` 改编辑器内容
-       *   2. `persistDraft()` 落 localStorage —— 否则紧随的 openSession 会用旧草稿覆盖
-       *      （0.11.3 已踩过这个坑，见 refillComposer 注释）
-       *   3. 关面板并聚焦编辑器，用户改完直接回车发出
-       * 语义上与 opencode 的「回撤 → 原文回到 composer」一致；区别是我们不预先回撤，
-       * 由用户决定发不发（发了才产生新的分支上下文）。
-       */
-      const startEdit = useCallback(
-        text => {
-          if (!target || busy) return
-          const body = typeof text === 'string' ? text : ''
-          if (!body) {
-            setError(t('panel.editEmpty'))
-            return
-          }
-          // ── 0.17.0（冲突 C1）：与 refillComposer 统一成**同一条**回填路径 ──
-          //
-          // 旧实现走 `__inputActions.setDraft` + `persistDraft`，且
-          // `!__inputActions` 就直接失败返回 —— 但 refillComposer（回滚路径）
-          // 早在 0.14.0 就改成了「先写宿主草稿键、再尽力更新编辑器」，不依赖
-          // 编辑器是否已挂载。同一件事两条实现、两种可靠性，必须合并。
-          //
-          // 现在统一为：① writeSessionDraft 落盘（权威值）② 尽力 setDraft
-          // ③ 回读校验（写不进去就报错且不 close，保留 0.13.1 MED-4 的护栏）
-          const sidForDraft = target.sessionId
-          const persisted = writeSessionDraft(sidForDraft, body)
-          let editorSet = false
-          if (__inputActions && typeof __inputActions.setDraft === 'function') {
-            try {
-              __inputActions.setDraft(body)
-              editorSet = true
-            } catch (reason) {
-              console.warn('[message-ops] setDraft failed:', reason)
-            }
-          }
-          // 回读校验：落盘失败才是真风险（编辑器可能没挂载，那不是错误）
-          const stored = readSessionDraft(sidForDraft)
-          if (stored !== body) {
-            setError(t('panel.editUnavailable'))
-            return
-          }
-          if (!persisted && !editorSet) {
-            setError(t('panel.editUnavailable'))
-            return
-          }
-          setDone(t('panel.editDone'))
-          notifyDone(t('panel.editDone'))
-          close()
-        },
-        [target, busy, t, close],
-      )
-
       useEffect(() => {
         if (!open) return undefined
         const onKey = e => {
@@ -1625,7 +1537,6 @@ window.__ModuleLoader__.load({
         detailReq.current += 1
         setPicked(null)
         setDetail('')
-        setDetailFull(false)
         setDetailState('idle')
         setConfirmAction(null)
       }
@@ -1635,7 +1546,6 @@ window.__ModuleLoader__.load({
         detailReq.current += 1
         setPicked(m)
         setDetail(m.snippet || '')
-        setDetailFull(false)
         setDetailState('ready')
         setConfirmAction(null)
         setDone('')
@@ -1712,7 +1622,6 @@ window.__ModuleLoader__.load({
           setConfirmAction(null)
           setPicked(m)
           setDetail(m.snippet || '')
-          setDetailFull(false)
           setDetailState('loading')
           setDone('')
           const req = ++detailReq.current
@@ -1728,13 +1637,11 @@ window.__ModuleLoader__.load({
               if (!res.ok || !data || data.ok !== true) throw new Error((data && data.error) || 'HTTP ' + res.status)
               const full = typeof data.text === 'string' && data.text !== '' ? data.text : null
               setDetail(full ?? (m.snippet || ''))
-              setDetailFull(full !== null)
               setDetailState('ready')
             })
             .catch(() => {
               if (req !== detailReq.current) return
-              setDetail(m.snippet || '')
-              setDetailFull(false) // 拉全文失败 → 只有截断的 snippet，不许冒充原文
+              setDetail(m.snippet || '') // 拉全文失败 → 只有截断的 snippet，不许冒充原文
               setDetailState('ready')
             })
         },
@@ -1932,11 +1839,9 @@ window.__ModuleLoader__.load({
       // 「这句话说错了，拿回去重说」，AI 消息没有可回填的原文）。
       const pickedIsUser = !!pickedLive && pickedLive.role === 'user'
       const canFork = !busy && !target.running && pickedIsUser && !pickedLive.shadowed && pickedLive.seq > 0
-      const canEdit = pickedIsUser && !pickedLive.shadowed && state === 'ready' && !busy
       // MED-5：只有**真拉到全文**才允许编辑。detail 在 /text 失败时会退化成
       // snippet，而 snippet 被服务端硬截断到 160 字（session-file.js:331）——
       // 拿它冒充原文会让用户改完发出时静默丢掉后半段。
-      const editTextReady = detailFull === true && typeof detail === 'string' && detail !== ''
       const deleteBlockedReason = target.running
         ? t('panel.running')
         : state !== 'ready'
@@ -2247,23 +2152,6 @@ window.__ModuleLoader__.load({
                               title: t('panel.deleteHint'),
                             },
                             t('panel.delete'),
-                          ),
-                          // 0.12.0：编辑只对用户消息可用 —— 直接把原文交回编辑器。
-                          // 无二次确认：它不改日志，只改草稿。
-                          React.createElement(
-                            'button',
-                            {
-                              type: 'button',
-                              className: 'mopsAction',
-                              disabled: !canEdit || !editTextReady,
-                              title: !pickedIsUser
-                                ? t('panel.branchUserOnly')
-                                : !editTextReady
-                                  ? t('panel.editNotReady')
-                                  : t('panel.editHint'),
-                              onClick: () => startEdit(detail),
-                            },
-                            t('panel.edit'),
                           ),
                           // 分叉同样只对用户消息可用（AI 消息没有可回填的原文），
                           // 语义 = opencode 的 before：新会话不含此条，原文进新会话输入框。
@@ -2719,33 +2607,13 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // 官方图标适配：0.2.0 primitives 的 IconClock 与原生操作行同款；
-    // require 失败（0.1.x 或裁剪环境）回退内联 SVG，槽在 0.1.x 本就不存在，仅防御。
-    // 0.9.0：移除 IconTrash —— 消息级删除按钮从未渲染（删除只在对话框里），
-    // 专家核查确认 IconTrash/TrashFallback 零渲染点，是死代码。
-    var IconClock = null
-    try {
-      const P = require('@deepseek-ai/dsh-client-ui-primitives')
-      IconClock = P && P.IconClockOutlineRegular
-    } catch {
-      /* fallback below */
-    }
-    if (!IconClock)
-      IconClock = function ClockFallback() {
-        // 官方 IconClockOutlineArtwork 1:1 路径（ Regular = 1px stroke）
-        return React.createElement(
-          'svg',
-          { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true, stroke: 'currentColor', strokeWidth: 1 },
-          React.createElement('path', {
-            d: 'M8 14C11.3137 14 14 11.3137 14 8C14 4.68629 11.3137 2 8 2C4.68629 2 2 4.68629 2 8C2 11.3137 4.68629 14 8 14Z',
-          }),
-          React.createElement('path', { d: 'M8 4.31V8.46L11 10.08' }),
-        )
-      }
     var IconQuote = null
     try {
       const P2 = require('@deepseek-ai/dsh-client-ui-primitives')
-      IconQuote = P2 && (P2.IconChatOutlineRegular || P2.IconCopyOutlineRegular)
+      // 0.19.0：不再回退到 IconCopyOutlineRegular —— 宿主在 AI 消息下方本来就
+      // 有一个 Copy 按钮，用复制图标做「引用」会变成两个一模一样的复制按钮。
+      // 优先官方 chat 类图标；拿不到就用下面的引号几何（明确的引用语义）。
+      IconQuote = P2 && P2.IconChatOutlineRegular
     } catch {
       /* fallback below */
     }
@@ -2875,40 +2743,6 @@ window.__ModuleLoader__.load({
         return false
       }
 
-      const runRevert = () => {
-        if (busy || seq == null || running) return
-        setBusy('revert')
-        // 0.5.2（P2）：Promise.resolve 包裹——fetch/stringify 同步抛出也转为
-        // rejection 落进 finally，busy 永不卡死
-        Promise.resolve()
-          .then(() =>
-            fetch('/api/message-ops/revert', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ sessionId, seq }),
-            }),
-          )
-          .then(async res => {
-            let data = {}
-            try {
-              data = await res.json()
-            } catch {
-              /* keep {} */
-            }
-            if (!res.ok || !data.ok) throw new Error(data.error || 'HTTP ' + res.status)
-            notifyDone(t('done.revert'))
-            // 0.9.6：回填被删掉的那句用户原文（边界是 AI 消息时取它之前那条用户消息）。
-            // 此前这个入口完全不回填 —— 表现就是「回滚成功但消息框空着」。
-            refillComposer(sessionId, seq)
-            revealSession()
-            emitChanged()
-          })
-          .catch(reason => {
-            notifyDone(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
-          })
-          .finally(() => setBusy(null))
-      }
-
       // ── 0.18.0：引用改用官方 insertQuote（结构化 QuoteNode）──────────────────
       //
       // 旧实现（0.5.0）用 `captureInsertion` + `insertText` 手工拼 `> ` markdown：
@@ -2928,6 +2762,36 @@ window.__ModuleLoader__.load({
       // `$replaceDetectSpanWithNodes([$createQuoteNode(text, labels), Go(" ")])`
       // 即：在当前光标处插入一个**真正的 QuoteNode**（带 remove 标签、独立 undo），
       // 并自动补一个空格分隔。这才是"规范"的引用。
+      /**
+       * 0.19.0 引用：只引用「选中的一小段」，不再把整条 AI 消息塞进 composer。
+       *
+       * 用户原话：「这个引用为什么是直接把这个消息直接给我填进输入框，这什么情况？」
+       * 根因：旧实现把 fullText / /text 接口返回的**整条全文**传给 insertQuote，
+       * 于是 composer 里冒出一个几千字的巨大引用块，看起来就像"把消息整个塞进去"。
+       *
+       * 宿主官方 insertQuote 的语义是「引用一段选中文字」（QuoteNode +
+       * QuotePreview 可视化 + 模型可见的 markdown blockquote），本就该用小段。
+       *
+       * 文本来源优先级：
+       *   1. 用户在该消息内选中的文字（window.getSelection，限定消息节点内）
+       *   2. 无选中 → 取整条但截断到 QUOTE_MAX_CHARS，并标注来源（seq / 角色）
+       */
+      const QUOTE_MAX_CHARS = 600
+      const selectionInMessage = () => {
+        try {
+          const sel = window.getSelection && window.getSelection()
+          if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null
+          const text = String(sel.toString() || '').replace(/\s+$/g, '')
+          if (!text || text.length > QUOTE_MAX_CHARS * 2) return null
+          // 只认落在消息节点内的选区，避免把别处选的文字当成这条消息的引用
+          const anchor = sel.anchorNode && (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement)
+          const root = anchor && anchor.closest && anchor.closest('[data-chat-node-key],[data-chat-flow-kind]')
+          if (!root) return null
+          return text.length > QUOTE_MAX_CHARS ? text.slice(0, QUOTE_MAX_CHARS) + '…' : text
+        } catch {
+          return null
+        }
+      }
       const runQuote = () => {
         const finish = ok => notifyDone(ok ? t('quote.done') : t('quote.unavailable'), ok ? 'ok' : 'warn')
         try {
@@ -2940,7 +2804,6 @@ window.__ModuleLoader__.load({
               finish(false)
               return
             }
-            // insertQuote 的返回值是 boolean（是否真的插入了）
             let ok = false
             try {
               ok = inputActions.insertQuote(text.replace(/\r\n?/g, '\n')) !== false
@@ -2950,14 +2813,24 @@ window.__ModuleLoader__.load({
             }
             finish(ok)
           }
-          // assistant 消息 fullText 恒 null（列表不携带）→ 按 seq 取单条全文
+          // ① 选中片段优先（结构化的小段引用，模型可见）
+          const selected = selectionInMessage()
+          if (selected != null) {
+            put(selected)
+            return
+          }
+          // ② 无选中：取整条但截断 + 标注来源，不再静默塞全文
+          const withSource = full => {
+            const clipped = full.length > QUOTE_MAX_CHARS ? full.slice(0, QUOTE_MAX_CHARS) + '…' : full
+            return t('quote.sourcePrefix', { seq: String(seq) }) + '\n' + clipped
+          }
           if (fullText != null && fullText !== '') {
-            put(fullText)
+            put(withSource(fullText))
             return
           }
           fetch('/api/message-ops/text?sessionId=' + encodeURIComponent(sessionId) + '&seq=' + encodeURIComponent(seq))
             .then(r => (r.ok ? r.json() : null))
-            .then(d => put(d && d.ok && typeof d.text === 'string' ? d.text : null))
+            .then(d => put(d && d.ok && typeof d.text === 'string' ? withSource(d.text) : null))
             .catch(() => put(null))
         } catch (e) {
           notifyDone(t('errorPrefix') + (e && e.message ? e.message : String(e)), 'error')
@@ -2991,12 +2864,9 @@ window.__ModuleLoader__.load({
           },
           icon,
         )
-      return React.createElement(
-        'span',
-        { style: { display: 'inline-flex', gap: 0 } },
-        act(React.createElement(IconClock, { size: 16 }), t('slot.revert'), 'revert', runRevert, running),
-        act(React.createElement(IconQuote, { size: 16 }), t('slot.quote'), 'quote', runQuote, false),
-      )
+      // 0.19.0（spec §9）：AI 消息动作区只留「引用」。
+      // 原时钟图标 = runRevert（回滚到此条），与用户消息回撤重复，用户要求删除。
+      return act(React.createElement(IconQuote, { size: 16 }), t('slot.quote'), 'quote', runQuote, false)
     }
 
     // 0.4.2 引入（恢复的标记自动离开活跃列表 = opencode clear 语义）。
@@ -3213,10 +3083,11 @@ window.__ModuleLoader__.load({
         if (step.reload) loadRef.current()
       }, [sessionId, activityAt])
 
-      // items 变化自动折叠（opencode createEffect 同款；必须在早退之前——Hooks 规则）
-      useEffect(() => {
-        setOpen(false)
-      }, [markers && markers.length, markers && markers[0] && markers[0].seq])
+      // 0.19.0（spec §3.4）：去掉「markers 变化就自动折叠」。
+      // 用户反馈：点开 dock 后一操作就被收回去，很烦。折叠状态只由用户
+      // 点击 header / chevron 改变；恢复=重放的语义与文案保持不变。
+      // 注意：不能整个删掉这个 useEffect 的「早退之前」位置约束 —— 这里只是
+      // 不再写 setOpen(false)，Hooks 顺序不受影响（下方无其它 Hook 依赖它）。
       if (!markers || !markers.length) return null
 
       const restoreRow = row => {
@@ -3690,11 +3561,7 @@ window.__ModuleLoader__.load({
       var syncEnabled = (block, btn) => {
         if (!btn) return
         // 0.18.0：三种按钮各有自己的提示文案（新增编辑按钮后不能都写 revert）
-        const hintKey = btn.classList.contains('mopsUserFork')
-          ? 'slot.forkHint'
-          : btn.classList.contains('mopsUserEdit')
-            ? 'slot.editHint'
-            : 'slot.revert'
+        const hintKey = btn.classList.contains('mopsUserFork') ? 'slot.forkHint' : 'slot.revert'
         const ok = block.getAttribute('data-mops-seq')
         if (ok) {
           btn.disabled = false
@@ -3709,7 +3576,7 @@ window.__ModuleLoader__.load({
       /** 块内全部插件按钮一起同步（回滚 / 分叉同一动作行）。 */
       var syncBlockButtons = block => {
         if (!block || !block.querySelectorAll) return
-        for (const b of block.querySelectorAll('.mopsUserRevert, .mopsUserEdit, .mopsUserFork')) syncEnabled(block, b)
+        for (const b of block.querySelectorAll('.mopsUserRevert, .mopsUserFork')) syncEnabled(block, b)
       }
       var assignSeqs = (sid, cache, anchors) => {
         const idx = cache && cache.idx
@@ -3920,81 +3787,6 @@ window.__ModuleLoader__.load({
         return btn
       }
 
-      /**
-       * 0.18.0 编辑按钮：与回滚**同一动作行**，铅笔图标。
-       *
-       * 语义 = 把该条原文放回输入框（不遮蔽后续、不修改原消息）。发出后会新增
-       * 一条消息 —— 与面板里的「复制到输入框」是同一件事，两条入口共用
-       * `refillToComposer` 实现，避免又出现"同语义两套实现"。
-       *
-       * 图标取官方 `edit-outline`（宿主 icon sprite 里的 dsw-icon-edit-outline-regular）。
-       */
-      var ensureEditBtn = block => {
-        let host = block.querySelector('[class*="xzv4MW_actions"]')
-        if (!host) {
-          host = document.createElement('div')
-          host.className = 'mopsUserActionsRow'
-          block.appendChild(host)
-        }
-        const existing = host.querySelector('.mopsUserEdit')
-        if (existing) return existing
-        const btn = document.createElement('button')
-        btn.type = 'button'
-        btn.className = 'mopsUserEdit'
-        btn.title = __t('slot.edit')
-        btn.setAttribute('aria-label', __t('slot.edit'))
-        // 铅笔：官方 edit-outline 的几何（16 viewBox）
-        btn.innerHTML =
-          '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="none">' +
-          '<path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M11.9 1.4a1.6 1.6 0 0 1 2.3 0l.4.4a1.6 1.6 0 0 1 0 2.3l-1 1-2.7-2.7 1-1ZM9.8 3.5l2.7 2.7-6.9 6.9a1 1 0 0 1-.4.2l-2.6.7a.5.5 0 0 1-.6-.6l.7-2.6a1 1 0 0 1 .2-.4l6.9-6.9Z"/>' +
-          '</svg>'
-        btn.addEventListener('click', e => {
-          e.preventDefault()
-          e.stopPropagation()
-          if (btn.disabled) return
-          runUserEdit(btn, block)
-        })
-        host.appendChild(btn)
-        syncEnabled(block, btn)
-        return btn
-      }
-
-      /**
-       * 0.18.0 行内编辑：把该条原文放回输入框。
-       *
-       * 直接复用 `refillComposer`（回滚路径用的同一实现）——
-       * 0.17.0 刚把"同语义两套实现"问题清理掉，绝不能在这里再引入一条。
-       */
-      var runUserEdit = (btn, block) => {
-        const sid = __currentSessionId
-        if (!sid) return
-        const seq = Number(block.getAttribute('data-mops-seq'))
-        if (!Number.isFinite(seq)) {
-          notifyDone(__t('errorPrefix') + __t('slot.revertUnmatched'), 'error')
-          return
-        }
-        btn.disabled = true
-        Promise.resolve()
-          .then(() => ensureAssign(sid))
-          .then(() => fetchRows(sid))
-          .then(cache => {
-            const rows = cache && cache.rows
-            const row = rows && rows.find(r => r.seq === seq)
-            if (!row) {
-              notifyDone(__t('errorPrefix') + __t('slot.revertUnmatched'), 'error')
-              return
-            }
-            const ok = refillComposer(sid, seq)
-            notifyDone(ok ? __t('slot.editDone') : __t('slot.editNoText'), ok ? 'ok' : 'warn')
-          })
-          .catch(reason => {
-            notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
-          })
-          .finally(() => {
-            btn.disabled = false
-          })
-      }
-
       /** 0.12.0 分叉按钮：与回滚按钮**同一动作行**（opencode 把 fork 放在 copy/undo 同组）。 */
       var ensureForkBtn = block => {
         let host = block.querySelector('[class*="xzv4MW_actions"]')
@@ -4025,10 +3817,9 @@ window.__ModuleLoader__.load({
       }
       // 两个按钮的顺序由 DOM 顺序决定：回滚在前（破坏性更高），分叉在后（非破坏）。
       var ensureUserActions = block => {
+        // 0.19.0（spec §9）：编辑并重发由已装的 message-edit 插件在 turnTail 提供，
+        // 本插件动作行收敛为：回撤 → 分叉。
         ensureBtn(block)
-        // 0.18.0：编辑按钮与回滚**同一动作行**（用户要求：和回撤放同一个地方）。
-        // 顺序 = 回滚 → 编辑 → 分叉，破坏性从左到右递减。
-        ensureEditBtn(block)
         ensureForkBtn(block)
       }
       // 0.9.7（P0-2 读合并）：把 150/700/1600ms 三档并成**一次**真网络请求，
@@ -4218,11 +4009,11 @@ window.__ModuleLoader__.load({
             //     （宿主 .xzv4MW_actions 已定 height:28px，改小会撑裂行高）。
             //   · 无淡入动画（opencode 源码注释明写 "Hover actions show and hide
             //     at once, without a fade"）—— 显隐完全交给宿主 [data-actions-reveal]。
-            '.mopsUserRevert,.mopsUserEdit,.mopsUserFork{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;border-radius:4px;background:transparent;color:var(--dsw-alias-label-tertiary,#808080);cursor:pointer;padding:0;flex:none}',
-            '.mopsUserRevert svg,.mopsUserEdit svg,.mopsUserFork svg{width:14px;height:14px;display:block}',
-            '.mopsUserRevert:hover,.mopsUserEdit:hover,.mopsUserFork:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));color:var(--dsw-alias-label-secondary,#6b6b70)}',
-            '.mopsUserRevert:disabled,.mopsUserEdit:disabled,.mopsUserFork:disabled{opacity:.4;cursor:default;background:transparent}',
-            '.mopsUserRevert:focus-visible,.mopsUserEdit:focus-visible,.mopsUserFork:focus-visible{outline:2px solid var(--dsw-alias-border-l2,#b8b8b8);outline-offset:1px}',
+            '.mopsUserRevert,.mopsUserFork{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;border-radius:4px;background:transparent;color:var(--dsw-alias-label-tertiary,#808080);cursor:pointer;padding:0;flex:none}',
+            '.mopsUserRevert svg,.mopsUserFork svg{width:14px;height:14px;display:block}',
+            '.mopsUserRevert:hover,.mopsUserFork:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));color:var(--dsw-alias-label-secondary,#6b6b70)}',
+            '.mopsUserRevert:disabled,.mopsUserFork:disabled{opacity:.4;cursor:default;background:transparent}',
+            '.mopsUserRevert:focus-visible,.mopsUserFork:focus-visible{outline:2px solid var(--dsw-alias-border-l2,#b8b8b8);outline-offset:1px}',
             // 0.18.0：用户反馈「点时间图标也会回撤」——根因不是绑定错误，而是
             // 我们的按钮被 appendChild 到宿主 .actions 行末尾，而该行在
             // data-clock="start"（用户消息）时第一个子元素就是**时间文本**：
@@ -4488,7 +4279,7 @@ window.__ModuleLoader__.load({
         // **紧接着** `openSession(sid)` 重建整个会话视图。重建会卸载并重挂
         // 编辑器，新挂载走 `readConversationDraft(sid)` 从 localStorage 初始化 ——
         // 也就是说「回填」实际取决于 persistDraft 是否成功落盘，而再叠上
-        // `bindDraftPersistence` 的时序（见 startEdit 处 MED-4 注释），失败时
+        // `bindDraftPersistence` 的时序（见 0.13.1 MED-4），失败时
         // 用户看到「已回滚」却拿不到原文。
         //
         // 唯一无竞态的路径：**直接写宿主的草稿存储键**（writeSessionDraft），

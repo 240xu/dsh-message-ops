@@ -1192,3 +1192,39 @@ blockAt(text, needle) // 从 needle 起按**大括号配平**切出整块
 
 **顺带修的**：`test/user-fork-edit.test.js` 等新测试从一开始就写成格式无关
 （大括号配平 + 真执行），不再重蹈覆辙。
+
+### 0.19.0 · 动作区收敛（审计后修订）
+
+用户：「编辑并重发为什么还存在？把情况理清楚，逐项解决」+ 启用 superpowers。
+
+审计发现决定性事实：profile 里**已安装并加载**
+`@linxin666/dsh-client-ui-message-edit@0.4.14`，它注入 `conversation.chat.turnTail`
+槽，提供的正是「编辑并重发」：回合末尾一个文字按钮 → 原地 textarea（radius 12px，
+全 `--dsw-alias-*` token）→ `sessions.fork({atSeq: seq-1})` →
+`reference.binding.session.prompt(editedText, "queue")`。源会话不动，Esc 取消、
+Ctrl/Cmd+Enter 重发。也就是说**本插件从 0.12.0 起造的编辑入口全是重复的劣质轮子**。
+
+设计文档：`docs/superpowers/specs/2026-11-06-message-actions-ux-design.md`（§9 修订）。
+
+四项改动：
+
+1. **收敛编辑入口**：删除行内铅笔 `mopsUserEdit` / `ensureEditBtn` / `runUserEdit`、
+   面板 `panel.edit` 一组与 `startEdit`、`client.js` 里的老 `setDraft` 路径、
+   相关 i18n 与派生状态。用户消息动作行收敛为 `时间 → 宿主Copy → ｜ 回撤 → 分叉`。
+   编辑并重发交由已装的专门插件在 turn-tail 提供。
+
+2. **删 AI 时钟按钮**：`client.js` 里那个 `IconClock` = `runRevert`（回滚到此条），
+   与用户消息回撤重复。连 `runRevert` / `IconClock` 定义一并删除。
+   AI 消息动作区**只留一个引用按钮**。
+
+3. **引用重做**：
+   - 图标不再回退 `IconCopyOutlineRegular`（会与宿主自带 Copy 撞脸）
+   - 优先引用**用户在消息里选中的文字**；无选中才取整条，但截断到 600 字
+     并标注 `引用自 seq N`（走 i18n `quote.sourcePrefix`）
+   - 仍走宿主官方 `insertQuote`（结构化 QuoteNode → 模型可见 markdown
+     blockquote + QuotePreview 可视化 + 删除按钮），不手工拼 `> `
+
+4. **dock 不再自动折叠**：删掉「markers 变化 → setOpen(false)」的 effect。
+   折叠只由用户点击改变；恢复=重放（新 seq、不回原位）的语义与文案不变。
+
+测试 313（309 pass / 4 skip），`prettier --check` 全绿。

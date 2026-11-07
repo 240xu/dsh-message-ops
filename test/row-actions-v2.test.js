@@ -30,27 +30,17 @@ function block(name) {
   throw new Error(`块未闭合：${name}`)
 }
 
-// ── 1 · 铅笔编辑按钮与回撤同一动作行 ─────────────────────────────────────────
-test('1：行内编辑按钮存在，且用铅笔图标（不是复制图标）', () => {
-  const fn = block('ensureEditBtn')
-  assert.match(fn, /mopsUserEdit/, '类名必须是 mopsUserEdit')
-  // 铅笔 path 的特征：编辑框 + 笔杆（官方 edit-outline 几何）
-  assert.match(fn, /M11\.9 1\.4a1\.6 1\.6/, '必须是铅笔几何，不能复用回滚/分叉的图标')
-  assert.doesNotMatch(fn, /M13\.0762 1\.37207/, '不能复用分叉图标')
+// ── 1 · 0.19.0：行内编辑按钮已移除（编辑交给已装插件）────────────────────
+test('1：本插件不再注入行内编辑按钮（mopsUserEdit）', () => {
+  assert.doesNotMatch(src, /mopsUserEdit/, '0.19.0 起不再有铅笔按钮')
+  assert.doesNotMatch(src, /ensureEditBtn/, 'ensureEditBtn 已删')
+  assert.doesNotMatch(src, /runUserEdit/, 'runUserEdit 已删')
 })
 
-test('1：编辑按钮与回滚、分叉在同一动作行，且顺序为 回滚→编辑→分叉', () => {
+test('1：动作行只剩 回撤 + 分叉（顺序不变）', () => {
   const fn = block('ensureUserActions')
-  const revertAt = fn.indexOf('ensureBtn(')
-  const editAt = fn.indexOf('ensureEditBtn(')
-  const forkAt = fn.indexOf('ensureForkBtn(')
-  assert.ok(revertAt >= 0 && editAt > revertAt && forkAt > editAt, '顺序必须是 回滚 → 编辑 → 分叉')
-})
-
-test('1：编辑回填复用 refillComposer（不新起第二条实现）', () => {
-  const fn = block('runUserEdit')
-  assert.match(fn, /refillComposer\(sid, seq\)/, '必须复用回滚的同一实现')
-  assert.doesNotMatch(fn, /writeSessionDraft\(/, '不该自己再写一遍存储')
+  assert.match(fn, /ensureBtn\(/, '保留回撤')
+  assert.match(fn, /ensureForkBtn\(/, '保留分叉')
 })
 
 // ── 2 · 引用必须用官方 insertQuote，不能手拼 markdown ────────────────────────
@@ -107,4 +97,33 @@ test('4：唤起按钮圆角对齐 4px（与行内按钮一致）', () => {
 test('5：面板不出现裸 hex 颜色（必须走 --dsw-alias-* token）', () => {
   const bare = src.split('\n').filter(line => /:\s*#[0-9a-fA-F]{3,8}/.test(line) && !line.includes('var(--dsw'))
   assert.deepEqual(bare, [], `发现裸 hex 颜色（深色模式会瞎）：\n${bare.join('\n')}`)
+})
+
+// ── 0.19.0 · 引用：选中片段优先、截断+标注、非 copy 图标 ─────────────────────
+test('0.19：引用图标不再回退到 IconCopyOutlineRegular', () => {
+  // 只检查代码赋值，不检查注释（注释里会说明为什么删掉它）
+  assert.doesNotMatch(
+    src,
+    /IconQuote\s*=\s*[^\n]*IconCopyOutlineRegular/,
+    '不许把复制图标赋给 IconQuote（会与宿主 Copy 撞脸）',
+  )
+})
+
+test('0.19：引用优先取选中片段，且不再把整条未截断全文塞进 composer', () => {
+  const fn = block('runQuote')
+  assert.match(fn, /selectionInMessage\(\)/, '必须有选中片段优先逻辑')
+  assert.match(fn, /QUOTE_MAX_CHARS/, '必须有长度上限')
+  assert.match(fn, /quote\.sourcePrefix/, '无选中时必须标注来源（走 i18n）')
+  assert.match(fn, /insertQuote\(/, '必须走官方结构化引用')
+})
+
+// ── 0.19.0 · dock：不再自动折叠 ──────────────────────────────────────────────
+test('0.19：dock 不再因 markers 变化自动 setOpen(false)', () => {
+  assert.doesNotMatch(
+    src,
+    /\[markers && markers\.length, markers && markers\[0\] && markers\[0\]\.seq\]/,
+    '自动折叠的 effect 依赖已删',
+  )
+  // 仍保留用户主动关闭的 setOpen(false)
+  assert.ok((src.match(/setOpen\(false\)/g) || []).length >= 1, '用户主动关闭仍可用')
 })
