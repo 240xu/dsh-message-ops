@@ -88,7 +88,8 @@ test('分叉图标复用官方 IconBranchOutline16 路径，且显式声明填�
 test('块内按钮统一同步（新增分叉后不能只同步回滚）', () => {
   assert.match(src, /var syncBlockButtons = \(?block\)? =>/, '必须存在块级同步函数')
   const body = block('syncBlockButtons')
-  assert.match(body, /mopsUserRevert, \.mopsUserEdit, \.mopsUserFork/, '同步范围必须覆盖三个按钮（回滚/编辑/分叉）')
+  // 0.19.0：铅笔编辑按钮已删（交给 message-edit 插件），同步范围回到两个
+  assert.match(body, /mopsUserRevert, \.mopsUserFork/, '同步范围必须覆盖两个按钮（回滚/分叉）')
   const assignBody = src.slice(src.indexOf('var assignSeqs'), src.indexOf('var assignSig'))
   assert.doesNotMatch(assignBody, /syncEnabled\(b, b\.querySelector/, 'assignSeqs 里不能再只同步单个按钮（会把分叉按钮留在禁用态）')
 })
@@ -109,18 +110,12 @@ test('scan 每轮都会重新隐藏官方 branch（视图重建后仍生效）',
   assert.match(body, /suppressHostBranch\(\)/, 'scan 必须调用抑制函数，否则 openSession 重挂后按钮回来')
 })
 
-test('面板的编辑入口只对用户消息可用，且与回滚回填走同一条路径', () => {
-  const body = block('startEdit')
-  assert.match(body, /setDraft\(body\)/, '必须用官方编辑器写草稿')
-  // 0.17.0（冲突 C1）：不再走 persistDraft —— 它依赖 bindDraftPersistence 绑定的
-  // writer，视图未挂载时空转。统一改成 writeSessionDraft（直接写宿主草稿键，
-  // 与 refillComposer 同一机制）+ 回读校验。
-  assert.match(body, /writeSessionDraft\(sidForDraft, body\)/, '必须直接写宿主草稿键（与回滚回填同源）')
-  assert.match(body, /readSessionDraft\(sidForDraft\)/, '必须回读校验真的落盘了')
-  assert.doesNotMatch(body, /persistDraft\(\)/, '不该再依赖 persistDraft（视图未挂载时空转）')
+test('0.19：面板不再有编辑入口（编辑交给已装的 message-edit 插件）', () => {
+  assert.doesNotMatch(src, /startEdit\b/, 'startEdit 已删')
+  assert.doesNotMatch(src, /canEdit\b/, 'canEdit 派生已删')
+  assert.doesNotMatch(src, /panel\.edit/, 'panel.edit 文案已删')
+  // 面板仍保留用户消息判定（分叉需要）
   assert.ok(src.includes("pickedIsUser = !!pickedLive && pickedLive.role === 'user'"), '面板必须有用户消息判定')
-  assert.match(src, /disabled: !canEdit/, '非用户消息必须禁用编辑')
-  assert.match(src, /disabled: !canFork \|\| !!confirmAction/, '非用户消息必须禁用分叉')
 })
 
 test('面板分叉不再使用「含该条」的旧边界（atSeq: picked.seq）', () => {

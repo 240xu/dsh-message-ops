@@ -65,12 +65,11 @@ test('R4：afterWrite 必须传带 session- 前缀的 id 给 openSession', () =>
 
 test('R2：所有 revert 入口都接了 refillComposer', () => {
   const calls = (src.match(/\brefillComposer\(/g) || []).length
-  // 五个入口：runUndo(/undo) + runRevert(AI 时钟) + runUserRevert(悬停)
-  //           + OpsPanel(A 抽屉) + runUserEdit(0.18.0 行内编辑按钮)
-  // 0.18.0：编辑按钮**故意复用** refillComposer —— 0.17.0 刚清理掉
-  // "同语义两套实现"，编辑回填绝不能另起一条路径。
+  // 0.19.0：三个入口 —— runUndo(/undo) + runUserRevert(悬停) + OpsPanel(A 抽屉)。
+  // 已删：行内编辑按钮（交给 message-edit 插件）、AI 时钟回撤 runRevert
+  //（用户要求删除，回撤只属于用户消息）。
   // 注意：定义写法是 `refillComposer = (`，不匹配 `refillComposer(`
-  assert.equal(calls, 5, `refillComposer 调用 ${calls} 处，应为 5 个（4 回滚 + 1 编辑复用）`)
+  assert.equal(calls, 3, `refillComposer 调用 ${calls} 处，应为 3 个回滚入口`)
   assert.ok(/var refillComposer = \(/.test(src), '缺 refillComposer 定义')
   // 反例：restore / redo 不该回填（它们是加回内容，不是删）
   const redo = src.match(/var runRedo = \(\) => \{[\s\S]*?\n    \}/)
@@ -122,11 +121,12 @@ test('回填必须落盘：改为直接写宿主草稿键（0.14.0 起，比 per
   assert.match(fn[0], /return persisted \|\| editorSet/, '必须诚实返回是否真的回填成功')
 })
 
-test('对话框入口直接 setDraft 时也必须 persistDraft', () => {
-  const m = src.match(/const okMsg = mode === 'revert'[\s\S]*?setDoneMsg\(okMsg\)/)
-  assert.ok(m, '找不到对话框回填分支')
-  assert.match(m[0], /persistDraft\(/,
-    '该入口绕过 refillComposer，若不落盘同样会被 openSession 覆盖')
+test('0.19：对话框回填分支不再有独立的 setDraft 路径', () => {
+  // 老路径（mode==='revert' 时直接 __inputActions.setDraft(pickedMsg.fullText)）
+  // 已删除 —— 它与已装的 message-edit 插件重复，且与 refillComposer 双实现。
+  // 回填统一由 runAction 的 revert 分支调 refillComposer 承担。
+  assert.doesNotMatch(src, /__inputActions\.setDraft\(pickedMsg\.fullText\)/, '老 setDraft 路径已删')
+  assert.doesNotMatch(src, /const okMsg = mode === 'revert'[\s\S]{0,600}?persistDraft\(/, '对话框内不再自行 persistDraft')
 })
 
 test('lastRevertable 必须排除 shadowed（防二次 /undo 命中已遮蔽 seq → 409）', () => {

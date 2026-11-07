@@ -1,12 +1,12 @@
 /**
- * 0.17.0 回归锁：动作入口的「同语义多实现」冲突。
+ * 0.19.0 回归锁：动作入口收敛。
  *
- * 用户原话：「那个编辑并重发是你的吗？你看看有多少是功能冲突的」
+ * 审计发现 profile 已装并加载 @linxin666/dsh-client-ui-message-edit@0.4.14
+ * （turnTail 槽，提供真正的「编辑并重发」：fork 到 seq-1 + prompt）。
+ * 本插件在 0.12/0.17/0.18 造的 panel.edit / 行内铅笔 / 老 setDraft 全是
+ * 与之重复的劣质轮子，已全部删除。见 spec §9。
  *
- * 三个已确认并修复的冲突：
- *   C1 · 回填（把原文放回 composer）有两条实现，可靠性不同
- *   R2 · 「编辑并重发」文案暗示修改原消息，实际是新增一条
- *   C2 · 回滚成功后的防 409 护栏只有 /undo 有，按钮路径漏了
+ * 保留的锁：C2（防 409 护栏两条回滚路径共用）。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -31,35 +31,27 @@ function block(name) {
   throw new Error(`块未闭合：${name}`)
 }
 
-// ── C1 · 回填必须只有一条实现路径 ─────────────────────────────────────────────
-test('C1：startEdit 与 refillComposer 用同一条落盘路径（writeSessionDraft）', () => {
-  const edit = block('startEdit')
-  const refill = block('refillComposer')
-  assert.match(edit, /writeSessionDraft\(/, 'startEdit 必须直接写宿主草稿键')
-  assert.match(refill, /writeSessionDraft\(/, 'refillComposer 必须同源')
-  assert.doesNotMatch(edit, /persistDraft\(\)/, 'startEdit 不该再依赖 persistDraft（视图未挂载时空转）')
+// ── 0.19.0 · 本插件不再提供任何「编辑」入口 ─────────────────────────────────
+test('0.19：本插件不再有 startEdit / ensureEditBtn / runUserEdit', () => {
+  for (const name of ['startEdit', 'ensureEditBtn', 'runUserEdit']) {
+    assert.ok(!new RegExp('(function|var|const)\\s+' + name + '\\b').test(src), `残留 ${name}`)
+  }
 })
 
-test('C1：startEdit 不再因编辑器未挂载而直接失败', () => {
-  const edit = block('startEdit')
-  // 旧实现在 !__inputActions 时就 setError 返回；新实现只把它当"尽力而为"
-  assert.doesNotMatch(
-    edit,
-    /if \(!__inputActions \|\| typeof __inputActions\.setDraft !== 'function'\) \{\s*setError/,
-    '编辑器未挂载不等于回填失败 —— 落盘成功了就该成功',
-  )
+test('0.19：不再有 panel.edit / slot.edit 文案（编辑交给已装插件）', () => {
+  assert.doesNotMatch(src, /'panel\.edit'/, 'panel.edit 系列已删')
+  assert.doesNotMatch(src, /'slot\.edit'/, 'slot.edit 系列已删')
 })
 
-// ── R2 · 文案不得暗示「修改原消息」────────────────────────────────────────────
-test('R2：编辑入口文案必须是「复制」语义，不能暗示修改原消息', () => {
-  const zh = src.match(/'panel\.edit': '([^']*)'/)
-  assert.ok(zh, '缺 panel.edit 中文文案')
-  assert.doesNotMatch(zh[1], /编辑|修改/, '行为是复制，不该叫"编辑"')
-  assert.match(zh[1], /复制|拷贝/, '应明确是复制到输入框')
+test('0.19：用户消息动作行只剩 回撤 + 分叉 两个按钮', () => {
+  const fn = block('ensureUserActions')
+  assert.match(fn, /ensureBtn\(/, '保留回撤')
+  assert.match(fn, /ensureForkBtn\(/, '保留分叉')
+  assert.doesNotMatch(fn, /ensureEditBtn/, '不再有铅笔编辑按钮')
+})
 
-  const hint = src.match(/'panel\.editHint': '([^']*)'/)
-  assert.ok(hint, '缺 panel.editHint')
-  assert.match(hint[1], /不会修改原消息|新增一条/, '提示必须说明发出后是新增，不修改原消息')
+test('0.19：老 setDraft 回填路径已删（回填统一由 refillComposer 承担）', () => {
+  assert.doesNotMatch(src, /__inputActions\.setDraft\(pickedMsg\.fullText\)/, '老路径已删')
 })
 
 // ── C2 · 防 409 护栏必须两条回滚路径共用 ──────────────────────────────────────
@@ -82,4 +74,15 @@ test('C2：护栏必须在 refill 之前调用（否则回填后又立刻重算�
   const guardAt = btn.indexOf('markRowsShadowedFrom(')
   const refillAt = btn.indexOf('refillComposer(')
   assert.ok(guardAt >= 0 && refillAt > guardAt, '先标遮蔽，再回填')
+})
+
+// ── 0.19.0 · AI 消息动作区只留引用（时钟回撤已删）────────────────────────────
+test('0.19：AI 动作槽不再渲染时钟/回撤按钮', () => {
+  assert.doesNotMatch(src, /IconClock/, 'IconClock 已删')
+  assert.doesNotMatch(src, /,\s*'revert',\s*runRevert\b/, 'revert 动作不再出现在 AI 槽')
+  assert.doesNotMatch(src, /const runRevert = \(/, 'runRevert 已删')
+})
+
+test('0.19：AI 动作槽只渲染一个引用按钮', () => {
+  assert.match(src, /return act\(React\.createElement\(IconQuote,/, '只 return 一个 act(引用)')
 })

@@ -50,11 +50,10 @@ test('HIGH-1：HOST_BRANCH_ICON_ID 与官方图标工厂的拼法一致', () => 
   )
 })
 
-test('MED-4：persistDraft 之后必须回读校验，不能凭「函数存在」就报成功', () => {
-  const body = block('startEdit')
-  assert.match(body, /readSessionDraft\(/, '必须回读草稿验证真的落盘了')
-  assert.match(body, /editUnavailable/, '回读不一致时必须报错，而不是静默 close')
-  assert.match(body, /panel\.editDone/, '只有校验通过才显示成功')
+// 0.19.0：MED-4 原锁针对已删的 startEdit。回读校验能力保留在
+// writeSessionDraft/readSessionDraft 上，由 MED-4 第二条锁住同键。
+test('0.19：startEdit 已删，回读校验不再挂在编辑入口上', () => {
+  assert.doesNotMatch(src, /const startEdit\b/, 'startEdit 已删')
 })
 
 test('MED-4：readSessionDraft 与 writeSessionDraft 用同一个存储键', () => {
@@ -64,20 +63,13 @@ test('MED-4：readSessionDraft 与 writeSessionDraft 用同一个存储键', () 
   assert.ok(write.includes('FORK_SESSION_STORAGE_PREFIX'), '写必须用同一前缀常量')
 })
 
-test('MED-5：编辑只允许用**全文**，截断的 snippet 不能冒充原文', () => {
-  assert.match(src, /detailFull/, '必须有显式的「是否全文」状态')
-  const gate = src.match(/const editTextReady = [^\n]+/)
-  assert.ok(gate, '缺 editTextReady 派生')
-  assert.match(gate[0], /detailFull === true/, '编辑门槛必须依赖 detailFull，不能只看 detailState')
-  assert.doesNotMatch(src, /startEdit\(detail \|\| pickedLive\.snippet/, '不许再把 snippet 当兜底原文')
-})
-
-test('MED-5：/text 失败时必须把 detailFull 置回 false', () => {
-  const at = src.indexOf("fetch('/api/message-ops/text?")
-  assert.ok(at > 0, '找不到 /text 拉取')
-  const tail = src.slice(at, at + 1400)
-  assert.match(tail, /setDetailFull\(false\)/, '失败分支必须显式降级')
-  assert.match(tail, /setDetailFull\(full !== null\)/, '成功分支必须按真实全文置位')
+// 0.19.0：MED-5 的两条原锁针对已删除的 startEdit/detailFull（编辑交给
+// message-edit 插件）。替换为仍然成立的契约：/text 接口仍是引用与分叉的全文来源，
+// 且不得拿 160 字 snippet 冒充全文。
+test('0.19：/text 全文接口仍被引用/分叉使用，且不许用 snippet 冒充全文', () => {
+  assert.match(src, /\/api\/message-ops\/text\?/, '全文接口仍在')
+  assert.doesNotMatch(src, /startEdit\(detail \|\| pickedLive\.snippet/, '不许把 snippet 当兜底原文')
+  assert.doesNotMatch(src, /detailFull/, 'detailFull 状态已随 startEdit 一起删除')
 })
 
 test('LOW-6：不许引用未定义的 i18n key', () => {
