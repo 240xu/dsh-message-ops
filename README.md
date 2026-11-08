@@ -1228,3 +1228,55 @@ Ctrl/Cmd+Enter 重发。也就是说**本插件从 0.12.0 起造的编辑入口�
    折叠只由用户点击改变；恢复=重放（新 seq、不回原位）的语义与文案不变。
 
 测试 313（309 pass / 4 skip），`prettier --check` 全绿。
+
+### 0.20.0 · 铅笔编辑框回归 + 真实浏览器验证 + bug 清扫
+
+本轮启用智能体团队，两条线并行：
+- 线 A（挖 bug / 官方行为 / 环境）：mops-reviewer、dsh-ui-parity、opencode-parity、
+  npm-relay、verify-env
+- 线 B（铅笔编辑框）：oc-visual（设计）、conflict-audit（实现）、audit-entry（测试）
+
+#### 1 · 铅笔编辑框（用户明确要求「点笔给那个框」）
+- `ensureEditBtn` 回归用户消息动作行，顺序 `回撤 → 铅笔 → 分叉`
+- 新增 `EditResendOverlay`（`shell.overlay` 槽，order 102）：独立 textarea 编辑框，
+  预填 `/api/message-ops/text` 返回的**全文**（不用 160 字 snippet）
+- **时序（用户要求，有意区别于 opencode）**：打开/编辑/取消全程零写操作；
+  点「发送并回撤」那一刻才 `POST /revert` → 合并写草稿 → `openSession` → 提交一次
+- revert 失败保留编辑框与已输入文本；取消零副作用
+- 与已装 `@linxin666/dsh-client-ui-message-edit`（turnTail 槽，fork 语义）物理隔离，
+  同一用户动作只走自己的 `/revert` 链路，不调 fork / submitEdit
+
+#### 2 · bug 清扫（来自 design-demos/bug-hunt-019.md）
+- **H-2**：引用选区必须 anchor/focus 同属一个精确 `data-chat-node-key` 容器，
+  跨消息选区回退到截断路径（防「选中 A 却引用成 B」）
+- **M-1**：引用截断改按 Unicode code point + 空白边界收尾，不切坏 emoji / markdown 围栏
+- **M-2**：来源标注移到 toast（`quote.doneWithSource`），不污染 QuoteNode 模型可见正文
+- **H-1/M-3**：面板回滚按钮限定用户消息（`canRevert`），删除按钮不受限；
+  AI 回滚彻底下线，消除「面板能回滚 AI 却不回填」的旁路
+- **token**：修掉 `--dsw-alias-bg-primary` → `bg-layer-1`（前者宿主 theme 里不存在，
+  深色模式会露馅），B-2 新编辑框 CSS 已用正确 token
+
+#### 3 · 真实浏览器验证（重大突破）
+`verify-env` 翻案：本机 Chromium **能跑** —— `headless_shell.android`（bionic 版）
++ `env -u LD_PRELOAD` + `--disable-dev-shm-usage`，CDP 9344 可用。
+修复了「一直只能靠 bundle 符号指纹推断」的局限。
+
+实测（3099 预览实例，真实 Chromium DOM）：
+```
+revert=6  edit=6  fork=6   seqTagged=6  disabled=0
+点铅笔 → erNodes=12 / textarea=1 / 有「发送并回撤」+「取消」
+textarea 预填真实全文 89 字（非 snippet）
+点取消 → erNodes=0 / textarea=0（零副作用）
+```
+探针：`~/.dsh/tmp-mops/ui-probe.mjs`，环境文档 `design-demos/preview-env.md`。
+
+#### 4 · 回撤的数据语义（用户新问，专项核查）
+`design-demos/revert-data-semantics.md` 实证结论：
+- **AI 看不到**：宿主 `deriveMessages()` 只读 `surface.nodes`，被 replace 的 seq 不在其中
+- **翻会话文件拿得到**：实测 161 条被回撤消息原文逐字可读（append-only 日志，
+  marker 只标记遮蔽，事件仍在）
+- **彻底删除当前做不到**：宿主无 delete/truncate/rewrite API，硬删会破坏 seq 连续性
+  使会话 corrupt。短期方案是「诚实告知」（回撤确认框写明内容仍在本地文件），
+  中期需宿主提供 per-seq payload 重写。此项**未改代码**，仅出报告待决断。
+
+测试 348（344 pass / 4 skip），`prettier --check` 全绿。

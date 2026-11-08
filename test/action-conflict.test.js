@@ -1,10 +1,16 @@
 /**
- * 0.19.0 回归锁：动作入口收敛。
+ * 动作入口回归锁 —— 0.19.0 收敛，0.20.0 反转（编辑入口以**编辑框**形式回归）。
  *
- * 审计发现 profile 已装并加载 @linxin666/dsh-client-ui-message-edit@0.4.14
- * （turnTail 槽，提供真正的「编辑并重发」：fork 到 seq-1 + prompt）。
- * 本插件在 0.12/0.17/0.18 造的 panel.edit / 行内铅笔 / 老 setDraft 全是
- * 与之重复的劣质轮子，已全部删除。见 spec §9。
+ * 历史：
+ *   0.19.0 审计发现 profile 已装 message-edit 插件，于是删掉了本插件自己的
+ *          panel.edit / 行内铅笔 / 老 setDraft 路径（spec §9）。
+ *   0.20.0 用户新指令：铅笔要回来，但**必须是独立编辑框 + 点「发送并回撤」才写**
+ *          （spec §10，覆盖 §9 的删铅笔决定）。
+ *
+ * 因此本文件的锁从「本插件不再有编辑入口」翻转为：
+ *   - 面板仍然**没有** panel.edit（§10.2：面板不恢复编辑）
+ *   - 行内铅笔回归，但语义是打开编辑浮层，不是回填 composer
+ *   - 老 `setDraft(pickedMsg.fullText)` 路径仍然不许回来（回填统一走 refillComposer）
  *
  * 保留的锁：C2（防 409 护栏两条回滚路径共用）。
  */
@@ -22,8 +28,10 @@ function block(name) {
   let depth = 0
   let started = false
   for (let i = at; i < src.length; i++) {
-    if (src[i] === '{') { depth++; started = true }
-    else if (src[i] === '}') {
+    if (src[i] === '{') {
+      depth++
+      started = true
+    } else if (src[i] === '}') {
       depth--
       if (started && depth === 0) return src.slice(at, i + 1)
     }
@@ -31,27 +39,39 @@ function block(name) {
   throw new Error(`块未闭合：${name}`)
 }
 
-// ── 0.19.0 · 本插件不再提供任何「编辑」入口 ─────────────────────────────────
-test('0.19：本插件不再有 startEdit / ensureEditBtn / runUserEdit', () => {
-  for (const name of ['startEdit', 'ensureEditBtn', 'runUserEdit']) {
-    assert.ok(!new RegExp('(function|var|const)\\s+' + name + '\\b').test(src), `残留 ${name}`)
+// ── 0.20.0 · 编辑入口以「独立编辑框」形式回归（spec §10 覆盖 §9）────────────
+test('0.20：行内铅笔回归 —— ensureEditBtn / runUserEdit 存在，且走编辑浮层', () => {
+  for (const name of ['ensureEditBtn', 'runUserEdit']) {
+    assert.ok(new RegExp('(function|var|const)\\s+' + name + '\\b').test(src), `缺 ${name}（0.20.0 已恢复铅笔入口）`)
   }
+  assert.match(block('runUserEdit'), /EDIT_EVENT/, '铅笔必须派发 EDIT_EVENT 打开编辑浮层')
+  assert.ok(/function EditResendOverlay/.test(src) || /const EditResendOverlay = \(/.test(src), '必须有独立的 EditResendOverlay 组件')
 })
 
-test('0.19：不再有 panel.edit / slot.edit 文案（编辑交给已装插件）', () => {
-  assert.doesNotMatch(src, /'panel\.edit'/, 'panel.edit 系列已删')
-  assert.doesNotMatch(src, /'slot\.edit'/, 'slot.edit 系列已删')
+test('0.20：铅笔不等于「回填 composer」——runUserEdit 不许调 refillComposer', () => {
+  // 0.18.0 那版铅笔只是 refillComposer 的别名（被判为与回滚重复而删除）。
+  // 0.20.0 的契约是「打开编辑框，点发送那一刻才回撤」，所以绝不能退化成回填。
+  assert.doesNotMatch(block('runUserEdit'), /refillComposer\(/, '铅笔退化成回填输入框 = 0.18 的旧 bug')
 })
 
-test('0.19：用户消息动作行只剩 回撤 + 分叉 两个按钮', () => {
+test('0.20：面板仍然没有 panel.edit（spec §10.2 只恢复行内铅笔）', () => {
+  assert.doesNotMatch(src, /'panel\.edit'/, '面板编辑入口仍然删除（§10.2 第 3 条）')
+  assert.doesNotMatch(src, /'panel\.editHint'/, 'panel.editHint 也已删')
+})
+
+test('0.20：用户消息动作行 = 回撤 → 编辑 → 分叉 三个按钮', () => {
   const fn = block('ensureUserActions')
-  assert.match(fn, /ensureBtn\(/, '保留回撤')
-  assert.match(fn, /ensureForkBtn\(/, '保留分叉')
-  assert.doesNotMatch(fn, /ensureEditBtn/, '不再有铅笔编辑按钮')
+  const revertAt = fn.indexOf('ensureBtn(')
+  const editAt = fn.indexOf('ensureEditBtn(')
+  const forkAt = fn.indexOf('ensureForkBtn(')
+  assert.ok(revertAt >= 0, '缺回撤')
+  assert.ok(editAt >= 0, '缺铅笔编辑')
+  assert.ok(forkAt >= 0, '缺分叉')
+  assert.ok(revertAt < editAt && editAt < forkAt, '顺序必须是 回撤 → 编辑 → 分叉')
 })
 
-test('0.19：老 setDraft 回填路径已删（回填统一由 refillComposer 承担）', () => {
-  assert.doesNotMatch(src, /__inputActions\.setDraft\(pickedMsg\.fullText\)/, '老路径已删')
+test('老 setDraft 回填路径仍然不许回来（回填统一由 refillComposer 承担）', () => {
+  assert.doesNotMatch(src, /__inputActions\.setDraft\(pickedMsg\.fullText\)/, '老路径已删，别在 0.20 复活')
 })
 
 // ── C2 · 防 409 护栏必须两条回滚路径共用 ──────────────────────────────────────
