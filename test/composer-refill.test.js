@@ -17,7 +17,7 @@ const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'sr
 
 /** 与 refillComposer 同构的边界选择 */
 const pickForRefill = (rows, boundarySeq) => {
-  const hit = rows.filter((r) => r && typeof r.seq === 'number' && r.seq <= boundarySeq && r.fullText)
+  const hit = rows.filter(r => r && typeof r.seq === 'number' && r.seq <= boundarySeq && r.fullText)
   return hit.length ? hit[hit.length - 1] : null
 }
 
@@ -29,7 +29,7 @@ const injectedSource = (() => {
 
 test('/undo：boundary 就是被回滚那条 → 回填它自己', () => {
   const rows = [
-    { seq: 8,  fullText: '第一句' },
+    { seq: 8, fullText: '第一句' },
     { seq: 54, fullText: '要撤销的这句' },
     { seq: 89, fullText: '重放副本' },
   ]
@@ -38,8 +38,8 @@ test('/undo：boundary 就是被回滚那条 → 回填它自己', () => {
 
 test('AI 时钟按钮：boundary 是 AI 消息 → 取它之前那条用户消息', () => {
   const rows = [
-    { seq: 8,  fullText: '我问的问题' },
-    { seq: 18, fullText: null },              // assistant 没有 fullText
+    { seq: 8, fullText: '我问的问题' },
+    { seq: 18, fullText: null }, // assistant 没有 fullText
     { seq: 54, fullText: '下一句' },
   ]
   // boundary = 18（AI 消息 seq）
@@ -57,10 +57,11 @@ test('无可用行 → 返回 null（调用方不回填，不写空串）', () =
 test('R4：afterWrite 必须传带 session- 前缀的 id 给 openSession', () => {
   const m = src.match(/var afterWrite = \([\s\S]*?\n    \}/)
   assert.ok(m, '找不到 afterWrite')
-  assert.ok(/openSession\(rawSid\)/.test(m[0]),
-    'openSession 收到裸 uuid 会抛 `sessions.retain: unknown session`，外层 catch {} 静默 → 视图重建从未生效')
-  assert.ok(!/openSession\(bare\)|openSession\(bareSessionId/.test(m[0]),
-    '不得传裸 id')
+  assert.ok(
+    /openSession\(rawSid\)/.test(m[0]),
+    'openSession 收到裸 uuid 会抛 `sessions.retain: unknown session`，外层 catch {} 静默 → 视图重建从未生效',
+  )
+  assert.ok(!/openSession\(bare\)|openSession\(bareSessionId/.test(m[0]), '不得传裸 id')
 })
 
 test('R2：所有 revert 入口都接了 refillComposer', () => {
@@ -121,19 +122,34 @@ test('回填必须落盘：改为直接写宿主草稿键（0.14.0 起，比 per
   assert.match(fn[0], /return persisted \|\| editorSet/, '必须诚实返回是否真的回填成功')
 })
 
-test('0.19：对话框回填分支不再有独立的 setDraft 路径', () => {
+test('回填只有一个实现：refillComposer（对话框/行内/斜杠全走它）', () => {
   // 老路径（mode==='revert' 时直接 __inputActions.setDraft(pickedMsg.fullText)）
-  // 已删除 —— 它与已装的 message-edit 插件重复，且与 refillComposer 双实现。
-  // 回填统一由 runAction 的 revert 分支调 refillComposer 承担。
+  // 已删除 —— 它与 refillComposer 双实现、且有「只改编辑器不落盘」的竞态。
   assert.doesNotMatch(src, /__inputActions\.setDraft\(pickedMsg\.fullText\)/, '老 setDraft 路径已删')
   assert.doesNotMatch(src, /const okMsg = mode === 'revert'[\s\S]{0,600}?persistDraft\(/, '对话框内不再自行 persistDraft')
+
+  // 0.20.0：铅笔编辑框不是回填入口（它先回撤再写草稿，走自己的编排函数），
+  // 所以 refillComposer 的调用点数量**不应该**因为铅笔回归而增加。
+  const calls = (src.match(/\brefillComposer\(/g) || []).length
+  assert.equal(calls, 3, `refillComposer 调用 ${calls} 处，应仍为 3（铅笔不得抢这条路径）`)
+  assert.doesNotMatch(src, /runUserEdit[\s\S]{0,800}?refillComposer\(/, '铅笔（runUserEdit）不许调 refillComposer')
+})
+
+test('0.20：编辑入口以编辑框形式回归，但仍不碰 refillComposer', () => {
+  // spec §10：铅笔点开独立编辑框，点「发送并回撤」才 POST /revert + 写草稿。
+  // 这与「回填」是两条不同的路径，必须同时存在且互不嵌套。
+  assert.match(src, /ensureEditBtn/, '铅笔按钮必须存在（0.20.0）')
+  assert.match(src, /EditResendOverlay/, '编辑框组件必须存在')
+  assert.match(src, /sendEditAndRevert/, '「发送并回撤」必须有唯一编排实现')
+  const send = src.slice(src.indexOf('async function sendEditAndRevert'))
+  const body = send.slice(0, send.indexOf('\n    }') + 6)
+  assert.doesNotMatch(body, /refillComposer\(/, '编辑框不许复用回填路径（语义不同：编辑=回撤+重发）')
 })
 
 test('lastRevertable 必须排除 shadowed（防二次 /undo 命中已遮蔽 seq → 409）', () => {
   const m = src.match(/var lastRevertable = \(\) => \{[\s\S]*?\n    \}/)
   assert.ok(m, '找不到 lastRevertable')
-  assert.match(m[0], /shadowed\s*!==\s*true/,
-    '只判 visible 时，回滚刚落盘、索引未刷新的窗口里会再次选中同一 seq')
+  assert.match(m[0], /shadowed\s*!==\s*true/, '只判 visible 时，回滚刚落盘、索引未刷新的窗口里会再次选中同一 seq')
 })
 
 test('回填行为契约：只 setDraft 会被 openSession 覆盖，补 persistDraft 才存活', () => {
@@ -143,8 +159,12 @@ test('回填行为契约：只 setDraft 会被 openSession 覆盖，补 persistD
   const store = new Map()
   let editor = ''
   const shell = {
-    setDraft(t) { editor = t },
-    persistDraft() { store.set('dsh.conversation.sid', JSON.stringify({ draft: editor })) },
+    setDraft(t) {
+      editor = t
+    },
+    persistDraft() {
+      store.set('dsh.conversation.sid', JSON.stringify({ draft: editor }))
+    },
   }
   const openSession = () => {
     const raw = store.get('dsh.conversation.sid')

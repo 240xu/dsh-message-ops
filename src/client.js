@@ -137,6 +137,27 @@ window.__ModuleLoader__.load({
       'slot.forkHint': '复制此条之前的对话到新会话，并把此条原文放回新会话输入框',
       'slot.forkDone': '已分叉：新会话 {id}',
       'slot.forkUnavailable': '分叉不可用：会话正在运行，或宿主未提供 session/fork',
+      // 0.20.0：铅笔编辑框（用户消息动作行）。语义 = 先回撤再发，不是「只回填」。
+      'slot.edit': '编辑并重发',
+      'slot.editHint': '打开编辑框；点「发送并回撤」时才回撤此条及其后内容，再发出改后的文本',
+      'slot.editNoText': '这条消息没有可编辑的文本',
+      'slot.editUnmatched': '在日志里定位不到这条消息的 seq，暂时无法编辑',
+      'edit.title': '编辑并重发',
+      'edit.subtitle': '这条消息 · seq #{seq}',
+      'edit.loading': '正在读取原文…',
+      'edit.loadFail': '原文读取失败：',
+      'edit.retry': '重试',
+      'edit.placeholder': '编辑这条消息…',
+      'edit.cancel': '取消',
+      'edit.send': '发送并回撤',
+      'edit.sending': '回撤并发送中…',
+      'edit.empty': '内容为空，无法发送',
+      'edit.failed': '回撤失败：',
+      'edit.done': '已回撤',
+      'edit.doneSubmitted': '已回撤，改后的消息已提交',
+      'edit.manual': '已回撤，改后的文本已放进输入框——请按回车发送',
+      'edit.running': '会话正在运行：需先停止会话再编辑重发',
+      'edit.replaceHint': '发送会先回撤此条及其之后的全部可见消息，再把改后的文本作为新消息发出；日志仍保留，可从回撤区重放。',
       'toast.openNew': '打开新会话',
       'fork.official': '分支完成：新会话 {id}',
       'fork.unavailable': '官方分支不可用：通常是因为会话正在运行，请先停止会话后重试。分支功能由 dsh 内置的 session/fork 提供。',
@@ -164,6 +185,7 @@ window.__ModuleLoader__.load({
       'quote.done': '已引用到输入框',
       'quote.unavailable': '引用不可用（输入框不可写或无全文）',
       'quote.sourcePrefix': '引用自 seq {seq}',
+      'quote.doneWithSource': '已引用（来自 seq {seq}）',
       'undo.label': '回滚上一条消息',
       'undo.desc': '移除最后一条用户消息，原文回填输入框',
       'undo.done.undo': '已回滚上一条消息',
@@ -263,6 +285,28 @@ window.__ModuleLoader__.load({
       'slot.forkHint': 'Copies the conversation above this message into a new session and puts this message back in the new composer',
       'slot.forkDone': 'Branched: new session {id}',
       'slot.forkUnavailable': 'Branch unavailable: the session is running, or the host provides no session/fork',
+      // 0.20.0: pencil edit overlay on the user-message action row (revert-then-send).
+      'slot.edit': 'Edit and resend',
+      'slot.editHint': 'Opens the editor; nothing is reverted until you press "Send and revert"',
+      'slot.editNoText': 'This message has no text to edit',
+      'slot.editUnmatched': 'Cannot locate this message seq in the log, so it cannot be edited yet',
+      'edit.title': 'Edit and resend',
+      'edit.subtitle': 'This message · seq #{seq}',
+      'edit.loading': 'Loading the original text…',
+      'edit.loadFail': 'Could not load the original text: ',
+      'edit.retry': 'Retry',
+      'edit.placeholder': 'Edit this message…',
+      'edit.cancel': 'Cancel',
+      'edit.send': 'Send and revert',
+      'edit.sending': 'Reverting and sending…',
+      'edit.empty': 'Nothing to send — the text is empty',
+      'edit.failed': 'Revert failed: ',
+      'edit.done': 'Reverted',
+      'edit.doneSubmitted': 'Reverted; the edited message has been submitted',
+      'edit.manual': 'Reverted; the edited text is in the composer — press Enter to send',
+      'edit.running': 'The session is running: stop it before editing and resending',
+      'edit.replaceHint':
+        'Sending reverts this message and every visible message after it, then sends the edited text as a new message. The log is kept, so you can replay it from the revert dock.',
       'toast.openNew': 'Open new session',
       'fork.official': 'Branched (official fork): new session {id}',
       'fork.unavailable':
@@ -291,6 +335,7 @@ window.__ModuleLoader__.load({
       'quote.done': 'Quoted into composer',
       'quote.unavailable': 'Quote unavailable (composer locked or no full text)',
       'quote.sourcePrefix': 'Quoted from seq {seq}',
+      'quote.doneWithSource': 'Quoted (from seq {seq})',
       'undo.label': 'Undo last message',
       'undo.desc': 'Remove the last user message and put its original text back into the composer',
       'undo.done.undo': 'Undid the last message',
@@ -1062,7 +1107,7 @@ window.__ModuleLoader__.load({
           '.mopsPanelScrim{position:fixed;inset:0;z-index:1200;background:rgba(15,17,21,.28);display:flex;align-items:center;justify-content:center;padding:24px;animation:mopsFade .12s ease-out}',
           '@keyframes mopsFade{from{opacity:0}to{opacity:1}}',
           '@keyframes mopsRise{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:none}}',
-          '.mopsPanel{width:560px;max-width:min(560px,100%);height:min(760px,100%);max-height:100%;display:flex;flex-direction:column;background:var(--dsw-alias-bg-primary,#fff);color:var(--dsw-alias-label-primary,#0f1115);border:1px solid var(--dsw-alias-border-l2,#e6e6e6);box-shadow:0 24px 64px rgba(15,17,21,.24);font-family:inherit;font-size:13px;line-height:1.45;animation:mopsRise .16s cubic-bezier(.2,.8,.3,1)}',
+          '.mopsPanel{width:560px;max-width:min(560px,100%);height:min(760px,100%);max-height:100%;display:flex;flex-direction:column;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#0f1115);border:1px solid var(--dsw-alias-border-l2,#e6e6e6);box-shadow:0 24px 64px rgba(15,17,21,.24);font-family:inherit;font-size:13px;line-height:1.45;animation:mopsRise .16s cubic-bezier(.2,.8,.3,1)}',
           '@media(prefers-reduced-motion:reduce){.mopsPanelScrim,.mopsPanel{animation:none}}',
           '.mopsPanel *{box-sizing:border-box}',
           '.mopsPanel button{font:inherit;color:inherit;border-radius:0}',
@@ -1080,7 +1125,7 @@ window.__ModuleLoader__.load({
           '.mopsSearch:focus{border-color:var(--dsw-alias-brand-primary,#4d6bfe)}',
           '.mopsChips{display:flex;gap:6px;padding:0 18px 10px;flex-wrap:wrap;align-items:center}',
           '.mopsChip{height:26px;padding:0 9px;border:1px solid var(--dsw-alias-border-l2,#d8d8d8);background:transparent;cursor:pointer;font-size:11px;color:var(--dsw-alias-label-secondary,#6b6b70)}',
-          '.mopsChip.on{border-color:var(--dsw-alias-label-primary,#0f1115);background:var(--dsw-alias-label-primary,#0f1115);color:var(--dsw-alias-bg-primary,#fff)}',
+          '.mopsChip.on{border-color:var(--dsw-alias-label-primary,#0f1115);background:var(--dsw-alias-label-primary,#0f1115);color:var(--dsw-alias-bg-layer-1,#fff)}',
           '.mopsToggle{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--dsw-alias-label-secondary,#6b6b70);margin-left:auto;cursor:pointer}',
           '.mopsToggle input{accent-color:var(--dsw-alias-brand-primary,#4d6bfe)}',
           '.mopsList{flex:1;min-height:0;overflow-y:auto;position:relative;border-top:1px solid var(--dsw-alias-border-l1,#efefef)}',
@@ -1101,15 +1146,15 @@ window.__ModuleLoader__.load({
           '.mopsDetailText{margin:0;white-space:pre-wrap;word-break:break-word;max-height:108px;overflow:auto;font-family:inherit;font-size:12px;line-height:1.55;color:var(--dsw-alias-label-primary,#0f1115)}',
           '.mopsDetailHint{padding:10px 0 14px;color:var(--dsw-alias-label-tertiary,#8a8a8e);font-size:12px}',
           '.mopsActions{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}',
-          '.mopsActionConfirm{display:flex;flex-direction:column;gap:7px;margin-top:10px;padding:10px;border:1px solid var(--dsw-alias-border-l2,#e6e6e6);background:var(--dsw-alias-bg-primary,#fff)}',
+          '.mopsActionConfirm{display:flex;flex-direction:column;gap:7px;margin-top:10px;padding:10px;border:1px solid var(--dsw-alias-border-l2,#e6e6e6);background:var(--dsw-alias-bg-layer-1,#fff)}',
           '.mopsImpactTitle{font-size:12px;font-weight:600}',
           '.mopsImpact{font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#6b6b70)}',
           '.mopsAction{height:30px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2,#cfcfcf);background:transparent;cursor:pointer;font-size:11px}',
           '.mopsAction:hover:not(:disabled){border-color:var(--dsw-alias-label-primary,#0f1115)}',
-          '.mopsAction.primary{border-color:var(--dsw-alias-label-primary,#0f1115);background:var(--dsw-alias-label-primary,#0f1115);color:var(--dsw-alias-bg-primary,#fff)}',
+          '.mopsAction.primary{border-color:var(--dsw-alias-label-primary,#0f1115);background:var(--dsw-alias-label-primary,#0f1115);color:var(--dsw-alias-bg-layer-1,#fff)}',
           '.mopsAction.danger{border-color:var(--dsw-alias-state-error-primary,#c63b32);color:var(--dsw-alias-state-error-primary,#c63b32)}',
           '.mopsAction:disabled{opacity:.35;cursor:default}',
-          '.mopsPanelFoot{flex:none;display:flex;align-items:center;gap:10px;justify-content:space-between;padding:10px 18px;border-top:1px solid var(--dsw-alias-border-l2,#e6e6e6);background:var(--dsw-alias-bg-primary,#fff)}',
+          '.mopsPanelFoot{flex:none;display:flex;align-items:center;gap:10px;justify-content:space-between;padding:10px 18px;border-top:1px solid var(--dsw-alias-border-l2,#e6e6e6);background:var(--dsw-alias-bg-layer-1,#fff)}',
           '.mopsCount{font-size:10px;color:var(--dsw-alias-label-tertiary,#8a8a8e)}',
           '.mopsDanger{border:1px solid var(--dsw-alias-state-error-primary,#c63b32);background:transparent;color:var(--dsw-alias-state-error-primary,#c63b32);height:28px;padding:0 9px;cursor:pointer;font-size:11px}',
           '.mopsDanger:hover{background:rgba(198,59,50,.06)}',
@@ -1117,7 +1162,7 @@ window.__ModuleLoader__.load({
           '.mopsBanner.warn{color:var(--dsw-alias-state-warn-primary,#9a6500);background:rgba(154,101,0,.06)}',
           '.mopsBanner.err{color:var(--dsw-alias-state-error-primary,#c63b32);background:rgba(198,59,50,.06)}',
           '.mopsBanner.ok{color:var(--dsw-alias-state-success-primary,#2f7d4a);background:rgba(47,125,74,.06)}',
-          '.mopsConfirm{position:absolute;inset:0;z-index:2;background:var(--dsw-alias-bg-primary,#fff);display:flex;flex-direction:column;justify-content:center;padding:28px 24px;gap:10px}',
+          '.mopsConfirm{position:absolute;inset:0;z-index:2;background:var(--dsw-alias-bg-layer-1,#fff);display:flex;flex-direction:column;justify-content:center;padding:28px 24px;gap:10px}',
           '.mopsConfirm h3{margin:0;font-size:15px}',
           '.mopsConfirm p{margin:0;font-size:12px;color:var(--dsw-alias-label-secondary,#6b6b70)}',
           '.mopsConfirm p.mopsImpact{font-size:11px}',
@@ -1827,6 +1872,11 @@ window.__ModuleLoader__.load({
 
       const pickedLive = picked ? messages.find(m => m.seq === picked.seq) || picked : null
       const canAct = !busy && !target.running && pickedLive && !pickedLive.shadowed
+      // 0.20.0（bug-hunt H-1 / M-3）：AI 消息回滚已在 0.19.0 从动作区下线
+      // （用户明确要求「回撤是用户消息那边的用处」）。面板不能留一个
+      // 「能回滚 AI 消息却静默不回填」的旁路，故回滚按钮同样限定为用户消息。
+      // 删除按钮仍用 canAct —— 删单条 AI 消息是合理能力，不受此限。
+      const canRevert = canAct && pickedLive && pickedLive.role === 'user'
       const visibleCount = messages.filter(m => m.role !== 'system' && m.visible && !m.shadowed).length
       const shadowedCount = messages.filter(m => m.role !== 'system' && m.shadowed).length
       const totalCount = messages.filter(m => m.role !== 'system').length
@@ -2134,7 +2184,7 @@ window.__ModuleLoader__.load({
                             {
                               type: 'button',
                               className: 'mopsAction primary',
-                              disabled: !canAct || !!confirmAction,
+                              disabled: !canRevert || !!confirmAction,
                               ref: revertBtnRef,
                               onClick: () => setConfirmAction('revert'),
                               title: t('panel.revertHint'),
@@ -2392,6 +2442,498 @@ window.__ModuleLoader__.load({
                           ),
                         ),
               ),
+        ),
+      )
+    }
+
+    // --- 0.20.0 · 「编辑并重发」的编排层 ----------------------------------------
+    //
+    // 语义（用户明确要求 + lead 决断；**不是** opencode 的立即回填，也**不是** fork）：
+    //
+    //   点铅笔 → 只读：GET /text 取全文，在编辑框里改文字。零写操作。
+    //   点「取消」/ Esc / 点遮罩 → 只清本地 state。零 fetch、零写盘、零 openSession。
+    //   点「发送并回撤」这一刻才写，顺序严格如下：
+    //     ① POST /api/message-ops/revert { sessionId, seq }
+    //          失败（含 409 运行中）→ 保留编辑框与用户已输入的文本，报错，不再往下走
+    //     ② markRowsShadowedFrom(seq)        —— 与其它回滚入口共用同一个防 409 护栏
+    //     ③ writeSessionDraft(rawSessionId)  —— 合并写入，保住 view 偏好；这是权威值
+    //     ④ setDraft + persistDraft          —— 尽力同步「活着的」编辑器
+    //     ⑤ emitChanged + openSessionById    —— 视图重建；remount 时从 localStorage 读回同一份草稿
+    //     ⑥ 有界等待重挂后 submit() 一次      —— 不可用则明确提示「请按回车发送」，绝不静默
+    //
+    // 为什么 ③ 必须在 ⑤ 之前：openSession 会卸载并重挂编辑器，新挂载走
+    // `readConversationDraft(sid)` 从 localStorage 初始化。先落盘才是无竞态路径
+    // （0.11.3 / 0.14.0 两次事故的同一个教训，见 refillComposer 注释）。
+    //
+    // 为什么不用 fork：「分叉」按钮的语义是源会话一字不动。同一个「编辑」动作若在
+    // 铅笔里改写源会话、在分叉里保留源会话，就是两套相反语义 —— 用户无法预期。
+    const EDIT_EVENT = 'dsh-message-ops:edit'
+    const EDIT_ID = 'message-ops-edit-resend'
+    const EDIT_STYLE_ID = 'dsh-message-ops-edit-style'
+    /** 等待 composer 重挂的最大轮数 / 间隔：有界，不无限自旋。 */
+    const EDIT_SUBMIT_ATTEMPTS = 8
+    const EDIT_SUBMIT_INTERVAL_MS = 120
+
+    /**
+     * 有界等待 composer 重挂后提交**一次**。
+     *
+     * 判据：`__inputActions` 换成新对象 = 宿主重挂了编辑器（openSession 之后必然发生）。
+     * 到上限仍没换（例如视图没重建的内联路径）就用当前这个提交一次 —— 宁可多一条
+     * 兜底提示，也不要无限等。**只提交一次**：重复 submit 会发出两条消息，比失败更糟。
+     *
+     * @param text - 要提交的文本
+     * @param options - { attempts, intervalMs }，测试注入更小值
+     * @returns Promise<boolean> 是否成功调用了宿主 submit
+     */
+    function submitEditedText(text, options) {
+      const opts = options || {}
+      const attempts = Number.isSafeInteger(opts.attempts) && opts.attempts > 0 ? opts.attempts : EDIT_SUBMIT_ATTEMPTS
+      const intervalMs = Number.isSafeInteger(opts.intervalMs) && opts.intervalMs >= 0 ? opts.intervalMs : EDIT_SUBMIT_INTERVAL_MS
+      const before = __inputActions
+      return new Promise(resolve => {
+        let n = 0
+        const tick = () => {
+          n += 1
+          const ia = __inputActions
+          const usable = ia && typeof ia.submit === 'function' && typeof ia.setDraft === 'function'
+          const remounted = !!ia && ia !== before
+          if (usable && (remounted || n >= attempts)) {
+            try {
+              // 先确保编辑器里就是这段文字：重挂后 draft 已从 localStorage 读回，
+              // 但内联路径（视图没重建）里编辑器仍是旧内容，必须显式覆盖。
+              ia.setDraft(text)
+              if (typeof ia.persistDraft === 'function') ia.persistDraft()
+              ia.submit()
+              resolve(true)
+            } catch (e) {
+              console.warn('[message-ops] submit failed:', e)
+              resolve(false)
+            }
+            return
+          }
+          if (n >= attempts) {
+            resolve(false)
+            return
+          }
+          setTimeout(tick, intervalMs)
+        }
+        setTimeout(tick, intervalMs)
+      })
+    }
+
+    /**
+     * 「发送并回撤」的唯一编排实现。
+     *
+     * 抽成具名函数（而不是埋在组件里）有两个理由：
+     *   1. 时序是本功能的核心契约，必须能被测试**真执行**断言
+     *      （revert 失败 → 不写草稿、不 openSession、用户文本保留）。
+     *   2. 组件只负责 UI 状态；失败时「保留文本」由调用方按返回值决定。
+     *
+     * @param options - { sessionId, rawSessionId, seq, text, deps }
+     *   sessionId    裸 uuid（给 HTTP）
+     *   rawSessionId `session-` 前缀（给 openSession 与草稿键）；缺省从 sessionId 补
+     *   deps         可注入的副作用集合（测试用）；缺省取真实实现
+     * @returns Promise<{ok, stage, submitted?, persisted?, reason?, status?}>
+     *   stage: 'validate' | 'revert' | 'done'
+     */
+    async function sendEditAndRevert(options) {
+      const opts = options || {}
+      const sessionId = String(opts.sessionId || '').trim()
+      // 草稿键与 openSession 都必须用带 `session-` 前缀的写法：
+      // 裸 uuid 会让宿主 `sessions.retain` 抛 `unknown session` 并被外层 catch 静默吞掉
+      // （0.9.6 事故，见 afterWrite 注释）。这里显式补齐，不假设调用方传对。
+      const rawSessionId = String(opts.rawSessionId || '').trim() || (sessionId ? 'session-' + sessionId : '')
+      const seq = opts.seq
+      const text = typeof opts.text === 'string' ? opts.text : ''
+      const deps = opts.deps || {}
+      // ⚠️ 这里只先解析 fetch：revert 失败时**不得**触碰任何草稿/视图副作用，
+      // 连「解析实现」都不该发生在失败之前（解析顺序 = 语义顺序）。
+      const doFetch = deps.fetch || fetch
+
+      if (!sessionId || !Number.isSafeInteger(seq) || seq < 0) return { ok: false, stage: 'validate', reason: 'invalid target' }
+      if (text.trim() === '') return { ok: false, stage: 'validate', reason: 'empty' }
+
+      // ① 回撤：失败就**什么都不做**（不写草稿、不重建视图、不动编辑器）
+      let res = null
+      let data = null
+      try {
+        res = await doFetch('/api/message-ops/revert', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sessionId, seq }),
+        })
+        data = await res.json().catch(() => null)
+      } catch (e) {
+        return { ok: false, stage: 'revert', reason: e && e.message ? e.message : String(e) }
+      }
+      if (!res || !res.ok || !data || data.ok !== true) {
+        return {
+          ok: false,
+          stage: 'revert',
+          status: res ? res.status : 0,
+          reason: (data && data.error) || 'HTTP ' + (res ? res.status : '?'),
+        }
+      }
+
+      // ── 回撤已成功 ── 从这里开始才解析并使用其余副作用 ──────────────────────
+      const doWrite = deps.writeSessionDraft || writeSessionDraft
+      const doRead = deps.readSessionDraft || readSessionDraft
+      const markShadowed = deps.markRowsShadowedFrom || markRowsShadowedFrom
+      const doSetDraft = deps.setDraft || (v => (__inputActions && __inputActions.setDraft ? __inputActions.setDraft(v) : false))
+      const doPersistDraft =
+        deps.persistDraft || (() => (__inputActions && __inputActions.persistDraft ? __inputActions.persistDraft() : false))
+      const doEmitChanged = deps.emitChanged || emitChanged
+      const doOpenSession = deps.openSessionById || openSessionById
+      const doSubmit = deps.submitEdited || submitEditedText
+
+      // ② 防 409 护栏：本地缓存里 >= seq 的行立刻标成已遮蔽（与 runUserRevert/runUndo 同一函数）
+      try {
+        markShadowed(seq)
+      } catch (e) {
+        console.warn('[message-ops] markRowsShadowedFrom failed:', e)
+      }
+
+      // ③ 权威落盘（合并写，保住 view 偏好）
+      let persisted = false
+      try {
+        persisted = doWrite(rawSessionId, text) === true
+      } catch (e) {
+        console.warn('[message-ops] writeSessionDraft failed:', e)
+      }
+      // 回读校验：只有读到**不同的非空值**才算落盘失败（读不到时保持原判断，不误判）
+      if (persisted && typeof doRead === 'function') {
+        try {
+          const stored = doRead(rawSessionId)
+          if (stored != null && stored !== text) persisted = false
+        } catch (e) {
+          /* 读回失败不推翻写入结果 */
+        }
+      }
+
+      // ④ 尽力同步活着的编辑器（重挂路径靠 ③；这里只覆盖「视图没重建」的内联路径）
+      try {
+        doSetDraft(text)
+      } catch (e) {
+        console.warn('[message-ops] setDraft failed:', e)
+      }
+      try {
+        doPersistDraft()
+      } catch (e) {
+        /* persistDraft 缺席不阻断 —— ③ 已经落盘 */
+      }
+
+      // ⑤ 通知 + 重建视图（rawSessionId 带前缀；裸 uuid 会抛 unknown session）
+      try {
+        doEmitChanged()
+      } catch (e) {
+        /* 广播失败不阻断写结果 */
+      }
+      try {
+        doOpenSession(rawSessionId)
+      } catch (e) {
+        console.warn('[message-ops] openSession failed:', e)
+      }
+
+      // ⑥ 有界等待重挂后提交一次；不可用 → 调用方提示手动回车
+      let submitted = false
+      try {
+        submitted = (await doSubmit(text)) === true
+      } catch (e) {
+        console.warn('[message-ops] submitEdited failed:', e)
+      }
+      return { ok: true, stage: 'done', submitted: submitted === true, persisted: persisted }
+    }
+
+    /**
+     * 编辑框样式：颜色全走 `--dsw-alias-*`，圆角全走 `--dsw-radius-*`，无裸 hex。
+     *
+     * ⚠️ 只用**已确认存在**的 token：`--dsw-alias-label-error` 与 `--dsw-alias-bg-layer-1`
+     * 在宿主 theme 包里并不存在（别处有误用），错误色一律用 `--dsw-alias-state-error-primary`，
+     * 背景用 `--dsw-alias-bg-layer-1`。全部带 fallback，深色模式不吃亏。
+     */
+    function ensureEditStyle() {
+      try {
+        if (typeof document === 'undefined' || !document.head) return
+        if (document.getElementById(EDIT_STYLE_ID)) return
+        const tag = document.createElement('style')
+        tag.id = EDIT_STYLE_ID
+        tag.textContent = [
+          '.mopsErScrim{position:fixed;inset:0;z-index:1200;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--dsw-alias-bg-mask-1,rgba(15,17,21,.42));animation:mopsErFade .12s ease-out}',
+          '@keyframes mopsErFade{from{opacity:0}to{opacity:1}}',
+          '@keyframes mopsErRise{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:none}}',
+          '@media(prefers-reduced-motion:reduce){.mopsErScrim,.mopsErPanel{animation:none}}',
+          '.mopsErPanel{width:min(560px,100%);max-height:min(720px,100%);display:flex;flex-direction:column;gap:10px;padding:16px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#0f1115);border:1px solid var(--dsw-alias-border-l2,#e6e6e6);border-radius:var(--dsw-radius-md,12px);box-shadow:0 24px 64px rgba(15,17,21,.24);font-family:inherit;font-size:13px;line-height:1.45;animation:mopsErRise .16s cubic-bezier(.2,.8,.3,1)}',
+          '.mopsErPanel *{box-sizing:border-box}',
+          '.mopsErHead{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex:none}',
+          '.mopsErTitle{font-size:15px;font-weight:600;line-height:22px}',
+          '.mopsErSub{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#8a8a8e);margin-top:2px;font-variant-numeric:tabular-nums}',
+          '.mopsErClose{width:28px;height:28px;flex:none;display:inline-flex;align-items:center;justify-content:center;border:1px solid transparent;border-radius:var(--dsw-radius-xs,4px);background:transparent;color:var(--dsw-alias-label-tertiary,#8a8a8e);cursor:pointer;font-size:16px;line-height:1}',
+          '.mopsErClose:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));color:var(--dsw-alias-label-primary,#0f1115)}',
+          '.mopsErClose:disabled{opacity:.4;cursor:default}',
+          '.mopsErBody{flex:1;min-height:0;display:flex;flex-direction:column;gap:8px}',
+          '.mopsErText{width:100%;min-height:120px;max-height:40vh;resize:vertical;padding:10px;border:1px solid var(--dsw-alias-border-l2,#e6e6e6);border-radius:var(--dsw-radius-sm,8px);background:var(--dsw-alias-bg-layer-2,#f7f7f8);color:var(--dsw-alias-label-primary,#0f1115);font:inherit;font-size:14px;line-height:1.6;outline:none}',
+          '.mopsErText::placeholder{color:var(--dsw-alias-label-tertiary,#8a8a8e)}',
+          '.mopsErText:focus-visible{box-shadow:0 0 0 2px var(--dsw-alias-bg-layer-1,#fff),0 0 0 4px var(--dsw-alias-brand-primary,#4d6bfe)}',
+          '.mopsErText:disabled{opacity:.6;cursor:progress}',
+          '.mopsErText[aria-invalid="true"]{border-color:var(--dsw-alias-state-error-primary,#c63b32)}',
+          '.mopsErHint{font-size:11px;line-height:17px;color:var(--dsw-alias-label-tertiary,#8a8a8e)}',
+          '.mopsErError{font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary,#c63b32);overflow-wrap:anywhere}',
+          '.mopsErOk{font-size:12px;line-height:18px;color:var(--dsw-alias-state-success-primary,#2f7d4a)}',
+          '.mopsErActions{flex:none;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}',
+          '.mopsErBtn{min-height:30px;padding:4px 9px;border-radius:var(--dsw-radius-xs,4px);font:inherit;font-size:12px;line-height:20px;cursor:pointer;border:1px solid transparent}',
+          '.mopsErGhost{color:var(--dsw-alias-label-secondary,#6b6b70);background:transparent}',
+          '.mopsErGhost:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));color:var(--dsw-alias-label-primary,#0f1115)}',
+          '.mopsErPrimary{background:var(--dsw-alias-button-primary-fill,#2b2b2e);color:var(--dsw-alias-label-primary-foreground,#fff)}',
+          '.mopsErPrimary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover,#3a3a3e)}',
+          '.mopsErBtn:disabled{opacity:.5;cursor:not-allowed}',
+          '.mopsErBtn:focus-visible,.mopsErClose:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4d6bfe);outline-offset:1px}',
+          '@media(max-width:760px){.mopsErScrim{padding:0}.mopsErPanel{width:100%;height:100%;max-height:100%;border:0;border-radius:0}}',
+        ].join('')
+        document.head.appendChild(tag)
+      } catch (e) {
+        /* 样式注入失败不影响功能 */
+      }
+    }
+
+    /**
+     * 「编辑并重发」浮层（`shell.overlay` 槽，与本插件 OpsPanel 同族）。
+     *
+     * 常驻挂载、内部 state 控制显隐 —— 与 OpsPanel 完全同款（list 槽的条目没有
+     * 「开关」概念，只能靠组件自身状态）。未打开时返回 null。
+     */
+    function EditResendOverlay(props) {
+      const { sessionId, useSessions } = props
+      const t = (props && props.t) || __t
+      useLocaleRevision()
+      if (sessionId) __currentSessionId = sessionId
+      const sessions = useSessions ? useSessions(s => s) : undefined
+      const [target, setTarget] = useState(null) // { sessionId, rawSessionId, seq }
+      const [draft, setDraft] = useState('')
+      const [textState, setTextState] = useState('idle') // idle|loading|ready|error
+      const [loadError, setLoadError] = useState(null)
+      const [saving, setSaving] = useState(false)
+      const [error, setError] = useState(null)
+      const [done, setDone] = useState('')
+      const textRef = useRef(null)
+      const reqRef = useRef(0)
+
+      useEffect(() => {
+        ensureEditStyle()
+        const handler = e => {
+          const d = e && e.detail ? e.detail : {}
+          if (!d.sessionId || !Number.isSafeInteger(d.seq)) return
+          reqRef.current += 1
+          setTarget({ sessionId: String(d.sessionId), rawSessionId: d.rawSessionId || d.sessionId, seq: d.seq })
+          setDraft('')
+          setTextState('loading')
+          setLoadError(null)
+          setError(null)
+          setDone('')
+        }
+        window.addEventListener(EDIT_EVENT, handler)
+        return () => window.removeEventListener(EDIT_EVENT, handler)
+      }, [])
+
+      const loadText = useCallback(() => {
+        if (!target) return
+        const req = ++reqRef.current
+        const sid = target.sessionId
+        setTextState('loading')
+        setLoadError(null)
+        fetch('/api/message-ops/text?sessionId=' + encodeURIComponent(sid) + '&seq=' + encodeURIComponent(target.seq))
+          .then(res =>
+            res
+              .json()
+              .catch(() => null)
+              .then(data => ({ res, data })),
+          )
+          .then(({ res, data }) => {
+            if (req !== reqRef.current) return
+            if (!res.ok || !data || data.ok !== true) throw new Error((data && data.error) || 'HTTP ' + res.status)
+            if (typeof data.text !== 'string' || data.text === '') throw new Error(t('slot.editNoText'))
+            // ⚠️ 只认 /text 的全文：绝不拿 160 字 snippet 冒充原文
+            // （service 侧硬截断，见 session-file.js 的 snippet.slice(0,160)）
+            setDraft(data.text)
+            setTextState('ready')
+          })
+          .catch(reason => {
+            if (req !== reqRef.current) return
+            setLoadError(t('edit.loadFail') + (reason && reason.message ? reason.message : String(reason)))
+            setTextState('error')
+          })
+      }, [target, t])
+
+      useEffect(() => {
+        if (!target) return undefined
+        loadText()
+        return undefined
+      }, [target, loadText])
+
+      // 光标置末尾：长消息从第一行开始编辑很难受，用户多半是改尾部
+      useEffect(() => {
+        if (textState !== 'ready' || !textRef.current) return
+        const el = textRef.current
+        try {
+          el.focus()
+          const end = el.value.length
+          el.setSelectionRange(end, end)
+        } catch (e) {
+          /* 非浏览器 / 不支持的输入类型：忽略 */
+        }
+      }, [textState])
+
+      const cancel = useCallback(() => {
+        if (saving) return
+        // 零副作用：只清本地 state。不清宿主草稿、不碰会话、不发请求。
+        reqRef.current += 1
+        setTarget(null)
+        setDraft('')
+        setTextState('idle')
+        setLoadError(null)
+        setError(null)
+        setDone('')
+      }, [saving])
+
+      const running = (() => {
+        if (!target || !sessions || !sessions.byId) return false
+        const summary =
+          sessions.byId[target.rawSessionId] || sessions.byId['session-' + target.sessionId] || sessions.byId[target.sessionId]
+        return summary ? summary.running === true : false
+      })()
+
+      const canSubmit = textState === 'ready' && !saving && draft.trim() !== '' && !running
+
+      const send = useCallback(async () => {
+        if (!target || !canSubmit) return
+        setSaving(true)
+        setError(null)
+        setDone('')
+        const result = await sendEditAndRevert({
+          sessionId: target.sessionId,
+          rawSessionId: target.rawSessionId,
+          seq: target.seq,
+          text: draft,
+        })
+        if (!result.ok) {
+          // ⚠️ 失败必须保留编辑框 + 用户已输入的文本（不清 draft、不 close）
+          setSaving(false)
+          setError(
+            result.stage === 'revert'
+              ? t('edit.failed') + (result.reason || 'HTTP ' + result.status)
+              : result.reason === 'empty'
+                ? t('edit.empty')
+                : String(result.reason || ''),
+          )
+          return
+        }
+        setSaving(false)
+        if (result.submitted) {
+          notifyDone(t('edit.doneSubmitted'))
+          cancel()
+          return
+        }
+        // 提交不可用：明确告诉用户文本已经在输入框里，别让人以为没发生
+        notifyDone(t('edit.manual'), 'warn')
+        setDone(t('edit.manual'))
+      }, [target, canSubmit, draft, t, cancel])
+
+      if (!target) return null
+
+      const onKeyDown = e => {
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          if (!saving) cancel()
+          return
+        }
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+          e.preventDefault()
+          if (canSubmit) send()
+        }
+      }
+
+      return React.createElement(
+        'div',
+        {
+          className: 'mopsErScrim',
+          role: 'presentation',
+          onMouseDown: e => {
+            if (e.target === e.currentTarget && !saving) cancel()
+          },
+        },
+        React.createElement(
+          'section',
+          {
+            className: 'mopsErPanel',
+            role: 'dialog',
+            'aria-modal': 'true',
+            'aria-labelledby': 'mops-er-title',
+            onKeyDown,
+          },
+          React.createElement(
+            'div',
+            { className: 'mopsErHead' },
+            React.createElement(
+              'div',
+              null,
+              React.createElement('div', { className: 'mopsErTitle', id: 'mops-er-title' }, t('edit.title')),
+              React.createElement('div', { className: 'mopsErSub' }, t('edit.subtitle', { seq: String(target.seq) })),
+            ),
+            React.createElement(
+              'button',
+              {
+                type: 'button',
+                className: 'mopsErClose',
+                onClick: cancel,
+                disabled: saving,
+                title: t('edit.cancel'),
+                'aria-label': t('edit.cancel'),
+              },
+              '×',
+            ),
+          ),
+          React.createElement(
+            'div',
+            { className: 'mopsErBody' },
+            React.createElement('textarea', {
+              className: 'mopsErText',
+              ref: textRef,
+              value: draft,
+              rows: 6,
+              readOnly: saving,
+              disabled: textState !== 'ready',
+              'aria-invalid': error || textState === 'error' ? 'true' : undefined,
+              placeholder: textState === 'loading' ? t('edit.loading') : t('edit.placeholder'),
+              onChange: e => setDraft(e.target.value),
+              'aria-label': t('edit.title'),
+            }),
+            textState === 'error'
+              ? React.createElement(
+                  'div',
+                  { className: 'mopsErError', role: 'alert' },
+                  loadError,
+                  ' ',
+                  React.createElement('button', { type: 'button', className: 'mopsErBtn mopsErGhost', onClick: loadText }, t('edit.retry')),
+                )
+              : null,
+            running ? React.createElement('div', { className: 'mopsErError', role: 'alert' }, t('edit.running')) : null,
+            error ? React.createElement('div', { className: 'mopsErError', role: 'alert' }, error) : null,
+            done ? React.createElement('div', { className: 'mopsErOk', role: 'status' }, done) : null,
+            React.createElement('div', { className: 'mopsErHint' }, t('edit.replaceHint')),
+          ),
+          React.createElement(
+            'div',
+            { className: 'mopsErActions' },
+            React.createElement(
+              'button',
+              { type: 'button', className: 'mopsErBtn mopsErGhost', onClick: cancel, disabled: saving },
+              t('edit.cancel'),
+            ),
+            React.createElement(
+              'button',
+              { type: 'button', className: 'mopsErBtn mopsErPrimary', onClick: send, disabled: !canSubmit },
+              saving ? t('edit.sending') : t('edit.send'),
+            ),
+          ),
         ),
       )
     }
@@ -2777,29 +3319,61 @@ window.__ModuleLoader__.load({
        *   2. 无选中 → 取整条但截断到 QUOTE_MAX_CHARS，并标注来源（seq / 角色）
        */
       const QUOTE_MAX_CHARS = 600
+      // 0.20.0（bug-hunt M-1）：按 Unicode code point 截断，且尽量在换行/空格处收尾，
+      // 避免把 emoji（代理对）或 markdown 围栏 ``` 从中间切坏。
+      const clipQuote = raw => {
+        const chars = Array.from(String(raw))
+        if (chars.length <= QUOTE_MAX_CHARS) return chars.join('')
+        let end = QUOTE_MAX_CHARS
+        // 往前找最近的空白/换行边界（最多回退 40 个字符），不破坏单词
+        for (let i = end; i > Math.max(0, end - 40); i--) {
+          if (/[\s\n]/.test(chars[i - 1])) {
+            end = i
+            break
+          }
+        }
+        return chars.slice(0, end).join('') + '…'
+      }
+      // 0.20.0（bug-hunt H-2）：把「选区归属」收紧，避免静默串味。
+      // 旧实现算出 root 却从未使用，且用宽松的 [data-chat-flow-kind] 兜底
+      // （会命中 turn-tail / tool / system 等通用块），只看 anchorNode，
+      // 导致「选中 A 消息的一段、去点 B 消息的引用」会把 A 的文字当成 B 引用。
+      // 现在要求 anchor 与 focus 落在**同一个** data-chat-node-key 容器内，
+      // 且该容器必须存在；不满足就返回 null，回退到「截断+标注来源」路径。
+      const ownerOf = node => {
+        const el = node && (node.nodeType === 1 ? node : node.parentElement)
+        return el && el.closest ? el.closest('[data-chat-node-key]') : null
+      }
       const selectionInMessage = () => {
         try {
           const sel = window.getSelection && window.getSelection()
           if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null
           const text = String(sel.toString() || '').replace(/\s+$/g, '')
           if (!text || text.length > QUOTE_MAX_CHARS * 2) return null
-          // 只认落在消息节点内的选区，避免把别处选的文字当成这条消息的引用
-          const anchor = sel.anchorNode && (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement)
-          const root = anchor && anchor.closest && anchor.closest('[data-chat-node-key],[data-chat-flow-kind]')
-          if (!root) return null
-          return text.length > QUOTE_MAX_CHARS ? text.slice(0, QUOTE_MAX_CHARS) + '…' : text
+          const anchorOwner = ownerOf(sel.anchorNode)
+          const focusOwner = ownerOf(sel.focusNode)
+          // 两端必须属于同一个精确的 chat node；跨消息选区不引用（防串味）
+          if (!anchorOwner || !focusOwner || anchorOwner !== focusOwner) return null
+          return clipQuote(text)
         } catch {
           return null
         }
       }
       const runQuote = () => {
-        const finish = ok => notifyDone(ok ? t('quote.done') : t('quote.unavailable'), ok ? 'ok' : 'warn')
+        // 0.20.0（bug-hunt M-2）：来源标注放在 toast，不塞进 QuoteNode 正文。
+        // QuoteNode.getTextContent() 是「模型可见文本」，正文里混入
+        // '[引用自 seq N]' 会污染送进模型的引用内容。
+        const finish = (ok, source) =>
+          notifyDone(
+            ok ? (source ? t('quote.doneWithSource', { seq: String(source) }) : t('quote.done')) : t('quote.unavailable'),
+            ok ? 'ok' : 'warn',
+          )
         try {
           if (!inputActions || typeof inputActions.insertQuote !== 'function') {
             finish(false)
             return
           }
-          const put = text => {
+          const put = (text, source) => {
             if (typeof text !== 'string' || text.trim() === '') {
               finish(false)
               return
@@ -2811,26 +3385,22 @@ window.__ModuleLoader__.load({
               console.warn('[message-ops] insertQuote failed:', e)
               ok = false
             }
-            finish(ok)
+            finish(ok, ok ? source : null)
           }
-          // ① 选中片段优先（结构化的小段引用，模型可见）
+          // ① 选中片段优先：正文就是选中的文字，无需来源标注
           const selected = selectionInMessage()
           if (selected != null) {
-            put(selected)
+            put(selected, null)
             return
           }
-          // ② 无选中：取整条但截断 + 标注来源，不再静默塞全文
-          const withSource = full => {
-            const clipped = full.length > QUOTE_MAX_CHARS ? full.slice(0, QUOTE_MAX_CHARS) + '…' : full
-            return t('quote.sourcePrefix', { seq: String(seq) }) + '\n' + clipped
-          }
+          // ② 无选中：取整条但截断；来源只通过 toast 告知，不进引用正文
           if (fullText != null && fullText !== '') {
-            put(withSource(fullText))
+            put(clipQuote(fullText), seq)
             return
           }
           fetch('/api/message-ops/text?sessionId=' + encodeURIComponent(sessionId) + '&seq=' + encodeURIComponent(seq))
             .then(r => (r.ok ? r.json() : null))
-            .then(d => put(d && d.ok && typeof d.text === 'string' ? withSource(d.text) : null))
+            .then(d => put(d && d.ok && typeof d.text === 'string' ? clipQuote(d.text) : null, seq))
             .catch(() => put(null))
         } catch (e) {
           notifyDone(t('errorPrefix') + (e && e.message ? e.message : String(e)), 'error')
@@ -3560,8 +4130,12 @@ window.__ModuleLoader__.load({
       // 配不上（data-mops-unmatched）→ 禁用 + 说明原因，绝不留装饰按钮。
       var syncEnabled = (block, btn) => {
         if (!btn) return
-        // 0.18.0：三种按钮各有自己的提示文案（新增编辑按钮后不能都写 revert）
-        const hintKey = btn.classList.contains('mopsUserFork') ? 'slot.forkHint' : 'slot.revert'
+        // 0.18.0/0.20.0：三种按钮各有自己的提示文案（编辑按钮不能写 revert 的 hint）
+        const hintKey = btn.classList.contains('mopsUserFork')
+          ? 'slot.forkHint'
+          : btn.classList.contains('mopsUserEdit')
+            ? 'slot.editHint'
+            : 'slot.revert'
         const ok = block.getAttribute('data-mops-seq')
         if (ok) {
           btn.disabled = false
@@ -3573,10 +4147,10 @@ window.__ModuleLoader__.load({
           btn.setAttribute('data-mops-unmatched', '1')
         }
       }
-      /** 块内全部插件按钮一起同步（回滚 / 分叉同一动作行）。 */
+      /** 块内全部插件按钮一起同步（回滚 / 编辑 / 分叉同一动作行）。 */
       var syncBlockButtons = block => {
         if (!block || !block.querySelectorAll) return
-        for (const b of block.querySelectorAll('.mopsUserRevert, .mopsUserFork')) syncEnabled(block, b)
+        for (const b of block.querySelectorAll('.mopsUserRevert, .mopsUserEdit, .mopsUserFork')) syncEnabled(block, b)
       }
       var assignSeqs = (sid, cache, anchors) => {
         const idx = cache && cache.idx
@@ -3815,11 +4389,96 @@ window.__ModuleLoader__.load({
         syncEnabled(block, btn)
         return btn
       }
-      // 两个按钮的顺序由 DOM 顺序决定：回滚在前（破坏性更高），分叉在后（非破坏）。
+
+      /**
+       * 0.20.0 铅笔编辑按钮：与回滚**同一动作行**，插在回滚与分叉之间。
+       *
+       * 语义 = 打开「编辑并重发」浮层（`EditResendOverlay`），编辑框里改文字；
+       * **点「发送并回撤」那一刻**才回撤并重发。点按钮本身零写操作。
+       *
+       * 与 0.19.0 删掉的行内编辑的区别：那版只是把原文**回填 composer**
+       * （`refillComposer`），跟回滚回填是同一件事，所以被判为重复入口而删除。
+       * 这一版是独立编辑框 + 延迟回撤，是用户明确要求的产品行为。
+       *
+       * 图标取官方 `edit-outline` 几何（16 viewBox，填充几何 —— 与分叉图标同族写法）。
+       */
+      var ensureEditBtn = block => {
+        let host = block.querySelector('[class*="xzv4MW_actions"]')
+        if (!host) {
+          host = document.createElement('div')
+          host.className = 'mopsUserActionsRow'
+          block.appendChild(host)
+        }
+        const existing = host.querySelector('.mopsUserEdit')
+        if (existing) return existing
+        const btn = document.createElement('button')
+        btn.type = 'button'
+        btn.className = 'mopsUserEdit'
+        btn.title = __t('slot.editHint')
+        btn.setAttribute('aria-label', __t('slot.edit'))
+        // 铅笔：官方 edit-outline 的几何（与分支图标同为 fill 几何，不用 stroke）
+        btn.innerHTML =
+          '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="none">' +
+          '<path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M11.9 1.4a1.6 1.6 0 0 1 2.3 0l.4.4a1.6 1.6 0 0 1 0 2.3l-1 1-2.7-2.7 1-1ZM9.8 3.5l2.7 2.7-6.9 6.9a1 1 0 0 1-.4.2l-2.6.7a.5.5 0 0 1-.6-.6l.7-2.6a1 1 0 0 1 .2-.4l6.9-6.9Z"/>' +
+          '</svg>'
+        btn.addEventListener('click', e => {
+          e.preventDefault()
+          e.stopPropagation()
+          if (btn.disabled) return
+          runUserEdit(btn, block)
+        })
+        host.appendChild(btn)
+        syncEnabled(block, btn)
+        return btn
+      }
+
+      /**
+       * 0.20.0 行内编辑入口：解析 seq → 派发 `EDIT_EVENT` 打开编辑浮层。
+       *
+       * 这一步**纯读**：`ensureAssign` / `fetchRows` 只读 `/api/message-ops/messages`，
+       * 不发任何写请求、不改草稿。真正的写操作全在 `sendEditAndRevert` 里，
+       * 由用户在编辑框里点「发送并回撤」才触发。
+       */
+      var runUserEdit = (btn, block) => {
+        const sid = __currentSessionId
+        if (!sid) return
+        btn.disabled = true
+        Promise.resolve()
+          .then(() => ensureAssign(sid))
+          .then(() => fetchRows(sid))
+          .then(cache => {
+            const rows = cache && cache.rows
+            const seq = Number(block.getAttribute('data-mops-seq'))
+            const row = rows && rows.find(r => r.seq === seq)
+            if (!row) {
+              notifyDone(__t('errorPrefix') + __t('slot.editUnmatched'), 'error')
+              return
+            }
+            if (!Number.isSafeInteger(seq) || seq < 0) {
+              notifyDone(__t('slot.editUnmatched'), 'warn')
+              return
+            }
+            // 裸 uuid 给 HTTP，带前缀的给 openSession 与草稿键
+            window.dispatchEvent(
+              new CustomEvent(EDIT_EVENT, {
+                detail: { sessionId: bareSessionId(sid), rawSessionId: sid, seq: seq },
+              }),
+            )
+          })
+          .catch(reason => {
+            notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
+          })
+          .finally(() => {
+            btn.disabled = false
+          })
+      }
+
+      // 三个按钮的顺序由 DOM 顺序决定：回滚在前（破坏性更高），编辑居中，分叉最后（非破坏）。
       var ensureUserActions = block => {
-        // 0.19.0（spec §9）：编辑并重发由已装的 message-edit 插件在 turnTail 提供，
-        // 本插件动作行收敛为：回撤 → 分叉。
+        // 0.20.0：铅笔回归，但语义变了 —— 独立编辑框 + 点「发送并回撤」才写，
+        // 不再是 0.18.0 那种「只回填 composer」的伪编辑。
         ensureBtn(block)
+        ensureEditBtn(block)
         ensureForkBtn(block)
       }
       // 0.9.7（P0-2 读合并）：把 150/700/1600ms 三档并成**一次**真网络请求，
@@ -4009,11 +4668,11 @@ window.__ModuleLoader__.load({
             //     （宿主 .xzv4MW_actions 已定 height:28px，改小会撑裂行高）。
             //   · 无淡入动画（opencode 源码注释明写 "Hover actions show and hide
             //     at once, without a fade"）—— 显隐完全交给宿主 [data-actions-reveal]。
-            '.mopsUserRevert,.mopsUserFork{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;border-radius:4px;background:transparent;color:var(--dsw-alias-label-tertiary,#808080);cursor:pointer;padding:0;flex:none}',
-            '.mopsUserRevert svg,.mopsUserFork svg{width:14px;height:14px;display:block}',
-            '.mopsUserRevert:hover,.mopsUserFork:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));color:var(--dsw-alias-label-secondary,#6b6b70)}',
-            '.mopsUserRevert:disabled,.mopsUserFork:disabled{opacity:.4;cursor:default;background:transparent}',
-            '.mopsUserRevert:focus-visible,.mopsUserFork:focus-visible{outline:2px solid var(--dsw-alias-border-l2,#b8b8b8);outline-offset:1px}',
+            '.mopsUserRevert,.mopsUserEdit,.mopsUserFork{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;border-radius:4px;background:transparent;color:var(--dsw-alias-label-tertiary,#808080);cursor:pointer;padding:0;flex:none}',
+            '.mopsUserRevert svg,.mopsUserEdit svg,.mopsUserFork svg{width:14px;height:14px;display:block}',
+            '.mopsUserRevert:hover,.mopsUserEdit:hover,.mopsUserFork:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));color:var(--dsw-alias-label-secondary,#6b6b70)}',
+            '.mopsUserRevert:disabled,.mopsUserEdit:disabled,.mopsUserFork:disabled{opacity:.4;cursor:default;background:transparent}',
+            '.mopsUserRevert:focus-visible,.mopsUserEdit:focus-visible,.mopsUserFork:focus-visible{outline:2px solid var(--dsw-alias-border-l2,#b8b8b8);outline-offset:1px}',
             // 0.18.0：用户反馈「点时间图标也会回撤」——根因不是绑定错误，而是
             // 我们的按钮被 appendChild 到宿主 .actions 行末尾，而该行在
             // data-clock="start"（用户消息）时第一个子元素就是**时间文本**：
@@ -4524,6 +5183,18 @@ window.__ModuleLoader__.load({
           window.__MOPS_LEGACY_DIALOG === true ? OpsDialog : OpsPanel,
         ),
       )
+      // 0.20.0：编辑并重发浮层（同族模态，order 102 排在 OpsPanel 之后 —— 两者互斥打开）
+      ctx.slots.inject(OVERLAY_SLOT, () =>
+        ctx.slots.register(
+          {
+            name: OVERLAY_SLOT,
+            id: EDIT_ID,
+            order: 102,
+            ...(__locale ? { locale: NS } : {}),
+          },
+          EditResendOverlay,
+        ),
+      )
       installSidebarOps()
       installUserRevertInjector()
     }
@@ -4531,7 +5202,19 @@ window.__ModuleLoader__.load({
     return {
       apply,
       inject: ['slots'],
-      __test: { activityTransition, forkBoundaryBefore, isHostBranchButton, writeSessionDraft, HOST_BRANCH_ICON_ID, HOST_BRANCH_D_PREFIX },
+      __test: {
+        activityTransition,
+        forkBoundaryBefore,
+        isHostBranchButton,
+        writeSessionDraft,
+        HOST_BRANCH_ICON_ID,
+        HOST_BRANCH_D_PREFIX,
+        // 0.20.0：编辑并重发的编排层（可注入 deps 真执行断言时序）
+        sendEditAndRevert,
+        submitEditedText,
+        EDIT_EVENT,
+        EDIT_ID,
+      },
     }
   },
 })

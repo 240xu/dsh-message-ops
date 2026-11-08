@@ -22,8 +22,10 @@ function block(name) {
   let depth = 0
   let started = false
   for (let i = at; i < src.length; i++) {
-    if (src[i] === '{') { depth++; started = true }
-    else if (src[i] === '}') {
+    if (src[i] === '{') {
+      depth++
+      started = true
+    } else if (src[i] === '}') {
       depth--
       if (started && depth === 0) return src.slice(at, i + 1)
     }
@@ -44,16 +46,20 @@ test('HIGH-1：图标识别主判据是 sprite 的 data-icon，而不是 <path d
 test('HIGH-1：HOST_BRANCH_ICON_ID 与官方图标工厂的拼法一致', () => {
   // 宿主：function Qv(e,t){return `dsw-icon-${e}-${t}`}
   //       IconBranchOutlineRegular = T("branch-outline","regular")
-  assert.ok(
-    flat.includes("HOST_BRANCH_ICON_ID = 'dsw-icon-branch-outline-regular'"),
-    'id 必须是 dsw-icon-branch-outline-regular',
-  )
+  assert.ok(flat.includes("HOST_BRANCH_ICON_ID = 'dsw-icon-branch-outline-regular'"), 'id 必须是 dsw-icon-branch-outline-regular')
 })
 
-// 0.19.0：MED-4 原锁针对已删的 startEdit。回读校验能力保留在
-// writeSessionDraft/readSessionDraft 上，由 MED-4 第二条锁住同键。
-test('0.19：startEdit 已删，回读校验不再挂在编辑入口上', () => {
-  assert.doesNotMatch(src, /const startEdit\b/, 'startEdit 已删')
+// MED-4 原锁针对面板的 startEdit（0.19 删除，面板不再有编辑入口）。
+// 0.20.0 的编辑入口是行内铅笔 + 编辑框，它自己**也要**做回读校验 ——
+// 回读能力挂在 writeSessionDraft/readSessionDraft 上，由 MED-4 第二条锁住同键。
+test('MED-4：面板 startEdit 已删（编辑走行内铅笔 + 编辑框，不是面板）', () => {
+  assert.doesNotMatch(src, /const startEdit\b/, '面板 startEdit 已删')
+})
+
+test('MED-4（0.20）：编辑框写入后必须回读校验，写不进就要让用户知道', () => {
+  const send = block('sendEditAndRevert')
+  assert.match(send, /readSessionDraft|doRead\(/, '写草稿后必须回读校验（persistDraft 存在 ≠ 真的落盘）')
+  assert.match(send, /persisted/, '必须把落盘结果带出（组件据此提示）')
 })
 
 test('MED-4：readSessionDraft 与 writeSessionDraft 用同一个存储键', () => {
@@ -63,13 +69,14 @@ test('MED-4：readSessionDraft 与 writeSessionDraft 用同一个存储键', () 
   assert.ok(write.includes('FORK_SESSION_STORAGE_PREFIX'), '写必须用同一前缀常量')
 })
 
-// 0.19.0：MED-5 的两条原锁针对已删除的 startEdit/detailFull（编辑交给
-// message-edit 插件）。替换为仍然成立的契约：/text 接口仍是引用与分叉的全文来源，
-// 且不得拿 160 字 snippet 冒充全文。
-test('0.19：/text 全文接口仍被引用/分叉使用，且不许用 snippet 冒充全文', () => {
-  assert.match(src, /\/api\/message-ops\/text\?/, '全文接口仍在')
+// MED-5 原锁针对面板 startEdit 的「snippet 冒充原文」。0.20.0 的编辑框同样必须
+// 走 /text 取全文（否则会拿列表里 160 字的 snippet 去编辑，用户的原文被截断）。
+test('MED-5：/text 全文接口是编辑框/引用/分叉的唯一全文来源', () => {
+  const overlay = block('EditResendOverlay')
+  assert.match(overlay, /\/api\/message-ops\/text\?/, '编辑框必须走 /text 取全文')
+  assert.doesNotMatch(overlay, /\.snippet/, '编辑框不许用 snippet 兜底')
   assert.doesNotMatch(src, /startEdit\(detail \|\| pickedLive\.snippet/, '不许把 snippet 当兜底原文')
-  assert.doesNotMatch(src, /detailFull/, 'detailFull 状态已随 startEdit 一起删除')
+  assert.doesNotMatch(src, /detailFull/, 'detailFull 状态已随面板 startEdit 一起删除')
 })
 
 test('LOW-6：不许引用未定义的 i18n key', () => {

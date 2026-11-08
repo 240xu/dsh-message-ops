@@ -6,7 +6,8 @@
  *     Revert/Copy/Fork 放在同一行）。
  *  2. 官方 assistant turn-tail 的 branch 按钮要隐藏 —— 官方没有开关，
  *     只能在渲染层按图标路径识别后隐藏。
- *  3. 消息面板直接支持「编辑并重发」：把原文交回官方编辑器，不自己复刻输入框。
+ *  3. 编辑并重发：0.20.0 起由**行内铅笔 + 独立编辑框**提供（spec §10）；
+ *     面板里不再有编辑入口（§10.2 第 3 条）。
  *  4. fork 的边界是 **before** 语义（不含该条用户消息），原文进子会话草稿。
  */
 import test from 'node:test'
@@ -24,8 +25,10 @@ function block(name) {
   let depth = 0
   let started = false
   for (let i = at; i < src.length; i++) {
-    if (src[i] === '{') { depth++; started = true }
-    else if (src[i] === '}') {
+    if (src[i] === '{') {
+      depth++
+      started = true
+    } else if (src[i] === '}') {
       depth--
       if (started && depth === 0) return src.slice(at, i + 1)
     }
@@ -85,11 +88,14 @@ test('分叉图标复用官方 IconBranchOutline16 路径，且显式声明填�
   // 但识别宿主按钮时必须认 sprite —— 见 fork-dom-behavior.test.js。
 })
 
-test('块内按钮统一同步（新增分叉后不能只同步回滚）', () => {
+test('块内按钮统一同步（三个按钮缺一不可）', () => {
   assert.match(src, /var syncBlockButtons = \(?block\)? =>/, '必须存在块级同步函数')
   const body = block('syncBlockButtons')
-  // 0.19.0：铅笔编辑按钮已删（交给 message-edit 插件），同步范围回到两个
-  assert.match(body, /mopsUserRevert, \.mopsUserFork/, '同步范围必须覆盖两个按钮（回滚/分叉）')
+  // 0.20.0：铅笔以编辑框形式回归，同步范围必须回到三个（回滚/编辑/分叉）。
+  // 漏掉任何一个 → 该按钮永远 disabled（0.18.0 的「分叉留在禁用态」同型 bug）。
+  for (const cls of ['mopsUserRevert', 'mopsUserEdit', 'mopsUserFork']) {
+    assert.match(body, new RegExp(cls), `同步范围缺 ${cls}`)
+  }
   const assignBody = src.slice(src.indexOf('var assignSeqs'), src.indexOf('var assignSig'))
   assert.doesNotMatch(assignBody, /syncEnabled\(b, b\.querySelector/, 'assignSeqs 里不能再只同步单个按钮（会把分叉按钮留在禁用态）')
 })
@@ -110,16 +116,22 @@ test('scan 每轮都会重新隐藏官方 branch（视图重建后仍生效）',
   assert.match(body, /suppressHostBranch\(\)/, 'scan 必须调用抑制函数，否则 openSession 重挂后按钮回来')
 })
 
-test('0.19：面板不再有编辑入口（编辑交给已装的 message-edit 插件）', () => {
+test('面板不再有编辑入口（编辑走行内铅笔 + 编辑框）', () => {
   assert.doesNotMatch(src, /startEdit\b/, 'startEdit 已删')
-  assert.doesNotMatch(src, /canEdit\b/, 'canEdit 派生已删')
   assert.doesNotMatch(src, /panel\.edit/, 'panel.edit 文案已删')
   // 面板仍保留用户消息判定（分叉需要）
   assert.ok(src.includes("pickedIsUser = !!pickedLive && pickedLive.role === 'user'"), '面板必须有用户消息判定')
+  // 编辑入口改为行内铅笔（DOM 注入），且它打开的是编辑浮层
+  assert.match(src, /mopsUserEdit/, '行内铅笔必须存在（0.20.0）')
+  assert.match(src, /EDIT_EVENT/, '铅笔必须派发编辑浮层事件')
 })
 
 test('面板分叉不再使用「含该条」的旧边界（atSeq: picked.seq）', () => {
-  assert.doesNotMatch(src, /fork\(\{ sessionId: target\.sessionId, atSeq: picked\.seq/, '面板分叉撞到了旧的「含该条」边界 —— 必须走 forkFromUserMessage')
+  assert.doesNotMatch(
+    src,
+    /fork\(\{ sessionId: target\.sessionId, atSeq: picked\.seq/,
+    '面板分叉撞到了旧的「含该条」边界 —— 必须走 forkFromUserMessage',
+  )
   assert.match(src, /forkFromUserMessage\(actionSid, picked\.seq/, '面板分叉必须复用同一个 before 语义实现')
 })
 
