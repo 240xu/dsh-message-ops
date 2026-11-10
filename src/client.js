@@ -132,6 +132,7 @@ window.__ModuleLoader__.load({
       'op.branch': '从此条分叉为新会话',
       'op.branchDesc': '把此条之前的对话复制到新会话，并把此条原文放回新会话输入框（原会话不变，非破坏操作）。',
       'slot.revert': '回滚到此条',
+      'slot.revertPrivacyHint': '回滚到此条（不是删除：AI 看不到，但原文仍在本地会话文件）',
       'slot.revertUnmatched': '在日志里定位不到这条消息的 seq（通常是模型写的摘要与渲染文本偏差过大）——请改用「消息操作」对话框。',
       'slot.fork': '从此条分叉',
       'slot.forkHint': '复制此条之前的对话到新会话，并把此条原文放回新会话输入框',
@@ -170,7 +171,7 @@ window.__ModuleLoader__.load({
       'busy.delete': '删除中…',
       'busy.branch': '分支中…',
       'done.restore': '恢复完成：重放 {n} 条，跳过不可重放 {s} 条',
-      'done.revert': '回滚完成，刷新页面后生效',
+      'done.revert': '已回滚（原文仍保留在本地会话文件，可被恢复）；刷新页面后生效',
       'done.delete': '删除完成，刷新页面后生效',
       'action.reload': '刷新页面',
       errorPrefix: '操作失败：',
@@ -216,6 +217,11 @@ window.__ModuleLoader__.load({
       'panel.revertHint': '包含此条及其后的可见消息',
       'panel.revertConfirmTitle': '回滚到 #{seq}？',
       'panel.revertConfirmBody': '将遮蔽 #{start}–#{end} 的 {n} 条消息，其中可见 {v} 条；日志仍保留，可恢复。',
+      // 0.21.0：隐私预期落差修正。回撤不是「删除」，别让用户以为内容消失了。
+      // 实测（design-demos/revert-data-semantics.md）：AI 看不到（模型只读 surface.nodes），
+      // 但被回撤消息的原文仍逐字留在本地 session.v4.jsonl.zstd 里，翻文件拿得到。
+      'panel.revertPrivacyNote':
+        '注意：这不是删除。AI 将看不到这些消息，但原文仍完整保留在本地会话文件中，可被恢复；直接翻看会话文件仍能读到。',
       'panel.deleteConfirmTitle': '仅删除 #{seq}？',
       'panel.deleteConfirmBody': '将遮蔽这 1 条消息，其他内容不动；日志仍保留，可恢复。',
       'panel.confirmRevert': '确认回滚',
@@ -279,6 +285,7 @@ window.__ModuleLoader__.load({
       'op.branchDesc':
         'Copies the conversation above the picked message into a new session and puts this message back in the new composer (original untouched, non-destructive).',
       'slot.revert': 'Revert to here',
+      'slot.revertPrivacyHint': 'Revert to here (not deletion: hidden from the AI, but the original text stays in the local session file)',
       'slot.revertUnmatched':
         'Cannot locate this message seq in the log (usually the model-written summary drifted too far from the rendered text) — use the Message ops dialog instead.',
       'slot.fork': 'Branch from here',
@@ -320,7 +327,7 @@ window.__ModuleLoader__.load({
       'busy.delete': 'Deleting…',
       'busy.branch': 'Branching…',
       'done.restore': 'Restored: replayed {n}, skipped non-replayable {s}',
-      'done.revert': 'Reverted; reload to apply',
+      'done.revert': 'Reverted (original text stays in the local session file and can be restored); reload to apply',
       'done.delete': 'Deleted; reload to apply',
       'action.reload': 'Reload page',
       errorPrefix: 'Operation failed: ',
@@ -367,6 +374,8 @@ window.__ModuleLoader__.load({
       'panel.revertConfirmTitle': 'Revert to #{seq}?',
       'panel.revertConfirmBody':
         'This shadows {n} messages (#{start}–#{end}), including {v} visible. The log stays append-only and can be restored.',
+      'panel.revertPrivacyNote':
+        'Note: this is not deletion. The AI will no longer see these messages, but the original text stays in the local session file and can be recovered — reading the session file directly still reveals it.',
       'panel.deleteConfirmTitle': 'Delete only #{seq}?',
       'panel.deleteConfirmBody': 'This shadows this one message; everything else stays. The log stays append-only and can be restored.',
       'panel.confirmRevert': 'Confirm revert',
@@ -1149,6 +1158,8 @@ window.__ModuleLoader__.load({
           '.mopsActionConfirm{display:flex;flex-direction:column;gap:7px;margin-top:10px;padding:10px;border:1px solid var(--dsw-alias-border-l2,#e6e6e6);background:var(--dsw-alias-bg-layer-1,#fff)}',
           '.mopsImpactTitle{font-size:12px;font-weight:600}',
           '.mopsImpact{font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#6b6b70)}',
+          // 常显隐私告知条：左竖线 + 灰底，与红色错误条区分；不可关闭，避免"勾了就真删"的误解
+          '.mopsPrivacyNote{margin-top:2px;padding:6px 9px;border-left:2px solid var(--dsw-alias-label-tertiary,#9a9aa0);background:var(--dsw-alias-bg-layer-2,#efefef);border-radius:0 4px 4px 0;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#6b6b70)}',
           '.mopsAction{height:30px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2,#cfcfcf);background:transparent;cursor:pointer;font-size:11px}',
           '.mopsAction:hover:not(:disabled){border-color:var(--dsw-alias-label-primary,#0f1115)}',
           '.mopsAction.primary{border-color:var(--dsw-alias-label-primary,#0f1115);background:var(--dsw-alias-label-primary,#0f1115);color:var(--dsw-alias-bg-layer-1,#fff)}',
@@ -2246,6 +2257,11 @@ window.__ModuleLoader__.load({
                                     })
                                   : t('panel.deleteConfirmBody'),
                               ),
+                              // 0.21.0：revert 的常显隐私告知（零副作用、纯文案）。
+                              // 只在回滚确认态出现；删除确认不需要（删单条同样遮蔽，但语义不同）。
+                              confirmAction === 'revert'
+                                ? React.createElement('div', { className: 'mopsPrivacyNote', role: 'note' }, t('panel.revertPrivacyNote'))
+                                : null,
                               React.createElement(
                                 'div',
                                 { className: 'mopsConfirmRow' },
@@ -4131,11 +4147,13 @@ window.__ModuleLoader__.load({
       var syncEnabled = (block, btn) => {
         if (!btn) return
         // 0.18.0/0.20.0：三种按钮各有自己的提示文案（编辑按钮不能写 revert 的 hint）
+        // 0.21.0：回滚按钮统一用「带隐私提示」的 title —— syncEnabled 会在
+        // 注入后重设 title，若这里仍用 slot.revert 会覆盖掉 ensureBtn 里的隐私提示。
         const hintKey = btn.classList.contains('mopsUserFork')
           ? 'slot.forkHint'
           : btn.classList.contains('mopsUserEdit')
             ? 'slot.editHint'
-            : 'slot.revert'
+            : 'slot.revertPrivacyHint'
         const ok = block.getAttribute('data-mops-seq')
         if (ok) {
           btn.disabled = false
@@ -4343,7 +4361,8 @@ window.__ModuleLoader__.load({
         btn = document.createElement('button')
         btn.type = 'button'
         btn.className = 'mopsUserRevert'
-        btn.title = __t('slot.revert')
+        // 0.21.0：行内回滚按钮不经过面板确认框，隐私告知必须挂在这里（hover 可见）
+        btn.title = __t('slot.revertPrivacyHint')
         btn.setAttribute('aria-label', __t('slot.revert'))
         btn.innerHTML =
           '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9" stroke="currentColor" stroke-width="1.2"/><path d="M2.2 2.8v3h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>'

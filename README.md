@@ -1280,3 +1280,39 @@ textarea 预填真实全文 89 字（非 snippet）
   中期需宿主提供 per-seq payload 重写。此项**未改代码**，仅出报告待决断。
 
 测试 348（344 pass / 4 skip），`prettier --check` 全绿。
+
+### 0.21.0 · 回撤隐私预期修正 + 宿主能力需求
+
+用户问：「回撤的话 AI 还看得到吗？翻会话文件拿得到吗？我希望彻底删除，
+但因为要恢复，至少在后续几次里能恢复」+「按 opencode 的真删时机来，看看有没有方法」。
+
+**Spike 结论**（只读查证 + 一次性破坏性试验，未碰真实会话）：
+- AI **看不到**（模型只读 `surface.nodes`）；但翻 `session.v4.jsonl.zstd` **拿得到**，
+  实测 161 条被回撤消息原文逐字可读
+- **物理删中间行会 corrupt**：宿主 `surface.js:425` 的 seq 连续性校验会抛
+  `session event seq 12 is not contiguous; expected 8`（已用宿主 `foldSurface` 实测）
+- **照抄 opencode 的尾部 DELETE 对不上几何**：opencode 删的是「边界之后的尾部」，
+  而 DSH 真实数据里 49 个回撤 marker **全是中间型**（距末尾几千事件）
+- **脱敏重写在磁盘冷数据层可行**（保留事件数/seq/类型、把 content 改 `[redacted]`，
+  实测 `foldSurface` 通过），但宿主**没有 reload 入口**、且需持写锁 → 必须宿主来做
+
+**本次落地（方案 1 + 2）**：
+
+1. **诚实告知（纯插件，止住隐私预期落差）**
+   - 回撤确认框常显告知条 `panel.revertPrivacyNote`：明确「这不是删除，
+     AI 看不到，但原文仍在本地会话文件、可被恢复、翻文件仍能读到」
+   - 行内回滚按钮 title `slot.revertPrivacyHint`（`syncEnabled` 统一，
+     修掉了它覆盖 ensureBtn 初始值的问题）
+   - 成功 toast `done.revert` 补上「原文仍保留、可恢复」
+   - 真实 Chromium 验证：行内 title 与面板确认框告知条均正确渲染
+
+2. **给宿主的正式需求文档**
+   `docs/superpowers/specs/2026-11-10-host-per-seq-redaction-request.md`（203 行）：
+   - 请求两个能力：**per-seq payload 重写**（改 data 不删行、不破坏 seq 连续性）
+     + **在 commit 时机自动触发 + 内存 surface 重建**
+   - 对标 opencode 的三个 commit 触发点（prompt / compact / 手动）
+   - 含试验数据、源码行号、接口建议、验收标准
+   - 语义：stage 期间可恢复（现状不变），用户继续对话后宿主脱敏 commit，
+     之后翻文件也拿不到原文 —— 正好对上用户「后续几次能恢复、之后彻底删」的诉求
+
+测试 353（349 pass / 4 skip），`prettier --check` 全绿。

@@ -179,3 +179,41 @@ test('0.20 token：不再引用宿主不存在的 --dsw-alias-bg-primary / label
   assert.doesNotMatch(src, /var\(--dsw-alias-bg-primary/, 'bg-primary 不存在，应用 bg-layer-1')
   assert.doesNotMatch(src, /var\(--dsw-alias-label-error/, 'label-error 不存在，应用 state-error-primary')
 })
+
+// ── 0.21.0 · 回撤隐私告知（诚实告知，止住"以为是删除"的预期落差）────────────
+test('0.21：回滚确认框有常显隐私告知，且文案点破「不是删除 / 文件仍可读」', () => {
+  const zh = src.match(/'panel\.revertPrivacyNote':\s*'([^']*)'/)
+  const en = src.slice(src.indexOf('const enDict = {')).match(/'panel\.revertPrivacyNote':\s*'([^']*)'/)
+  assert.ok(zh, '缺中文隐私告知')
+  assert.match(zh[1], /不是删除/, '必须明确「这不是删除」')
+  assert.match(zh[1], /会话文件|本地/, '必须点破原文仍在本地会话文件')
+  assert.match(zh[1], /AI/, '必须说明模型侧看不到')
+  assert.ok(en, '缺英文隐私告知')
+  assert.match(en[1], /not deletion/, '英文同样要点破')
+})
+
+test('0.21：隐私告知只在 revert 确认态渲染，且用专用样式类', () => {
+  assert.match(src, /confirmAction === 'revert'[\s\S]{0,400}?mopsPrivacyNote/, '只在 revert 确认态')
+  assert.match(src, /\.mopsPrivacyNote\{/, '有专用样式')
+  assert.match(src, /role: 'note'/, '语义标注为 note（不是可勾选项，避免误以为勾了就真删）')
+})
+
+test('0.21：隐私告知不引入裸 hex（深色模式跟随 token）', () => {
+  const at = src.indexOf("'.mopsPrivacyNote{")
+  const seg = src.slice(at, at + 400)
+  const bare = seg.split('\n').filter(l => /:\s*#[0-9a-fA-F]{3,8}/.test(l) && !l.includes('var(--dsw'))
+  assert.deepEqual(bare, [], '样式必须走 --dsw-alias-* token')
+})
+
+test('0.21：行内回滚按钮（不经过面板确认框）在 title 里也带隐私提示', () => {
+  assert.match(src, /slot\.revertPrivacyHint/, '必须有独立的隐私提示文案')
+  const at = src.indexOf("btn.title = __t('slot.revertPrivacyHint')")
+  assert.ok(at > 0, '行内按钮 title 必须用 privacy hint')
+})
+
+test('0.21：回滚成功 toast 点破「原文仍在本地文件、可恢复」', () => {
+  const zh = src.match(/'done\.revert': '([^']*)'/)
+  assert.ok(zh, '缺 done.revert 中文')
+  assert.match(zh[1], /本地会话文件|session file/, '成功提示也要点破，不能只靠确认框')
+  assert.match(zh[1], /恢复|restored|recovered/, '必须说明可恢复')
+})
