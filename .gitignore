@@ -9,3 +9,4 @@ node_modules/
 
 # 设计稿（本地评审用，不入库）
 design-demos/
+.audit-tmp/
