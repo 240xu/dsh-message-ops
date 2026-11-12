@@ -128,7 +128,9 @@ test('0.20：引用优先取选中片段，且不再把整条未截断全文塞�
   assert.match(fn, /clipQuote\(/, '放进 composer 的文本必须经过 clipQuote 截断')
   const clip = block('clipQuote')
   assert.match(clip, /QUOTE_MAX_CHARS/, 'clipQuote 必须用 QUOTE_MAX_CHARS 作为上限')
-  assert.match(clip, /Array\.from\(/, '必须按 Unicode code point 截断（否则 emoji 代理对被切坏）')
+  // 0.22.0：改为 Intl.Segmenter 按 grapheme 切（比 code point 更严：
+  // 不拆散 ZWJ 序列 / 组合字符）。真执行实测 family emoji 曾被切碎。
+  assert.match(clip, /graphemes\(/, '必须按 grapheme 截断，不是 code point 也不是 UTF-16 slice')
   assert.doesNotMatch(fn, /insertQuote\(fullText\)|insertQuote\(d\.text\)/, '不许直接把未截断全文塞进 insertQuote')
   assert.match(fn, /insertQuote\(/, '必须走官方结构化引用')
 })
@@ -151,11 +153,14 @@ test('0.20 H-2：引用选区必须 anchor/focus 同属一个精确 chat node', 
   assert.doesNotMatch(owner, /data-chat-flow-kind/, '不许用通用 flow-kind 兜底')
 })
 
-test('0.20 M-1：引用截断按 code point 且在空白边界收尾（不切坏 emoji/围栏）', () => {
+test('0.22 M-1：引用截断按 grapheme（Intl.Segmenter），不拆散 emoji ZWJ 序列', () => {
   assert.match(src, /const clipQuote = /, '必须有安全截断函数')
+  assert.match(src, /Intl\.Segmenter/, '必须用 grapheme 分段器')
   const fn = block('clipQuote')
-  assert.match(fn, /Array\.from/, '必须按 code point 切，不是 UTF-16 slice')
+  assert.match(fn, /graphemes\(/, '按 grapheme 切')
   assert.match(fn, /\[\\s\\n\]/, '必须在空白/换行边界收尾')
+  // 真执行：grapheme 切不会留下悬空 ZWJ 或半个家庭 emoji
+  assert.ok(typeof Intl !== 'undefined' && Intl.Segmenter, '运行时需支持 Intl.Segmenter')
 })
 
 test('0.20 M-2：来源标注不进 QuoteNode 正文（只走 toast）', () => {
