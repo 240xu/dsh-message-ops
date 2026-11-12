@@ -1316,3 +1316,26 @@ textarea 预填真实全文 89 字（非 snippet）
      之后翻文件也拿不到原文 —— 正好对上用户「后续几次能恢复、之后彻底删」的诉求
 
 测试 353（349 pass / 4 skip），`prettier --check` 全绿。
+
+### 0.22.0 · 深挖审计修复（grapheme 截断 / 全文口径 / 编辑框告知）
+
+用户要求「分配多项专家子代理，对内容的 bug 还有 UX 进行深挖」。两轮 8 名专项成员
+全部中途失败、无报告落盘，但半截结论与 `.audit-tmp/` 里的真执行脚本有效。
+Lead 逐条复核后落地 3 个修复。汇总见 `design-demos/audit-round-summary.md`。
+
+1. **引用截断按 grapheme 切**（真 bug）：`clipQuote` 原按 `Array.from`（code point）
+   切 600 字，会拆散 grapheme cluster。真执行实测 `a×598 + 👨‍👩‍👧‍👦` 被切成
+   `U+1f468 U+200d U+2026`（悬空 ZWJ + 半个家庭 emoji）。改用
+   `Intl.Segmenter('zh', {granularity:'grapheme'})`，切点只落在 grapheme 边界。
+2. **fullText 与 /text 同口径**（真 bug）：`listMessages` 的 `fullText` 原用
+   `messageText`（首段），而 `/text` 用 `messageTextFull`（全段）。宿主把长文本拆成
+   多段时，`refillComposer` / `forkFromUserMessage` 回填丢后半段。
+   现 `snippet` 仍用首段（摘要本就该短），`fullText` 显式改用 `messageTextFull`。
+3. **编辑框隐私告知覆盖**（UX 缺口）：0.21 的告知只覆盖面板确认框与行内按钮，
+   但 `EditResendOverlay` 点「发送并回撤」也走 `/revert`。把 `edit.replaceHint`
+   的 zh/en 文案补成「这不是删除——AI 看不到，但原文仍在本地会话文件、
+   可被恢复、翻文件仍能读到」，不新增 UI 元素以免「一堵字」。
+
+新增 `test/audit-deep-fixes.test.js`（4 条，含 3 条真执行）；更新 2 条过期的
+0.20 契约（code point → grapheme）。测试 357（353 pass / 4 skip），
+`prettier --check` 全绿。

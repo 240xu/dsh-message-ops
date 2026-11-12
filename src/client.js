@@ -158,7 +158,8 @@ window.__ModuleLoader__.load({
       'edit.doneSubmitted': '已回撤，改后的消息已提交',
       'edit.manual': '已回撤，改后的文本已放进输入框——请按回车发送',
       'edit.running': '会话正在运行：需先停止会话再编辑重发',
-      'edit.replaceHint': '发送会先回撤此条及其之后的全部可见消息，再把改后的文本作为新消息发出；日志仍保留，可从回撤区重放。',
+      'edit.replaceHint':
+        '发送会先回撤此条及其之后的全部可见消息，再把改后的文本作为新消息发出。注意：这不是删除——AI 看不到被回撤的内容，但原文仍保留在本地会话文件、可被恢复，直接翻看会话文件仍能读到。',
       'toast.openNew': '打开新会话',
       'fork.official': '分支完成：新会话 {id}',
       'fork.unavailable': '官方分支不可用：通常是因为会话正在运行，请先停止会话后重试。分支功能由 dsh 内置的 session/fork 提供。',
@@ -313,7 +314,7 @@ window.__ModuleLoader__.load({
       'edit.manual': 'Reverted; the edited text is in the composer — press Enter to send',
       'edit.running': 'The session is running: stop it before editing and resending',
       'edit.replaceHint':
-        'Sending reverts this message and every visible message after it, then sends the edited text as a new message. The log is kept, so you can replay it from the revert dock.',
+        'Sending reverts this message and every visible message after it, then sends the edited text as a new message. Note: this is not deletion — the AI will not see the reverted content, but the original text stays in the local session file, can be restored, and is still readable by opening that file directly.',
       'toast.openNew': 'Open new session',
       'fork.official': 'Branched (official fork): new session {id}',
       'fork.unavailable':
@@ -3337,11 +3338,23 @@ window.__ModuleLoader__.load({
       const QUOTE_MAX_CHARS = 600
       // 0.20.0（bug-hunt M-1）：按 Unicode code point 截断，且尽量在换行/空格处收尾，
       // 避免把 emoji（代理对）或 markdown 围栏 ``` 从中间切坏。
+      // 0.22.0（真执行实测）：按 code point 切会拆散 grapheme cluster。
+      // 实测 'a'.repeat(598) + '👨‍👩‍👧‍👦' → 尾部 U+1f468 U+200d U+2026，
+      // 家庭 emoji 被切成单人 + 悬空 ZWJ。改用 Intl.Segmenter 按 grapheme 切。
+      let quoteSegmenter = null
+      const graphemes = raw => {
+        if (typeof Intl !== 'undefined' && Intl.Segmenter) {
+          quoteSegmenter ||= new Intl.Segmenter('zh', { granularity: 'grapheme' })
+          return Array.from(quoteSegmenter.segment(String(raw)), part => part.segment)
+        }
+        return Array.from(String(raw))
+      }
       const clipQuote = raw => {
-        const chars = Array.from(String(raw))
+        const chars = graphemes(raw)
         if (chars.length <= QUOTE_MAX_CHARS) return chars.join('')
         let end = QUOTE_MAX_CHARS
-        // 往前找最近的空白/换行边界（最多回退 40 个字符），不破坏单词
+        // 往前找最近的空白/换行边界（最多回退 40 个 grapheme），不破坏单词；
+        // 找不到就硬切（此时至少不会拆散单个 grapheme）
         for (let i = end; i > Math.max(0, end - 40); i--) {
           if (/[\s\n]/.test(chars[i - 1])) {
             end = i

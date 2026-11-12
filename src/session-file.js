@@ -335,7 +335,13 @@ export function listMessages(events) {
     // 前提是这些事件必须先出现在我们的消息列表里、并带上 id，否则
     // byMessageId 查不到 → seqOfNodeKey 返回 null → 调用方「保持可见」。
     if (e.type === 'user/message' || e.type === 'assistant/message' || e.type === 'system/message' || e.type === 'developer/message') {
+      // 0.22.0：`snippet` 用首段即可，但 `fullText` 必须用**全段**。
+      // 旧实现两者共用 messageText（首段），当宿主把长文本拆成多个 content 段
+      // （compaction checkpoint 实测 321+7954+20 三段）时，fullText 只有第一段
+      // → refillComposer / fork 回填丢掉后半段，与 /text 接口（messageTextFull）
+      // 口径分裂。这里显式分开。
       const text = messageText(e)
+      const fullTextValue = messageTextFull(e)
       const msg = e.data && e.data.message
       // id：宿主持久化的消息身份（user 在 data.id、assistant 在 data.message.id），
       // 供 0.2.0 assistant-actions 槽（ownerProps={messageId}）反查 seq。
@@ -357,7 +363,7 @@ export function listMessages(events) {
         marker: isReplaceMarker,
         snippet: text.replace(/\s+/g, ' ').trim().slice(0, 160),
         // 0.4.0 composer 回填：user 消息携带全文（revert 后 setDraft 原文）
-        fullText: e.type === 'user/message' ? text : null,
+        fullText: e.type === 'user/message' ? fullTextValue : null,
         // 0.4.1 dock：replace 标记携带范围与来源（区分手工回撤 vs compaction）
         range:
           isReplaceMarker && e.surfaceOp.startSeq != null && e.surfaceOp.endSeq != null

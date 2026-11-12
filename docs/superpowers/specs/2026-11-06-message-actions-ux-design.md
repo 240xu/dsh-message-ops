@@ -256,3 +256,41 @@ profile 里**已安装并实际加载** `@linxin666/dsh-client-ui-message-edit@0
   npm-relay / verify-env
 - 线 B（铅笔编辑框）：oc-visual（设计）/ conflict-audit（实现）/ audit-entry（测试）
 - Lead 负责集成、决断、消解冲突、统一提交。
+
+---
+
+## 11. 0.21.0 · 回撤的数据语义（用户新问，专项核查后的处置）
+
+用户原话：「回撤的话 AI 还看得到吗？如果直接翻这个会话文件的话，能不能拿得到
+这个回撤的数据？我希望的回撤是彻底删除，但是由于需要恢复的原因至少在后续几次
+当中将几次之前的删除」+「按 opencode 的真删时机来，看看有没有方法」。
+
+### 11.1 Spike 结论（只读查证 + 一次性破坏性试验）
+
+| 问题 | 结论 | 证据 |
+|---|---|---|
+| AI 还看得到吗 | **看不到** | 宿主 `deriveMessages()` 只遍历 `surface.nodes`（`dsh-session/lib/index.js:1681-1696`） |
+| 翻文件拿得到吗 | **拿得到，完整原文** | 实测 161 条被回撤消息逐字可读；append-only 日志只标遮蔽不删事件 |
+| 物理删行可行吗 | **不可行，会 corrupt** | 删中间 4 行后宿主 `foldSurface` 抛 `seq 12 is not contiguous; expected 8` |
+| 照抄 opencode 尾部 DELETE | **几何对不上** | opencode 删 `seq >= boundary` 尾部；DSH 实测 49/49 marker 全是中间型 |
+| 脱敏重写（改 content 不删行） | **冷数据层可行** | 实测 `foldSurface` 通过、`computeShadowed` 正确；但宿主无 reload 入口、需持写锁 |
+
+opencode 的做法是**两段式**：stage（盖 `revert` 字段，可 clear 恢复）→
+用户发下一条消息 / compact / 手动调用时 commit → `DELETE WHERE seq >= boundary`
+（真删、之后不可 redo）。见 `design-demos/revert-data-semantics.md` §2.4。
+
+### 11.2 本次落地（用户批准「1+2」）
+
+1. **诚实告知（纯插件）**：确认框常显 `panel.revertPrivacyNote`、行内按钮
+   `slot.revertPrivacyHint`（并修 `syncEnabled` 覆盖初始 title 的问题）、
+   `done.revert` toast 补「原文仍在、可恢复」。真实 Chromium 验证两处渲染正确。
+2. **宿主需求文档**：`docs/superpowers/specs/2026-11-10-host-per-seq-redaction-request.md`
+   —— 请求 per-seq payload 重写 + commit 时机自动脱敏 + surface 重建。
+
+### 11.3 与 §10 的关系
+
+§10 的铅笔编辑框（0.20.0）与本节（0.21.0）互不冲突：前者是 UX/交互，
+后者是数据语义/隐私预期。0.20 的编辑框「发送并回撤」走 `/revert`，
+因此 0.21 的隐私告知**同样适用于编辑框的提交**——这一点目前只在
+面板确认框与行内按钮 title 落地，编辑框内是否也要展示告知条，
+留给后续 UX 审计决定。
