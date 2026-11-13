@@ -33,25 +33,15 @@ function block(name) {
   throw new Error(`块未闭合：${name}`)
 }
 
-test('HIGH-1：图标识别主判据是 sprite 的 data-icon，而不是 <path d>', () => {
-  const body = block('isHostBranchButton')
-  assert.match(body, /data-icon/, '主判据必须是 sprite 的 data-icon（0.2.2-alpha.2 的 DOM 里没有 <path>）')
-  assert.match(body, /dsw-icon-branch-outline-regular/, '必须是官方图标 id')
-  // 顺序：sprite 判定必须在前，path 只是兼容回退
-  const spriteAt = body.indexOf('data-icon')
-  const pathAt = body.indexOf('svg path')
-  assert.ok(pathAt === -1 || spriteAt < pathAt, 'sprite 判定必须优先于 path 回退')
+test('0.23：不再有「识别并抑制官方 branch 图标」的逻辑', () => {
+  assert.doesNotMatch(flat, /isHostBranchButton/, '识别函数已删')
+  assert.doesNotMatch(flat, /suppressHostBranch/, '抑制调用已删')
 })
 
-test('HIGH-1：HOST_BRANCH_ICON_ID 与官方图标工厂的拼法一致', () => {
-  // 宿主：function Qv(e,t){return `dsw-icon-${e}-${t}`}
-  //       IconBranchOutlineRegular = T("branch-outline","regular")
-  assert.ok(flat.includes("HOST_BRANCH_ICON_ID = 'dsw-icon-branch-outline-regular'"), 'id 必须是 dsw-icon-branch-outline-regular')
+test('0.23：HOST_BRANCH 常量已随「抑制官方分支」一起删除', () => {
+  assert.doesNotMatch(flat, /HOST_BRANCH_ICON_ID/, '不再需要识别并隐藏官方按钮')
 })
 
-// MED-4 原锁针对面板的 startEdit（0.19 删除，面板不再有编辑入口）。
-// 0.20.0 的编辑入口是行内铅笔 + 编辑框，它自己**也要**做回读校验 ——
-// 回读能力挂在 writeSessionDraft/readSessionDraft 上，由 MED-4 第二条锁住同键。
 test('MED-4：面板 startEdit 已删（编辑走行内铅笔 + 编辑框，不是面板）', () => {
   assert.doesNotMatch(src, /const startEdit\b/, '面板 startEdit 已删')
 })

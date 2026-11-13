@@ -59,15 +59,14 @@ test('0.20：面板仍然没有 panel.edit（spec §10.2 只恢复行内铅笔�
   assert.doesNotMatch(src, /'panel\.editHint'/, 'panel.editHint 也已删')
 })
 
-test('0.20：用户消息动作行 = 回撤 → 编辑 → 分叉 三个按钮', () => {
+test('0.23：用户消息动作行 = 回撤 → 编辑 两个按钮（分叉让位官方）', () => {
   const fn = block('ensureUserActions')
   const revertAt = fn.indexOf('ensureBtn(')
   const editAt = fn.indexOf('ensureEditBtn(')
-  const forkAt = fn.indexOf('ensureForkBtn(')
   assert.ok(revertAt >= 0, '缺回撤')
   assert.ok(editAt >= 0, '缺铅笔编辑')
-  assert.ok(forkAt >= 0, '缺分叉')
-  assert.ok(revertAt < editAt && editAt < forkAt, '顺序必须是 回撤 → 编辑 → 分叉')
+  assert.ok(revertAt < editAt, '顺序 回撤 → 编辑')
+  assert.equal(fn.indexOf('ensureForkBtn('), -1, '行内分叉已删（官方 AI 回合尾部已有 sessions.fork）')
 })
 
 test('老 setDraft 回填路径仍然不许回来（回填统一由 refillComposer 承担）', () => {
@@ -103,6 +102,11 @@ test('0.19：AI 动作槽不再渲染时钟/回撤按钮', () => {
   assert.doesNotMatch(src, /const runRevert = \(/, 'runRevert 已删')
 })
 
-test('0.19：AI 动作槽只渲染一个引用按钮', () => {
-  assert.match(src, /return act\(React\.createElement\(IconQuote,/, '只 return 一个 act(引用)')
+test('0.23：AI 动作槽不再注入引用按钮（让位宿主划词引用），但组件仍捕获 inputActions', () => {
+  // 0.23.0：宿主已有划词引用（dsh-message-quotes → insertQuote），我们的按钮
+  // 选区体系不匹配、会退化成塞 600 字全文，且引用未遮蔽消息本就是冗余。
+  assert.doesNotMatch(src, /return act\(React\.createElement\(IconQuote,/, '不再渲染引用按钮')
+  assert.match(src, /return null\s*\}\s*\n\s*\/\/ 0\.4\.2|return null/, '动作槽 return null')
+  // 组件必须保留：inputActions 捕获是编辑框/面板/回填的依赖
+  assert.match(src, /if \(inputActions && typeof inputActions\.setDraft === 'function'\) __inputActions = inputActions/, 'inputActions 捕获仍在')
 })

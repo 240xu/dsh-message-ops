@@ -99,23 +99,21 @@ test('1.2 铅笔图标是官方 edit-outline 几何，不是复制/时钟/分叉
   assert.doesNotMatch(body, /M2\.5 8a5\.5 5\.5 0 1 0 1\.6-3\.9/, '不能是时钟/回撤图标')
 })
 
-test('1.3 动作行顺序：回撤 → 编辑 → 分叉', () => {
+test('0.23 动作行顺序：回撤 → 编辑（分叉让位官方）', () => {
   const body = mustFn('ensureUserActions')
   const revertAt = body.indexOf('ensureBtn(')
   const editAt = body.indexOf('ensureEditBtn(')
-  const forkAt = body.indexOf('ensureForkBtn(')
   assert.notEqual(revertAt, -1, '缺回撤按钮')
   assert.notEqual(editAt, -1, '缺铅笔编辑按钮')
-  assert.notEqual(forkAt, -1, '缺分叉按钮')
+  assert.equal(body.indexOf('ensureForkBtn('), -1, '行内分叉已删（让位官方）')
   assert.ok(revertAt < editAt, '回撤必须在编辑之前（破坏性从左到右递减）')
-  assert.ok(editAt < forkAt, '编辑必须在分叉之前')
 })
 
-test('1.4 块级同步覆盖三个按钮；syncEnabled 对铅笔用 slot.editHint', () => {
+test('0.23 块级同步覆盖两个按钮；syncEnabled 对铅笔用 slot.editHint', () => {
   const sync = mustFn('syncBlockButtons')
   assert.match(sync, /mopsUserRevert/, '同步范围缺 mopsUserRevert')
   assert.match(sync, /mopsUserEdit/, '同步范围缺 mopsUserEdit（否则编辑按钮永远禁用）')
-  assert.match(sync, /mopsUserFork/, '同步范围缺 mopsUserFork')
+  assert.doesNotMatch(sync, /mopsUserFork/, '行内分叉已删，不再参与同步')
 
   const enabled = mustFn('syncEnabled')
   assert.match(enabled, /mopsUserEdit/, 'syncEnabled 必须能区分铅笔按钮')
@@ -632,10 +630,7 @@ test('8.1 真执行：revert 失败时零写盘（若 __test.sendEditAndRevert �
   return withDom(g => {
     const { __test } = loadPlugin(g)
     const fnSend = __test && __test.sendEditAndRevert
-    if (typeof fnSend !== 'function') {
-      assert.ok(true, '未导出 __test.sendEditAndRevert，跳过真执行（第 4 节结构锁已覆盖）')
-      return
-    }
+    assert.equal(typeof fnSend, 'function', '__test.sendEditAndRevert 必须导出（否则真执行静默蒸发）')
     const calls = []
     const deps = makeDeps(calls, { revertOk: false })
     return Promise.resolve(fnSend({ sessionId: 'uuid', rawSessionId: 'session-uuid', seq: 12, text: '改后文本', deps })).then(out => {
@@ -651,10 +646,7 @@ test('8.2 真执行：revert 成功时顺序为 revert → writeSessionDraft →
   return withDom(g => {
     const { __test } = loadPlugin(g)
     const fnSend = __test && __test.sendEditAndRevert
-    if (typeof fnSend !== 'function') {
-      assert.ok(true, '未导出 __test.sendEditAndRevert，跳过真执行（第 4 节结构锁已覆盖）')
-      return
-    }
+    assert.equal(typeof fnSend, 'function', '__test.sendEditAndRevert 必须导出（否则真执行静默蒸发）')
     const calls = []
     const deps = makeDeps(calls, { revertOk: true })
     return Promise.resolve(fnSend({ sessionId: 'uuid', rawSessionId: 'session-uuid', seq: 12, text: '改后文本', deps })).then(out => {
@@ -675,6 +667,74 @@ test('8.2 真执行：revert 成功时顺序为 revert → writeSessionDraft →
       assert.equal(wrote[1], 'session-uuid', '草稿键必须用带前缀的 rawSessionId')
       assert.equal(wrote[2], '改后文本', '写进草稿的必须是用户改后的文本')
       return null
+    })
+  })
+})
+
+// ── 0.23.0 · 真执行 submitEditedText（不再 stub，堵住变异测试抓到的假绿灯）────
+test('9.1 真执行：submitEditedText 只提交一次，且先 setDraft 再 submit', () => {
+  return withDom(g => {
+    const { __test } = loadPlugin(g)
+    assert.equal(typeof __test.submitEditedText, 'function', '真实提交函数必须导出')
+    const calls = []
+    const ia = {
+      setDraft: t => calls.push(['setDraft', t]),
+      persistDraft: () => calls.push(['persistDraft']),
+      submit: () => calls.push(['submit']),
+    }
+    // 模拟视图已重挂：getInputActions 每次返回同一个（usable + remounted 成立）
+    const before = null
+    let current = ia
+    return Promise.resolve(
+      __test.submitEditedText('改后文本', {
+        attempts: 3,
+        intervalMs: 0,
+        getInputActions: () => current,
+      }),
+    ).then(ok => {
+      assert.equal(ok, true, '可用时应提交成功')
+      const submits = calls.filter(c => c[0] === 'submit')
+      assert.equal(submits.length, 1, '只能提交一次（变异测试：加一次 submit 曾全绿）')
+      assert.equal(calls[0][0], 'setDraft', '必须先 setDraft')
+      assert.equal(calls[0][1], '改后文本', 'setDraft 必须传改后的文本')
+      assert.equal(calls[calls.length - 1][0], 'submit', '最后才 submit')
+      assert.equal(before, null, 'before 基准为 null（模拟重挂前无 inputActions）')
+    })
+  })
+})
+
+test('9.2 真执行：inputActions 一直不可用 → 有界超时返回 false，不假装成功', () => {
+  return withDom(g => {
+    const { __test } = loadPlugin(g)
+    assert.equal(typeof __test.submitEditedText, 'function')
+    return Promise.resolve(
+      __test.submitEditedText('x', {
+        attempts: 3,
+        intervalMs: 0,
+        getInputActions: () => null, // 始终不可用
+      }),
+    ).then(ok => {
+      assert.equal(ok, false, '不可用必须返回 false，不能 resolve(true)')
+    })
+  })
+})
+
+test('9.3 真执行：submit 抛错 → 返回 false，不吞异常', () => {
+  return withDom(g => {
+    const { __test } = loadPlugin(g)
+    const ia = {
+      setDraft: () => {},
+      persistDraft: () => {},
+      submit: () => { throw new Error('submit boom') },
+    }
+    return Promise.resolve(
+      __test.submitEditedText('x', {
+        attempts: 2,
+        intervalMs: 0,
+        getInputActions: () => ia,
+      }),
+    ).then(ok => {
+      assert.equal(ok, false, '提交抛错必须返回 false')
     })
   })
 })
