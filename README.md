@@ -1339,3 +1339,36 @@ Lead 逐条复核后落地 3 个修复。汇总见 `design-demos/audit-round-sum
 新增 `test/audit-deep-fixes.test.js`（4 条，含 3 条真执行）；更新 2 条过期的
 0.20 契约（code point → grapheme）。测试 357（353 pass / 4 skip），
 `prettier --check` 全绿。
+
+### 0.23.0 · 引用让位宿主 + 恢复官方分支 + 深挖真 bug 修复
+
+用户：「引用做得巧妙点，不要每次把整个上下文塞给 AI」+「把犯蠢做的东西全部审计
+修一下」+「dsh 官方似乎已经有消息分支」。智能体团队 11 份专项报告，Lead 逐条
+复核落地。汇总见 `design-demos/audit-round2-summary.md`。
+
+1. **引用按钮删除（让位宿主划词引用）**：实证宿主 `dsh-message-quotes` 已有
+   完整划词引用（`data-text-interaction-source` + `selectionchange` +
+   `inputActions.insertQuote`），只在选中文字时、选中多少引多少。我们旧按钮
+   选区体系不匹配 → 退化成塞 600 字全文；而 `deriveMessages()` 本就给出完整
+   历史 → 引用未遮蔽消息 = 同一内容进 prompt 两遍。AI 动作槽改 `return null`，
+   组件保留（它捕获 `inputActions`，删了会让编辑框/面板/回填失效）。
+   真机：选中 20 字 → QuoteNode 正好 20 字，宿主 toolbar 出现，无重复注入。
+2. **恢复官方消息分支**：官方 `TurnTailNodeView` 的 `MessageIconActions` 本就有
+   `sessions.fork({atSeq: turn-tail seq})` 分支按钮。0.12 起我们把它藏了
+   （`suppressHostBranch`）又自己造 `mopsUserFork`，是重复造轮子。
+   删抑制 + 删行内 fork，恢复官方按钮；面板 branch 保留（底层本来就是官方 fork）。
+   真机：`hostBranchIconBtns=3 / hidden=0 / mopsFork=0`。
+3. **S-1 restore 重放丢段**（HIGH）：`planRestore` 用 `messageText`（首段），
+   多段消息恢复后永久丢后半段，实测 898 条受影响、175 万字符。改 `messageTextFull`。
+4. **S-2 dock 遮蔽计数恒 0**（HIGH）：服务端 range 是 `{startSeq,endSeq}`，
+   client 只读 `{start,end}`。改成兼容两种形状。
+5. **文案自我打脸**：`op.delete` 说「删除」但实现是遮蔽，而隐私告知自己写着
+   「这不是删除」。6 个 key 改成「遮蔽此条」，去掉给外行看的 `append-only`。
+6. **回填失败仍报成功**：`runUserRevert` 先报成功再回填且丢弃返回值。
+   改成先回填、按结果报成功/`warn`（新增 `done.revertNoRefill`）。
+7. **测试假绿灯**：变异测试抓到 3 类高危（submitEditedText 被 stub、
+   `assert.ok(true)` 守卫、i18n 值语义盲区），补 3 条真执行提交测试 +
+   硬失败守卫 + 反义值检测。
+
+过程中 Lead 误删 `ensureBtn` 导致用户消息按钮全失效，已从 git 取回并真机复验
+`mopsRevert=9 / mopsEdit=9`。测试 360（356 pass / 4 skip），`prettier --check` 全绿。

@@ -21,7 +21,7 @@ import { OpsError } from './session-file.js'
  * @module dsh-message-ops/ops-core
  */
 
-import { readReplaceOp, messageText, computeShadowed } from './session-file.js'
+import { readReplaceOp, messageText, messageTextFull, computeShadowed } from './session-file.js'
 
 // messageText 的单点实现在 session-file.js（listMessages 同用）；此处转出保持
 // 既有导入面兼容（ops-core 的 messageText 调用方不受影响）。
@@ -447,7 +447,11 @@ export function planRestore(events, restoreSeq, upToSeq, excludeSeqs) {
     if (!e || typeof e.seq !== 'number' || e.seq < startSeq || e.seq > cap) continue
     if (e.type === 'user/message' || e.type === 'assistant/message') {
       if (excluded && excluded.has(e.seq)) continue
-      const text = messageText(e)
+      // 0.23.0（深挖 S-1）：重放必须取**全段**。宿主把长文本拆成多个 content
+      // 段（compaction checkpoint 实测 321+7954+20 三段），旧实现用 messageText
+      // 只取首段 → 恢复副本永久丢掉后半段。实测 898 条多段消息受影响、
+      // 累计丢 175 万字符，其中 133 条是真人输入。
+      const text = messageTextFull(e)
       if (!text.trim()) {
         skipped++
         continue

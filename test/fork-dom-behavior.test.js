@@ -1,6 +1,6 @@
 /**
- * 0.12.0 真执行测试：把 client.js 的工厂函数跑起来，喂一个最小 DOM，
- * 断言 **isHostBranchButton** 与 **writeSessionDraft** 的真实行为。
+ * 0.12.0/0.23.0 真执行测试：把 client.js 的工厂函数跑起来，喂一个最小 DOM，
+ * 断言 **writeSessionDraft** 的真实行为，以及官方 branch 抑制能力已移除。
  *
  * 为什么必须真执行：形状锁（grep 源码）挡不住「函数被注释掉」。
  * 这组用 window.__ModuleLoader__ 捕获插件导出的 __test 面。
@@ -101,57 +101,6 @@ function loadPlugin(g) {
   return api
 }
 
-test('真执行：isHostBranchButton 认 sprite 形态（<svg data-icon> + <use>），这是 0.2.2-alpha.2 的真实 DOM', () => {
-  withDom((g) => {
-    const { __test } = loadPlugin(g)
-    // 官方形态：<svg data-icon="dsw-icon-branch-outline-regular"><use href="#…"/></svg>
-    const mkSpriteBtn = (cls, iconId) => {
-      const b = new El('button')
-      if (cls) for (const c of cls.split(' ')) b.classList.add(c)
-      const svg = new El('svg')
-      svg.setAttribute('data-icon', iconId)
-      svg.setAttribute('aria-hidden', 'true')
-      const use = new El('use')
-      use.setAttribute('href', '#' + iconId)
-      svg.appendChild(use)
-      b.appendChild(svg)
-      return b
-    }
-    assert.equal(
-      __test.isHostBranchButton(mkSpriteBtn('', 'dsw-icon-branch-outline-regular')),
-      true,
-      'sprite 形态的官方 branch 必须被识别（0.12.0 用 path 判定在这里恒 false）',
-    )
-    assert.equal(
-      __test.isHostBranchButton(mkSpriteBtn('', 'dsw-icon-copy-outline-regular')),
-      false,
-      '复制图标不能被误判',
-    )
-    assert.equal(
-      __test.isHostBranchButton(mkSpriteBtn('mopsUserFork', 'dsw-icon-branch-outline-regular')),
-      false,
-      '自己注入的分叉按钮必须排除（复用同一图标）',
-    )
-  })
-})
-
-test('真执行：isHostBranchButton 兼容旧宿主的内联 path 形态', () => {
-  withDom((g) => {
-    const { __test } = loadPlugin(g)
-    const mkPathBtn = (d) => {
-      const b = new El('button')
-      const svg = new El('svg')
-      const path = new El('path')
-      path.setAttribute('d', d)
-      svg.appendChild(path)
-      b.appendChild(svg)
-      return b
-    }
-    assert.equal(__test.isHostBranchButton(mkPathBtn('M13.0762 1.37207C14.0846 1.37228Z')), true, '旧宿主内联 path 仍要认')
-    assert.equal(__test.isHostBranchButton(mkPathBtn('M2.5 8a5.5 5.5 0 1 0 1.6-3.9')), false, '其它图标不能误判')
-  })
-})
-
 test('真执行：writeSessionDraft 写的是宿主能读的 { draft: <string> } 且键名正确', () => {
   withDom((g) => {
     const { __test } = loadPlugin(g)
@@ -170,9 +119,12 @@ test('真执行：writeSessionDraft 对空 id 返回 false 且不写脏键', () 
   })
 })
 
-test('真执行：forkBoundaryBefore 与源码里的 HOST_BRANCH_D_PREFIX 一起导出，说明两者同源', () => {
+test('0.23：__test 不再导出 branch 抑制相关符号', () => {
   withDom((g) => {
     const { __test } = loadPlugin(g)
-    assert.equal(__test.HOST_BRANCH_ICON_ID, 'dsw-icon-branch-outline-regular', 'sprite id 必须与官方图标工厂 Qv 的拼法一致')
+    assert.equal(__test.isHostBranchButton, undefined, '抑制判定已删')
+    assert.equal(__test.HOST_BRANCH_ICON_ID, undefined, '图标常量已删')
+    assert.equal(__test.HOST_BRANCH_D_PREFIX, undefined, 'path 常量已删')
+    assert.equal(typeof __test.writeSessionDraft, 'function', '草稿写入仍可用')
   })
 })

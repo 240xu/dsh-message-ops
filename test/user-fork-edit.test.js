@@ -64,66 +64,13 @@ test('会话草稿写入点与宿主读取点同键同形', () => {
   assert.match(body, /\.\.\.base/, '必须在旧对象上合并，保住 view 等字段')
 })
 
-test('用户消息动作行同时注入回滚与分叉（回滚在前）', () => {
-  const body = block('ensureUserActions')
-  const revertAt = body.indexOf('ensureBtn(')
-  const forkAt = body.indexOf('ensureForkBtn(')
-  assert.notEqual(revertAt, -1, '缺回滚按钮注入')
-  assert.notEqual(forkAt, -1, '缺分叉按钮注入')
-  assert.ok(revertAt < forkAt, '回滚是破坏性更高的动作，必须排在分叉之前')
-})
-
-test('分叉按钮挂进官方动作行（.xzv4MW_actions），不是自造悬浮层', () => {
-  const body = block('ensureForkBtn')
-  assert.match(body, /xzv4MW_actions/, '必须复用宿主动作行，可见性才跟着宿主 hover 走')
-  assert.match(body, /mopsUserFork/, '按钮类名必须可被样式与测试识别')
-})
-
-test('分叉图标复用官方 IconBranchOutline16 路径，且显式声明填充', () => {
-  const body = block('ensureForkBtn')
-  assert.match(body, /M13\.0762 1\.37207/, '图标路径必须取官方 IconBranchOutline16（不自己画）')
-  assert.match(body, /fill="currentColor"/, '官方图标是填充几何，必须 currentColor')
-  assert.doesNotMatch(body, /stroke="currentColor"/, '填充几何不能同时描边（会变粗）')
-  // 我们注入的是**内联 path**（自己画的 button），与宿主 sprite 形态无关；
-  // 但识别宿主按钮时必须认 sprite —— 见 fork-dom-behavior.test.js。
-})
-
-test('块内按钮统一同步（三个按钮缺一不可）', () => {
-  assert.match(src, /var syncBlockButtons = \(?block\)? =>/, '必须存在块级同步函数')
-  const body = block('syncBlockButtons')
-  // 0.20.0：铅笔以编辑框形式回归，同步范围必须回到三个（回滚/编辑/分叉）。
-  // 漏掉任何一个 → 该按钮永远 disabled（0.18.0 的「分叉留在禁用态」同型 bug）。
-  for (const cls of ['mopsUserRevert', 'mopsUserEdit', 'mopsUserFork']) {
-    assert.match(body, new RegExp(cls), `同步范围缺 ${cls}`)
-  }
-  const assignBody = src.slice(src.indexOf('var assignSeqs'), src.indexOf('var assignSig'))
-  assert.doesNotMatch(assignBody, /syncEnabled\(b, b\.querySelector/, 'assignSeqs 里不能再只同步单个按钮（会把分叉按钮留在禁用态）')
-})
-
-test('官方 AI 消息的 branch 按钮被隐藏（按图标路径识别，不靠 aria-label）', () => {
-  const scanBody = block('suppressHostBranch')
-  assert.match(scanBody, /\[data-turn-tail\] button/, '作用域必须限定在 assistant turn-tail 内')
-  assert.match(scanBody, /isHostBranchButton\(btn\)/, '判定必须来自单一纯函数')
-  const pure = block('isHostBranchButton')
-  assert.match(pure, /HOST_BRANCH_ICON_ID/, '主判据必须是 sprite 的 data-icon id（0.2.2-alpha.2 无 <path>）')
-  assert.match(pure, /HOST_BRANCH_D_PREFIX/, '同时保留旧宿主的内联 path 回退')
-  assert.doesNotMatch(pure, /aria-label/, 'aria-label 有 8 种语言，不能作为识别依据')
-  assert.match(pure, /HOST_BRANCH_CLASS/, '必须排除自己注入的分叉按钮（它复用同一图标）')
-})
-
-test('scan 每轮都会重新隐藏官方 branch（视图重建后仍生效）', () => {
-  const body = block('scan')
-  assert.match(body, /suppressHostBranch\(\)/, 'scan 必须调用抑制函数，否则 openSession 重挂后按钮回来')
-})
-
-test('面板不再有编辑入口（编辑走行内铅笔 + 编辑框）', () => {
-  assert.doesNotMatch(src, /startEdit\b/, 'startEdit 已删')
-  assert.doesNotMatch(src, /panel\.edit/, 'panel.edit 文案已删')
-  // 面板仍保留用户消息判定（分叉需要）
-  assert.ok(src.includes("pickedIsUser = !!pickedLive && pickedLive.role === 'user'"), '面板必须有用户消息判定')
-  // 编辑入口改为行内铅笔（DOM 注入），且它打开的是编辑浮层
-  assert.match(src, /mopsUserEdit/, '行内铅笔必须存在（0.20.0）')
-  assert.match(src, /EDIT_EVENT/, '铅笔必须派发编辑浮层事件')
+test('0.23：行内分叉按钮已删，官方 branch 按钮不再被抑制', () => {
+  // dsh 官方在 AI 回合尾部已有 sessions.fork（TurnTailNodeView / MessageIconActions）。
+  // 0.12 起我们把它藏掉又自己造行内 fork，是重复造轮子，现已纠正。
+  assert.doesNotMatch(src, /ensureForkBtn/, '行内 fork 注入已删')
+  assert.doesNotMatch(src, /mopsUserFork/, '行内 fork 按钮已删')
+  assert.doesNotMatch(src, /suppressHostBranch/, '不再抑制官方按钮')
+  assert.doesNotMatch(src, /data-mops-host-branch/, '不再打隐藏标记')
 })
 
 test('面板分叉不再使用「含该条」的旧边界（atSeq: picked.seq）', () => {

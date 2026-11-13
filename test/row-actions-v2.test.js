@@ -40,15 +40,14 @@ test('1：行内铅笔回归（.mopsUserEdit），且与回撤同一动作行', 
   assert.match(fn, /xzv4MW_actions/, '必须挂进宿主官方动作行（与回撤同排）')
 })
 
-test('1：动作行 = 回撤 → 编辑 → 分叉（顺序不变）', () => {
+test('0.23：动作行 = 回撤 → 编辑（分叉让位官方）', () => {
   const fn = block('ensureUserActions')
   const r = fn.indexOf('ensureBtn(')
   const e = fn.indexOf('ensureEditBtn(')
-  const f = fn.indexOf('ensureForkBtn(')
   assert.ok(r >= 0, '缺回撤')
   assert.ok(e >= 0, '缺铅笔编辑')
-  assert.ok(f >= 0, '缺分叉')
-  assert.ok(r < e && e < f, '顺序必须是 回撤 → 编辑 → 分叉')
+  assert.ok(r < e, '顺序 回撤 → 编辑')
+  assert.equal(fn.indexOf('ensureForkBtn('), -1, '行内分叉已删')
 })
 
 test('1：铅笔点开的是编辑框，不是把原文塞回 composer（0.18 的旧 bug 不许回来）', () => {
@@ -212,8 +211,10 @@ test('0.21：隐私告知不引入裸 hex（深色模式跟随 token）', () => 
 
 test('0.21：行内回滚按钮（不经过面板确认框）在 title 里也带隐私提示', () => {
   assert.match(src, /slot\.revertPrivacyHint/, '必须有独立的隐私提示文案')
-  const at = src.indexOf("btn.title = __t('slot.revertPrivacyHint')")
-  assert.ok(at > 0, '行内按钮 title 必须用 privacy hint')
+  assert.ok(
+    /btn\.title = __t\('slot\.revertPrivacyHint'\)/.test(src) || /:\s*'slot\.revertPrivacyHint'/.test(src),
+    'ensureBtn 与 syncEnabled 都必须指向 privacy hint',
+  )
 })
 
 test('0.21：回滚成功 toast 点破「原文仍在本地文件、可恢复」', () => {

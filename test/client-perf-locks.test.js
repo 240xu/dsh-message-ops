@@ -132,15 +132,20 @@ test('读合并：合并窗口 <1600ms，且兜底档强制走真网络', () => 
 
 test('红线：refillComposer / setDraft 必须发生在首次刷新之前', () => {
   // 悬停回滚按钮：refill → emitChanged → 三连
-  const s0 = src.indexOf("notifyDone(__t('done.revert'))")
+  // 0.23.0：改用 markRowsShadowedFrom 当锚点 —— 旧实现先 notifyDone 再回填且
+  // 丢弃返回值（回填失败仍报成功），现已改为「先回填，按结果报成功/warn」。
+  const s0 = src.indexOf('markRowsShadowedFrom(row.seq)')
   assert.ok(s0 >= 0, '找不到 runUserRevert 成功分支')
   const s1 = src.indexOf('btn.disabled = false', s0)
   assert.ok(s1 > s0, '找不到 runUserRevert 收尾')
   const block = src.slice(s0, s1)
   const r = block.indexOf('refillComposer(')
+  const done = block.indexOf("notifyDone(__t('done.revert'))")
+  const warn = block.indexOf("notifyDone(__t('done.revertNoRefill'), 'warn')")
   const e = block.indexOf('emitChanged(')
   const l = block.indexOf('for (const delay of [150, 700, 1600]')
   assert.ok(r >= 0, 'runUserRevert 不回填 composer')
+  assert.ok(done > r && warn > r, '必须先回填，再按结果报成功/warn（不能先报成功）')
   assert.ok(e > r, 'emitChanged（= 首次刷新）必须排在 refillComposer 之后')
   assert.ok(l > e, '三连必须排在 emitChanged 之后')
 

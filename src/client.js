@@ -125,9 +125,9 @@ window.__ModuleLoader__.load({
       'dialog.invisible': '（已遮蔽，仅日志可见）',
       'dialog.showMore': '显示更多（剩余 {n} 条）',
       'dialog.more': '…（仅显示最近 200 条，共 {n} 条）',
-      'op.revert': '回滚到此条（含）之后全部移除',
-      'op.revertDesc': '遮蔽所选消息及其后所有可见内容；日志 append-only，可通过重新发送恢复语境。',
-      'op.delete': '仅删除这一条',
+      'op.revert': '回撤到此条及之后',
+      'op.revertDesc': '把这条及之后的对话从 AI 可见内容里隐藏；原文仍保留，可以放回。',
+      'op.delete': '遮蔽此条',
       'op.deleteDesc': '仅遮蔽所选的一条消息；其余内容保持不变。',
       'op.branch': '从此条分叉为新会话',
       'op.branchDesc': '把此条之前的对话复制到新会话，并把此条原文放回新会话输入框（原会话不变，非破坏操作）。',
@@ -173,7 +173,8 @@ window.__ModuleLoader__.load({
       'busy.branch': '分支中…',
       'done.restore': '恢复完成：重放 {n} 条，跳过不可重放 {s} 条',
       'done.revert': '已回滚（原文仍保留在本地会话文件，可被恢复）；刷新页面后生效',
-      'done.delete': '删除完成，刷新页面后生效',
+      'done.revertNoRefill': '已回滚，但原文未能放回输入框（会话可能尚未挂载）；可重试或从消息操作面板手动复制',
+      'done.delete': '已遮蔽，刷新页面后生效',
       'action.reload': '刷新页面',
       errorPrefix: '操作失败：',
       'dock.title': '已回撤 {n} 条消息',
@@ -226,12 +227,12 @@ window.__ModuleLoader__.load({
       'panel.deleteConfirmTitle': '仅删除 #{seq}？',
       'panel.deleteConfirmBody': '将遮蔽这 1 条消息，其他内容不动；日志仍保留，可恢复。',
       'panel.confirmRevert': '确认回滚',
-      'panel.confirmDeleteOne': '确认删除',
+      'panel.confirmDeleteOne': '确认遮蔽',
       'panel.retry': '重试',
       'panel.searching': '搜索中…',
       'panel.deleteSessionImpact': '共 {n} 条消息；移入回收站后 7 天内可恢复。',
       'panel.deleteUnavailable': '会话信息尚未就绪，暂不能删除。',
-      'panel.delete': '仅删除此条',
+      'panel.delete': '遮蔽此条',
       'panel.deleteHint': '只遮蔽这一条，其他消息不动',
       'panel.branch': '从此条分叉',
       'panel.branchHint': '复制此条之前的对话到新会话，并把此条原文放回新会话输入框',
@@ -242,7 +243,7 @@ window.__ModuleLoader__.load({
       // 原消息仍在，界面出现两条相似消息）。opencode 也没有消息级编辑。
       'panel.openNew': '打开新会话',
       'panel.revertDone': '回滚已生效',
-      'panel.deleteDone': '删除已生效',
+      'panel.deleteDone': '已遮蔽',
       'panel.count': '共 {n} 条 · 可见 {v} · 已回滚 {s}',
       'panel.deleteSession': '删除整条会话',
       'panel.deleteSessionHint': '移入回收站，7 天内可恢复。请输入标题确认：',
@@ -277,10 +278,10 @@ window.__ModuleLoader__.load({
       'dialog.invisible': ' (shadowed, log-only)',
       'dialog.showMore': 'Show more ({n} older)',
       'dialog.more': '…(showing latest 200 of {n})',
-      'op.revert': 'Revert: remove this message and everything after',
+      'op.revert': 'Revert to here',
       'op.revertDesc':
         'Shadows the picked message and all later visible content; the log stays append-only so context can be restored by re-sending.',
-      'op.delete': 'Delete only this message',
+      'op.delete': 'Hide this message',
       'op.deleteDesc': 'Shadows only the picked message; everything else stays.',
       'op.branch': 'Fork into a new session from here',
       'op.branchDesc':
@@ -329,7 +330,9 @@ window.__ModuleLoader__.load({
       'busy.branch': 'Branching…',
       'done.restore': 'Restored: replayed {n}, skipped non-replayable {s}',
       'done.revert': 'Reverted (original text stays in the local session file and can be restored); reload to apply',
-      'done.delete': 'Deleted; reload to apply',
+      'done.revertNoRefill':
+        'Reverted, but the original text could not be put back in the composer (the view may not be mounted yet); retry or copy it manually from Message Ops',
+      'done.delete': 'Hidden; reload to apply',
       'action.reload': 'Reload page',
       errorPrefix: 'Operation failed: ',
       'dock.title': '{n} rolled back messages',
@@ -374,18 +377,18 @@ window.__ModuleLoader__.load({
       'panel.revertHint': 'Includes this message and all visible messages after it',
       'panel.revertConfirmTitle': 'Revert to #{seq}?',
       'panel.revertConfirmBody':
-        'This shadows {n} messages (#{start}–#{end}), including {v} visible. The log stays append-only and can be restored.',
+        'This shadows {n} messages (#{start}–#{end}), including {v} visible. The original text stays in the local session file and can be put back.',
       'panel.revertPrivacyNote':
         'Note: this is not deletion. The AI will no longer see these messages, but the original text stays in the local session file and can be recovered — reading the session file directly still reveals it.',
       'panel.deleteConfirmTitle': 'Delete only #{seq}?',
       'panel.deleteConfirmBody': 'This shadows this one message; everything else stays. The log stays append-only and can be restored.',
       'panel.confirmRevert': 'Confirm revert',
-      'panel.confirmDeleteOne': 'Confirm delete',
+      'panel.confirmDeleteOne': 'Confirm hide',
       'panel.retry': 'Retry',
       'panel.searching': 'Searching…',
       'panel.deleteSessionImpact': 'Total {n} messages; recoverable from trash for 7 days.',
       'panel.deleteUnavailable': 'Session details are not ready yet; deletion is disabled.',
-      'panel.delete': 'Delete only this',
+      'panel.delete': 'Hide this',
       'panel.deleteHint': 'Shadows only this message',
       'panel.branch': 'Fork from here',
       'panel.branchHint': 'Copy the conversation above this message into a new session and put this message back in the new composer',
@@ -393,7 +396,7 @@ window.__ModuleLoader__.load({
       'panel.branchUserOnly': 'Fork works on user messages only (assistant messages have no text to hand back)',
       'panel.openNew': 'Open new session',
       'panel.revertDone': 'Revert applied',
-      'panel.deleteDone': 'Delete applied',
+      'panel.deleteDone': 'Hidden',
       'panel.count': 'Total {n} · visible {v} · shadowed {s}',
       'panel.deleteSession': 'Delete whole session',
       'panel.deleteSessionHint': 'Moves it to trash for 7 days. Type the title to confirm:',
@@ -2506,12 +2509,15 @@ window.__ModuleLoader__.load({
       const opts = options || {}
       const attempts = Number.isSafeInteger(opts.attempts) && opts.attempts > 0 ? opts.attempts : EDIT_SUBMIT_ATTEMPTS
       const intervalMs = Number.isSafeInteger(opts.intervalMs) && opts.intervalMs >= 0 ? opts.intervalMs : EDIT_SUBMIT_INTERVAL_MS
-      const before = __inputActions
+      // 0.23.0：允许真执行测试注入 inputActions（生产路径仍读模块级 __inputActions）。
+      // 之前测试把 deps.submitEdited 整个 stub 掉，真实提交逻辑从未被执行过。
+      const readInputActions = typeof opts.getInputActions === 'function' ? opts.getInputActions : () => __inputActions
+      const before = readInputActions()
       return new Promise(resolve => {
         let n = 0
         const tick = () => {
           n += 1
-          const ia = __inputActions
+          const ia = readInputActions()
           const usable = ia && typeof ia.submit === 'function' && typeof ia.setDraft === 'function'
           const remounted = !!ia && ia !== before
           if (usable && (remounted || n >= attempts)) {
@@ -2997,56 +3003,6 @@ window.__ModuleLoader__.load({
       return Number.isSafeInteger(seq) && seq > 0 ? seq - 1 : -1
     }
 
-    /**
-     * 官方 assistant turn-tail 的 branch 按钮识别（0.12.0）。
-     *
-     * 为什么不能靠 aria-label：官方文案有 8 种语言（zh/en/ja/es/fr/de/ru/pt），
-     * 逐个匹配等于把 i18n 表抄进来。也不能靠 class：CSS Modules 会哈希前缀
-     * （实测 0.2.0-rc.2 是 `xzv4MW_`，0.2.1 起变过）。
-     *
-     * ⚠️ 也不能靠 `<path d="…">`（0.12.0 的错误做法，0.13.1 修）：0.2.2-alpha.2 的
-     * 图标已改为 **sprite 复用**，官方组件长这样（见已安装 app bundle 的工厂函数）：
-     *
-     *   <svg data-icon="dsw-icon-branch-outline-regular" aria-hidden="true">
-     *     <use href="#dsw-icon-branch-outline-regular"/>
-     *   </svg>
-     *
-     * DOM 里**根本没有 `<path>`**，`M13.0762…` 在整个已安装 dsh 里 0 次命中。
-     * 唯一稳定的是 `data-icon` 的 id：`dsw-icon-${name}-${size}`（工厂 `Qv`），
-     * name 来自 ui-primitives 的图标表，属契约级常量。
-     *
-     * 我们自己的分叉按钮也故意用同一图标，所以必须按 class 显式排除。
-     *
-     * @param btn - 候选按钮（任意元素；非 button 的宿主节点返回 false）
-     * @returns 是否官方 branch 按钮
-     */
-    const HOST_BRANCH_ICON_ID = 'dsw-icon-branch-outline-regular'
-    const HOST_BRANCH_CLASS = 'mopsUserFork'
-    function isHostBranchButton(btn) {
-      if (!btn || typeof btn.querySelector !== 'function') return false
-      const cls = String((btn.classList && btn.classList.value) || btn.className || '')
-      if (cls.split(/\s+/).includes(HOST_BRANCH_CLASS)) return false
-      // 首选 sprite 形态：<svg data-icon="dsw-icon-branch-outline-regular">
-      const svg = btn.querySelector('svg')
-      if (svg && svg.getAttribute('data-icon') === HOST_BRANCH_ICON_ID) return true
-      // 兼容旧宿主的内联 path 形态（0.2.0-rc.x）：仍接受官方几何前缀
-      const path = btn.querySelector('svg path')
-      const d = path ? path.getAttribute('d') || '' : ''
-      return d.startsWith(HOST_BRANCH_D_PREFIX)
-    }
-
-    /** 旧宿主的内联 path 几何前缀（仅作兼容回退，不是主判据）。 */
-    const HOST_BRANCH_D_PREFIX = 'M13.0762 1.37207'
-
-    /**
-     * 把文本预置成某个会话的草稿（新会话刚 fork 出来时输入框是空的）。
-     *
-     * 为什么直接写 localStorage 而不是 `inputActions.setDraft`：fork 出来的是一个**还没
-     * 挂载**的会话，此刻 `inputActions` 仍绑定在源会话上；宿主挂载新会话时会用
-     * `readConversationDraft(sessionId)` 从 localStorage 初始化编辑器。所以**先落盘再
-     * openSession** 才是无竞态的路径（`{ draft: '<text>' }` 是宿主 `parseStoredDraft`
-     * 支持的字符串形态，见 dsh-client-ui-conversation:4455-4456）。
-     */
     function writeSessionDraft(childSessionId, text) {
       try {
         if (!childSessionId || typeof localStorage === 'undefined') return false
@@ -3463,9 +3419,24 @@ window.__ModuleLoader__.load({
           },
           icon,
         )
-      // 0.19.0（spec §9）：AI 消息动作区只留「引用」。
-      // 原时钟图标 = runRevert（回滚到此条），与用户消息回撤重复，用户要求删除。
-      return act(React.createElement(IconQuote, { size: 16 }), t('slot.quote'), 'quote', runQuote, false)
+      // 0.23.0：AI 消息动作区**不再注入任何按钮**。
+      //
+      // 用户反馈：「引用不要每次把一整个上下文重新全部塞给 AI」。核查结论：
+      //   · 宿主自带完整划词引用 —— dsh-message-quotes/lib/client.js:48 调
+      //     inputActions.insertQuote(text)，注册在 conversation.chat.text-interaction
+      //     槽，只在用户选中文字（textInteraction.active !== null）时渲染，
+      //     「选中多少引多少」，从不引整条。
+      //   · 我们旧按钮用 [data-chat-node-key] 判选区，与宿主的
+      //     [data-text-interaction-source] 体系不匹配 → 高频判不出选区 →
+      //     退化成 clipQuote(fullText) 把 600 字塞进 composer。
+      //   · 而 deriveMessages() 本就遍历 surface.nodes 给出完整历史，
+      //     引用当前会话里未被遮蔽的消息 = 同一内容在 prompt 里出现两遍，纯冗余。
+      // 所以正确做法是让位给宿主，不再重复造轮子。
+      //
+      // ⚠️ 本组件**必须保留**：它负责捕获 inputActions 到 __inputActions
+      //（编辑框 / 面板 / 行内回填都依赖），删组件会让这些功能静默失效。
+      // 只 return null，不删注册。
+      return null
     }
 
     // 0.4.2 引入（恢复的标记自动离开活跃列表 = opencode clear 语义）。
@@ -3608,8 +3579,12 @@ window.__ModuleLoader__.load({
               // 0.5.2（P2）：标题口径 = 标记 range 内 visible=false 的去重 seq 数
               const seen = new Set()
               for (const mk of act) {
-                const start = mk.range && typeof mk.range.start === 'number' ? mk.range.start : mk.seq
-                const end = mk.range && typeof mk.range.end === 'number' ? mk.range.end : start
+                // 0.23.0（深挖 S-2）：服务端 buildDerived 用 readReplaceOp 把 range
+                // 覆盖成 {startSeq,endSeq}，而旧代码只读 {start,end} → 计数恒为 0。
+                // 两种形状都兼容，并防御旧缓存里仍是 {start,end} 的情况。
+                const rng = mk.range || {}
+                const start = Number.isSafeInteger(rng.startSeq) ? rng.startSeq : Number.isSafeInteger(rng.start) ? rng.start : mk.seq
+                const end = Number.isSafeInteger(rng.endSeq) ? rng.endSeq : Number.isSafeInteger(rng.end) ? rng.end : start
                 for (const m of msgs) {
                   if (m && m.visible === false && typeof m.seq === 'number' && m.seq >= start && m.seq <= end) seen.add(m.seq)
                 }
@@ -4162,11 +4137,7 @@ window.__ModuleLoader__.load({
         // 0.18.0/0.20.0：三种按钮各有自己的提示文案（编辑按钮不能写 revert 的 hint）
         // 0.21.0：回滚按钮统一用「带隐私提示」的 title —— syncEnabled 会在
         // 注入后重设 title，若这里仍用 slot.revert 会覆盖掉 ensureBtn 里的隐私提示。
-        const hintKey = btn.classList.contains('mopsUserFork')
-          ? 'slot.forkHint'
-          : btn.classList.contains('mopsUserEdit')
-            ? 'slot.editHint'
-            : 'slot.revertPrivacyHint'
+        const hintKey = btn.classList.contains('mopsUserEdit') ? 'slot.editHint' : 'slot.revertPrivacyHint'
         const ok = block.getAttribute('data-mops-seq')
         if (ok) {
           btn.disabled = false
@@ -4181,7 +4152,7 @@ window.__ModuleLoader__.load({
       /** 块内全部插件按钮一起同步（回滚 / 编辑 / 分叉同一动作行）。 */
       var syncBlockButtons = block => {
         if (!block || !block.querySelectorAll) return
-        for (const b of block.querySelectorAll('.mopsUserRevert, .mopsUserEdit, .mopsUserFork')) syncEnabled(block, b)
+        for (const b of block.querySelectorAll('.mopsUserRevert, .mopsUserEdit')) syncEnabled(block, b)
       }
       var assignSeqs = (sid, cache, anchors) => {
         const idx = cache && cache.idx
@@ -4281,12 +4252,15 @@ window.__ModuleLoader__.load({
                   /* keep {} */
                 }
                 if (!res.ok || !data.ok) throw new Error(data.error || 'HTTP ' + res.status)
-                notifyDone(__t('done.revert'))
+                // 0.23.0（深挖）：先回填再报成功，回填失败要让用户知道。
+                // 旧实现先 notifyDone(done.revert) 再 refillComposer 且丢弃返回值 →
+                // 用户看到「已回滚」却拿到空输入框（0.14.0 踩过的同一类静默失败）。
                 // 0.17.0（冲突 C2）：按钮路径原先漏了「立刻标遮蔽」，
                 // 导致刷新窗口内重复点击会拿已遮蔽的 seq 去 POST → 409。
                 markRowsShadowedFrom(row.seq)
-                // 0.9.6：统一回填出口 —— 这个入口原先也不回填
-                refillComposer(sid, row.seq)
+                const filled = refillComposer(sid, row.seq)
+                if (filled) notifyDone(__t('done.revert'))
+                else notifyDone(__t('done.revertNoRefill'), 'warn')
                 emitChanged()
                 try {
                   if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(sid)
@@ -4309,119 +4283,6 @@ window.__ModuleLoader__.load({
               })
           })
       }
-      /**
-       * 0.12.0 用户消息「从此条分叉」：非破坏操作，源会话一字不动。
-       *
-       * opencode 语义 = 复制此条**之前**的对话到一个新会话，并把此条原文放回
-       * 新会话的输入框，让用户改完再发。因此这里要三步：
-       *   1. 解析 seq（点击当下可能还没打标 → 先 ensureAssign 再 fetchRows）
-       *   2. 取该条用户消息的**原文**（列表只携带 snippet，长度会被截断）
-       *   3. fork(boundary = seq - 1) → 把原文写进子会话草稿 → 打开子会话
-       */
-      var runUserFork = (btn, block) => {
-        const sid = __currentSessionId
-        if (!sid) return
-        btn.disabled = true
-        Promise.resolve()
-          .then(() => ensureAssign(sid))
-          .then(() => fetchRows(sid))
-          .then(async cache => {
-            const rows = cache && cache.rows
-            const seq = Number(block.getAttribute('data-mops-seq'))
-            const row = rows && rows.find(r => r.seq === seq)
-            if (!row) {
-              notifyDone(__t('errorPrefix') + __t('slot.revertUnmatched'), 'error')
-              return
-            }
-            if (!(seq > 0)) {
-              notifyDone(__t('slot.forkUnavailable'), 'warn')
-              return
-            }
-            let text = typeof row.fullText === 'string' ? row.fullText : ''
-            if (!text) {
-              try {
-                const res = await fetch(
-                  '/api/message-ops/text?sessionId=' + encodeURIComponent(bareSessionId(sid)) + '&seq=' + encodeURIComponent(seq),
-                )
-                const data = res.ok ? await res.json().catch(() => null) : null
-                if (data && data.ok && typeof data.text === 'string') text = data.text
-              } catch {
-                /* 取全文失败：分叉照做，只是输入框留空 */
-              }
-            }
-            const childId = await forkFromUserMessage(sid, seq, text, row.turnStartSeq)
-            notifyDone(__t('slot.forkDone', { id: String(childId || '') }))
-            if (childId) openSessionById(childId)
-          })
-          .catch(reason => {
-            notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
-          })
-          .finally(() => {
-            btn.disabled = false
-          })
-      }
-
-      var ensureBtn = block => {
-        // 官方动作行（含 Copy）：把按钮放到这一行里，与 Copy 同级
-        let host = block.querySelector('[class*="xzv4MW_actions"]')
-        if (!host) {
-          host = document.createElement('div')
-          host.className = 'mopsUserActionsRow'
-          block.appendChild(host)
-        }
-        let btn = host.querySelector('.mopsUserRevert')
-        if (btn) return btn
-        btn = document.createElement('button')
-        btn.type = 'button'
-        btn.className = 'mopsUserRevert'
-        // 0.21.0：行内回滚按钮不经过面板确认框，隐私告知必须挂在这里（hover 可见）
-        btn.title = __t('slot.revertPrivacyHint')
-        btn.setAttribute('aria-label', __t('slot.revert'))
-        btn.innerHTML =
-          '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9" stroke="currentColor" stroke-width="1.2"/><path d="M2.2 2.8v3h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
-        btn.addEventListener('click', e => {
-          e.preventDefault()
-          e.stopPropagation()
-          if (btn.disabled) return
-          runUserRevert(btn, block)
-        })
-        host.appendChild(btn)
-        // 0.9.7（P2-1）：新按钮按块的**当前**打标状态立刻同步一次。
-        // 门控之后 assignSeqs 可能被跳过（签名未变），靠这里保证「宿主重建了
-        // 动作行 → 按钮重新挂上」这种情况仍然是 disabled/title 正确的。
-        syncEnabled(block, btn)
-        return btn
-      }
-
-      /** 0.12.0 分叉按钮：与回滚按钮**同一动作行**（opencode 把 fork 放在 copy/undo 同组）。 */
-      var ensureForkBtn = block => {
-        let host = block.querySelector('[class*="xzv4MW_actions"]')
-        if (!host) {
-          host = document.createElement('div')
-          host.className = 'mopsUserActionsRow'
-          block.appendChild(host)
-        }
-        const existing = host.querySelector('.mopsUserFork')
-        if (existing) return existing
-        const btn = document.createElement('button')
-        btn.type = 'button'
-        btn.className = 'mopsUserFork'
-        btn.title = __t('slot.forkHint')
-        btn.setAttribute('aria-label', __t('slot.fork'))
-        // 官方 IconBranchOutline16 的 1:1 路径（packages/client/ui-primitives/src/icons/index.tsx:149）
-        btn.innerHTML =
-          '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="none"><path fill="currentColor" fill-rule="evenodd" clip-rule="evenodd" d="M13.0762 1.37207C14.0846 1.37228 14.9021 2.19077 14.9023 3.19922C14.9022 4.20772 14.0847 5.02518 13.0762 5.02539C12.2967 5.02539 11.6325 4.53691 11.3701 3.84961H4.35547C4.79397 4.26458 5.15861 4.7644 5.41699 5.33496L7.10645 9.06738C7.88526 10.7875 9.55104 11.9228 11.4189 12.0371C11.7085 11.4109 12.3411 10.9756 13.0762 10.9756C14.0843 10.9759 14.9023 11.7936 14.9023 12.8018C14.9023 13.81 14.0843 14.6277 13.0762 14.6279C12.2534 14.6279 11.5574 14.0832 11.3291 13.335C8.9868 13.1879 6.89981 11.7612 5.92285 9.60352L4.23242 5.87109C3.67503 4.64033 2.44878 3.84961 1.09766 3.84961V2.54883C1.10665 2.54883 1.11601 2.54975 1.125 2.5498L11.3701 2.54883C11.6326 1.86151 12.2969 1.37207 13.0762 1.37207ZM13.0762 12.2764C12.7858 12.2764 12.5508 12.5114 12.5508 12.8018C12.5508 13.0921 12.7858 13.3281 13.0762 13.3281C13.3664 13.3279 13.6025 13.092 13.6025 12.8018C13.6025 12.5115 13.3664 12.2766 13.0762 12.2764ZM13.0762 2.67285C12.7855 2.67285 12.55 2.90861 12.5498 3.19922C12.5499 3.48987 12.7855 3.72559 13.0762 3.72559C13.3667 3.72538 13.6024 3.48975 13.6025 3.19922C13.6023 2.90874 13.3666 2.67306 13.0762 2.67285Z"/></svg>'
-        btn.addEventListener('click', e => {
-          e.preventDefault()
-          e.stopPropagation()
-          if (btn.disabled) return
-          runUserFork(btn, block)
-        })
-        host.appendChild(btn)
-        syncEnabled(block, btn)
-        return btn
-      }
-
       /**
        * 0.20.0 铅笔编辑按钮：与回滚**同一动作行**，插在回滚与分叉之间。
        *
@@ -4506,12 +4367,46 @@ window.__ModuleLoader__.load({
       }
 
       // 三个按钮的顺序由 DOM 顺序决定：回滚在前（破坏性更高），编辑居中，分叉最后（非破坏）。
+      var ensureBtn = block => {
+        // 官方动作行（含 Copy）：把按钮放到这一行里，与 Copy 同级
+        let host = block.querySelector('[class*="xzv4MW_actions"]')
+        if (!host) {
+          host = document.createElement('div')
+          host.className = 'mopsUserActionsRow'
+          block.appendChild(host)
+        }
+        let btn = host.querySelector('.mopsUserRevert')
+        if (btn) return btn
+        btn = document.createElement('button')
+        btn.type = 'button'
+        btn.className = 'mopsUserRevert'
+        // 0.21.0：行内回滚按钮不经过面板确认框，隐私告知必须挂在这里（hover 可见）
+        btn.title = __t('slot.revertPrivacyHint')
+        btn.setAttribute('aria-label', __t('slot.revert'))
+        btn.innerHTML =
+          '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9" stroke="currentColor" stroke-width="1.2"/><path d="M2.2 2.8v3h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+        btn.addEventListener('click', e => {
+          e.preventDefault()
+          e.stopPropagation()
+          if (btn.disabled) return
+          runUserRevert(btn, block)
+        })
+        host.appendChild(btn)
+        // 0.9.7（P2-1）：新按钮按块的**当前**打标状态立刻同步一次。
+        // 门控之后 assignSeqs 可能被跳过（签名未变），靠这里保证「宿主重建了
+        // 动作行 → 按钮重新挂上」这种情况仍然是 disabled/title 正确的。
+        syncEnabled(block, btn)
+        return btn
+      }
+
       var ensureUserActions = block => {
         // 0.20.0：铅笔回归，但语义变了 —— 独立编辑框 + 点「发送并回撤」才写，
         // 不再是 0.18.0 那种「只回填 composer」的伪编辑。
+        // 0.23.0：行内 fork 按钮已删 —— dsh 官方在 AI 回合尾部已有
+        // sessions.fork（conversation.chat.assistant-actions / TurnTailNodeView）。
+        // 分叉能力统一由官方按钮 + 面板 branch（同样走官方 sessions.fork）承担。
         ensureBtn(block)
         ensureEditBtn(block)
-        ensureForkBtn(block)
       }
       // 0.9.7（P0-2 读合并）：把 150/700/1600ms 三档并成**一次**真网络请求，
       // 落点 = 本 burst 第一档 + 1500ms ≈ 原来的 1600ms 那一档。
@@ -4553,7 +4448,6 @@ window.__ModuleLoader__.load({
           if (!sid) return
           const blocks = userAnchors()
           for (const b of blocks) ensureUserActions(b)
-          suppressHostBranch()
           // 0.9.1：**始终**刷新（原先只在按钮未打标时刷）——
           // 打标后 transcript 再变化（openSession 重建 / 分页 / restore 重放）
           // 就再也不会重算隐藏，导致「界面停在旧状态，必须重载页面才对」。
@@ -4562,33 +4456,6 @@ window.__ModuleLoader__.load({
           /* 注入失败不影响会话 */
         }
       }
-      /**
-       * 0.12.0 隐藏官方 assistant turn-tail 上的 branch 按钮。
-       *
-       * 产品决定：分叉只属于**用户消息**（opencode 语义 —— fork 的目的是「这句话说错了，
-       * 拿回输入框重说」，AI 消息没有可回填的原文，分叉出去只会得到一个半截对话）。
-       * 官方把 branch 画在 MessageIconActions 里，与 copy 同一行；官方没有开关
-       * （ui-chat 的 Config 只有折叠/性能/链接几项），所以只能在渲染层隐藏。
-       *
-       * 识别方式不用 aria-label（8 种语言各不同），也不用哈希 class，而用
-       * **图标路径前缀**：官方 IconBranchOutline16 的 d 是固定字符串
-       * （packages/client/ui-primitives/src/icons/index.tsx:149）。作用域限定在
-       * `[data-turn-tail]`（官方 TurnTailNodeView 渲染的稳定属性），
-       * 并排除我们自己注入的 .mopsUserFork（它复用同一 path）。
-       */
-      var suppressHostBranch = () => {
-        let hidden = 0
-        for (const btn of document.querySelectorAll('[data-turn-tail] button')) {
-          if (!isHostBranchButton(btn)) continue
-          hidden++
-          if (btn.getAttribute('data-mops-host-branch') !== 'hidden') {
-            btn.setAttribute('data-mops-host-branch', 'hidden')
-            btn.style.display = 'none'
-          }
-        }
-        return hidden
-      }
-
       // 触发：hover / 滚动 / DOM 变化 / 变更事件
       document.addEventListener(
         'mouseover',
@@ -4700,11 +4567,11 @@ window.__ModuleLoader__.load({
             //     （宿主 .xzv4MW_actions 已定 height:28px，改小会撑裂行高）。
             //   · 无淡入动画（opencode 源码注释明写 "Hover actions show and hide
             //     at once, without a fade"）—— 显隐完全交给宿主 [data-actions-reveal]。
-            '.mopsUserRevert,.mopsUserEdit,.mopsUserFork{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;border-radius:4px;background:transparent;color:var(--dsw-alias-label-tertiary,#808080);cursor:pointer;padding:0;flex:none}',
-            '.mopsUserRevert svg,.mopsUserEdit svg,.mopsUserFork svg{width:14px;height:14px;display:block}',
-            '.mopsUserRevert:hover,.mopsUserEdit:hover,.mopsUserFork:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));color:var(--dsw-alias-label-secondary,#6b6b70)}',
-            '.mopsUserRevert:disabled,.mopsUserEdit:disabled,.mopsUserFork:disabled{opacity:.4;cursor:default;background:transparent}',
-            '.mopsUserRevert:focus-visible,.mopsUserEdit:focus-visible,.mopsUserFork:focus-visible{outline:2px solid var(--dsw-alias-border-l2,#b8b8b8);outline-offset:1px}',
+            '.mopsUserRevert,.mopsUserEdit{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:none;border-radius:4px;background:transparent;color:var(--dsw-alias-label-tertiary,#808080);cursor:pointer;padding:0;flex:none}',
+            '.mopsUserRevert svg,.mopsUserEdit svg{width:14px;height:14px;display:block}',
+            '.mopsUserRevert:hover,.mopsUserEdit:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));color:var(--dsw-alias-label-secondary,#6b6b70)}',
+            '.mopsUserRevert:disabled,.mopsUserEdit:disabled{opacity:.4;cursor:default;background:transparent}',
+            '.mopsUserRevert:focus-visible,.mopsUserEdit:focus-visible{outline:2px solid var(--dsw-alias-border-l2,#b8b8b8);outline-offset:1px}',
             // 0.18.0：用户反馈「点时间图标也会回撤」——根因不是绑定错误，而是
             // 我们的按钮被 appendChild 到宿主 .actions 行末尾，而该行在
             // data-clock="start"（用户消息）时第一个子元素就是**时间文本**：
@@ -5237,10 +5104,7 @@ window.__ModuleLoader__.load({
       __test: {
         activityTransition,
         forkBoundaryBefore,
-        isHostBranchButton,
         writeSessionDraft,
-        HOST_BRANCH_ICON_ID,
-        HOST_BRANCH_D_PREFIX,
         // 0.20.0：编辑并重发的编排层（可注入 deps 真执行断言时序）
         sendEditAndRevert,
         submitEditedText,
