@@ -71,3 +71,29 @@ DSH 是 append-only，回撤只 append `surfaceOp: replace` marker，**原文仍
 官方 `TurnTailNodeView` 的 `MessageIconActions` 本就有 `sessions.fork`
 分支按钮。0.12 起我们把它藏了（`suppressHostBranch`）又自己造行内 fork，
 是重复造轮子。**已删抑制 + 删行内 fork，恢复官方按钮。不恢复行内 fork。**
+
+---
+
+## D-6 · 铅笔可用性验证方法（避免再次误判）
+
+2026-11-14 实测，可见性结论如下（真实 Chromium，会话
+`session-62374e92-e411-4190-9692-22da9a3abd0b`）：
+
+```
+9 个 user row，其中 6 个 hidden="until-found"（历史折叠，height 0）、3 个可见
+3 个可见 row 全部 edit:true / revert:true
+铅笔计算样式：opacity:1, visibility:visible, display:flex, 28x28
+```
+
+### ⚠️ 探针陷阱（曾导致误判"铅笔坏了"）
+
+1. **`document.querySelector('.mopsUserEdit')` 会命中折叠行里的按钮**
+   → `getBoundingClientRect()` 返回 `height:0` → 误判"按钮不可见"。
+   正确做法：先 `filter(x => x.getBoundingClientRect().height > 0)` 筛可见 row，
+   再从**可见 row 内部**取按钮。
+2. **Playwright 的 `.first()` 同样命中折叠行** → `click()` 报
+   "element is not visible"。必须用页面内 `evaluate` 精确选可见行的按钮。
+3. **会话加载有延迟**：不等待就查会得到 `total:0`（插件还没注入）。
+   必须等 `[data-chat-flow-kind="user"]` 出现 + 额外 settle。
+
+**结论：铅笔从未损坏。之前所有"点不到"的报错都是探针选择器问题。**
