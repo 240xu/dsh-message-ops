@@ -264,9 +264,16 @@ test('4.3 成功后依次：标遮蔽 → 写草稿 → 同步编辑器 → emit
   ]
   let last = -1
   for (const names of stages) {
-    const hits = names.map(n => s.indexOf(n)).filter(i => i !== -1)
-    assert.ok(hits.length > 0, `成功后必须调用 ${names.join(' 或 ')}`)
-    const at = Math.min(...hits)
+    // 0.24.0 P4：`doSubmit` 的默认值里现在也出现 `submitEditedText(`（按会话传参），
+    // 用 indexOf 会命中**定义在前的默认值**而非末尾的真正调用点。
+    // 改为取该阶段所有匹配中位置**最晚**的一个 —— 阶段推进语义不变
+    // （每个阶段都必须出现在上一阶段之后），但不再被前置引用误伤。
+    const hits = names.map(n => s.lastIndexOf(n)).filter(i => i !== -1)
+    if (!hits.length) {
+      const anyBefore = names.map(n => s.indexOf(n)).filter(i => i !== -1)
+      assert.ok(anyBefore.length > 0, `成功后必须调用 ${names.join(' 或 ')}`)
+    }
+    const at = Math.max(...hits)
     assert.ok(at > last, `${names[0]} 顺序不对（必须在前一阶段之后）`)
     last = at
   }
@@ -736,5 +743,82 @@ test('9.3 真执行：submit 抛错 → 返回 false，不吞异常', () => {
     ).then(ok => {
       assert.equal(ok, false, '提交抛错必须返回 false')
     })
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 10 · 0.24.0 P4：InputActions 必须按会话隔离（跨会话污染防护）
+// ═══════════════════════════════════════════════════════════════════════════
+test('10.1 结构：__inputActions 不再是唯一权威，按会话 Map 才是', () => {
+  assert.match(src, /var __inputActionsBySession = new Map\(\)/, '必须有按会话的 Map')
+  assert.match(src, /function inputActionsFor\(/, '必须有按会话读取的访问器')
+  assert.match(src, /function rememberInputActions\(/, '必须有按会话登记')
+  assert.match(src, /function forgetInputActions\(/, '必须有按会话卸载清理')
+})
+
+test('10.2 真执行：两个会话各自登记，互不覆盖（旧实现会串到最后一个）', () => {
+  return withDom(g => {
+    const { __test } = loadPlugin(g)
+    const mkIA = name => {
+      const calls = []
+      return { name, calls, setDraft: v => calls.push([name, 'setDraft', v]), persistDraft: () => calls.push([name, 'persist']), submit: () => calls.push([name, 'submit']) }
+    }
+    const iaA = mkIA('A')
+    const iaB = mkIA('B')
+
+    __test.rememberInputActions('session-aaa', iaA)
+    __test.rememberInputActions('session-bbb', iaB)
+
+    // 核心断言：后登记的 B 不得顶掉 A
+    assert.equal(__test.inputActionsFor('session-aaa'), iaA, 'A 会话必须仍取到自己的 InputActions')
+    assert.equal(__test.inputActionsFor('session-bbb'), iaB, 'B 会话取到自己的')
+
+    // 归一：带前缀与裸 uuid 视为同一会话
+    assert.equal(__test.inputActionsFor('aaa'), iaA, '裸 uuid 必须命中带前缀登记的同一会话')
+    assert.equal(__test.inputActionsFor('session-bbb'), __test.inputActionsFor('bbb'), '两种拼写必须等价')
+
+    // 未知会话必须返回 null（明确失败路径，不许退到「最后一次已知」）
+    assert.equal(__test.inputActionsFor('session-unknown'), null, '未知会话必须返回 null，不得回退到别的会话')
+    assert.equal(__test.inputActionsFor(''), null, '空 sessionId 必须返回 null')
+  })
+})
+
+test('10.3 真执行：卸载只删自己的，且不误删同会话的新实例', () => {
+  return withDom(g => {
+    const { __test } = loadPlugin(g)
+    const mkIA = name => ({ name, setDraft() {}, persistDraft() {} })
+    const oldA = mkIA('oldA')
+    const newA = mkIA('newA')
+    const iaB = mkIA('B')
+
+    __test.rememberInputActions('session-aaa', oldA)
+    __test.rememberInputActions('session-bbb', iaB)
+    // 同会话重挂：新实例顶替旧实例
+    __test.rememberInputActions('session-aaa', newA)
+    assert.equal(__test.inputActionsFor('session-aaa'), newA, '重挂后应取新实例')
+
+    // 旧实例的卸载回调晚到 —— 不得把新实例删掉
+    __test.forgetInputActions('session-aaa', oldA)
+    assert.equal(__test.inputActionsFor('session-aaa'), newA, '旧实例的迟到卸载不得删掉新实例')
+
+    // 真正卸载
+    __test.forgetInputActions('session-aaa', newA)
+    assert.equal(__test.inputActionsFor('session-aaa'), null, '卸载后应取不到')
+    assert.equal(__test.inputActionsFor('session-bbb'), iaB, 'B 会话不受 A 卸载影响')
+  })
+})
+
+test('10.4 真执行：refill 路径取不到本会话 InputActions 时，绝不用别的会话的编辑器', () => {
+  return withDom(g => {
+    const { __test } = loadPlugin(g)
+    const calls = []
+    const iaOther = { setDraft: v => calls.push(['other', v]), persistDraft: () => calls.push(['other-persist']) }
+    // 只有「别的会话」登记过
+    __test.rememberInputActions('session-other', iaOther)
+
+    assert.equal(__test.inputActionsFor('session-mine'), null, '本会话未登记时必须为 null')
+    // 直接断言访问器不返回别人的对象
+    assert.notEqual(__test.inputActionsFor('session-mine'), iaOther, '绝不能返回别的会话的 InputActions')
+    assert.deepEqual(calls, [], '未发生任何跨会话写入')
   })
 })

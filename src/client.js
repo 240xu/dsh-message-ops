@@ -9,7 +9,8 @@ window.__ModuleLoader__.load({
   factory: require => {
     const React = require('react')
     const { useCallback, useEffect, useRef, useState } = React
-    const { Modal } = require('@deepseek-ai/dsh-client-ui-primitives')
+    // 0.24.0：不再 require('@deepseek-ai/dsh-client-ui-primitives') 的 Modal ——
+    // 唯一使用者 OpsDialog 已删；面板/编辑框都是自绘浮层。
 
     const SLOT = 'conversation.session.header.actions'
     const ROW_ID = 'message-ops'
@@ -114,23 +115,7 @@ window.__ModuleLoader__.load({
       'button.title': '消息操作（回滚/删除/分支）',
       'dialog.title': '消息操作',
       'dialog.cancel': '关闭',
-      'dialog.loading': '正在读取消息列表…',
-      'dialog.loadFail': '消息列表读取失败：',
-      'dialog.empty': '该会话没有可操作的消息。',
-      'dialog.session': '会话：',
       'dialog.runningWarn': '⚠ 会话正在运行：请先停止该会话再执行回滚/删除/分支。',
-      'dialog.pick': '选择一条消息：',
-      'dialog.pickFirst': '第 1 步 · 在下方选择一条消息，第 2 步在这里选择操作。',
-      'dialog.pickedAs': '已选 #{seq} · {text}',
-      'dialog.invisible': '（已遮蔽，仅日志可见）',
-      'dialog.showMore': '显示更多（剩余 {n} 条）',
-      'dialog.more': '…（仅显示最近 200 条，共 {n} 条）',
-      'op.revert': '回撤到此条及之后',
-      'op.revertDesc': '把这条及之后的对话从 AI 可见内容里隐藏；原文仍保留，可以放回。',
-      'op.delete': '遮蔽此条',
-      'op.deleteDesc': '仅遮蔽所选的一条消息；其余内容保持不变。',
-      'op.branch': '从此条分叉为新会话',
-      'op.branchDesc': '把此条之前的对话复制到新会话，并把此条原文放回新会话输入框（原会话不变，非破坏操作）。',
       'slot.revert': '回滚到此条',
       'slot.revertPrivacyHint': '回滚到此条（不是删除：AI 看不到，但原文仍在本地会话文件）',
       'slot.revertUnmatched': '在日志里定位不到这条消息的 seq（通常是模型写的摘要与渲染文本偏差过大）——请改用「消息操作」对话框。',
@@ -138,12 +123,14 @@ window.__ModuleLoader__.load({
       'slot.forkHint': '复制此条之前的对话到新会话，并把此条原文放回新会话输入框',
       'slot.forkDone': '已分叉：新会话 {id}',
       'slot.forkUnavailable': '分叉不可用：会话正在运行，或宿主未提供 session/fork',
-      // 0.20.0：铅笔编辑框（用户消息动作行）。语义 = 先回撤再发，不是「只回填」。
-      'slot.edit': '编辑并重发',
-      'slot.editHint': '打开编辑框；点「发送并回撤」时才回撤此条及其后内容，再发出改后的文本',
+      // 0.24.0（P3 入口收敛）：改名消除与外部插件 message-edit 的「同名不同义」。
+      // 外部插件在 turnTail 也叫「编辑并重发」，但它 fork 出新分支、源会话不动；
+      // 我们（铅笔）是**回撤源会话**再重发。同名让用户无法预判后果，故显式写出「回撤」。
+      'slot.edit': '编辑并回撤重发',
+      'slot.editHint': '打开编辑框；点「发送并回撤」会回撤此条及之后的全部可见消息，再把改后文本当新消息发出',
       'slot.editNoText': '这条消息没有可编辑的文本',
       'slot.editUnmatched': '在日志里定位不到这条消息的 seq，暂时无法编辑',
-      'edit.title': '编辑并重发',
+      'edit.title': '编辑并回撤重发',
       'edit.subtitle': '这条消息 · seq #{seq}',
       'edit.loading': '正在读取原文…',
       'edit.loadFail': '原文读取失败：',
@@ -163,16 +150,8 @@ window.__ModuleLoader__.load({
       'toast.openNew': '打开新会话',
       'fork.official': '分支完成：新会话 {id}',
       'fork.unavailable': '官方分支不可用：通常是因为会话正在运行，请先停止会话后重试。分支功能由 dsh 内置的 session/fork 提供。',
-      'ack.revert': '我已了解：回滚会遮蔽所选消息及其后的全部内容',
-      'ack.delete': '我已了解：将遮蔽这一条消息（日志中仍保留）',
-      'confirm.revert': '回滚',
-      'confirm.delete': '删除',
-      'confirm.branch': '分支',
-      'busy.revert': '回滚中…',
-      'busy.delete': '删除中…',
-      'busy.branch': '分支中…',
       'done.restore': '恢复完成：重放 {n} 条，跳过不可重放 {s} 条',
-      'done.revert': '已回滚（原文仍保留在本地会话文件，可被恢复）；刷新页面后生效',
+      'done.revert': '已回滚，原文可从恢复区放回',
       'done.revertNoRefill': '已回滚，但原文未能放回输入框（会话可能尚未挂载）；可重试或从消息操作面板手动复制',
       'done.delete': '已遮蔽，刷新页面后生效',
       'action.reload': '刷新页面',
@@ -218,12 +197,10 @@ window.__ModuleLoader__.load({
       'panel.revert': '回滚到此条',
       'panel.revertHint': '包含此条及其后的可见消息',
       'panel.revertConfirmTitle': '回滚到 #{seq}？',
-      'panel.revertConfirmBody': '将遮蔽 #{start}–#{end} 的 {n} 条消息，其中可见 {v} 条；日志仍保留，可恢复。',
-      // 0.21.0：隐私预期落差修正。回撤不是「删除」，别让用户以为内容消失了。
-      // 实测（design-demos/revert-data-semantics.md）：AI 看不到（模型只读 surface.nodes），
-      // 但被回撤消息的原文仍逐字留在本地 session.v4.jsonl.zstd 里，翻文件拿得到。
-      'panel.revertPrivacyNote':
-        '注意：这不是删除。AI 将看不到这些消息，但原文仍完整保留在本地会话文件中，可被恢复；直接翻看会话文件仍能读到。',
+      // 0.23.0：隐私告知并入确认正文（原 body 37 字 + privacy 56 字 = 93 字，合并后 55 字）。
+      // 告知内容一条没少：AI 看不到 / 原文仍在本地文件 / 可恢复。只是不再分两层说。
+      'panel.revertConfirmBody':
+        '将遮蔽 #{start}–#{end} 共 {n} 条消息（可见 {v} 条）。AI 将看不到它们，但原文仍保留在本地会话文件、可恢复。',
       'panel.deleteConfirmTitle': '仅删除 #{seq}？',
       'panel.deleteConfirmBody': '将遮蔽这 1 条消息，其他内容不动；日志仍保留，可恢复。',
       'panel.confirmRevert': '确认回滚',
@@ -267,25 +244,7 @@ window.__ModuleLoader__.load({
       'button.title': 'Message ops (revert / delete / branch)',
       'dialog.title': 'Message ops',
       'dialog.cancel': 'Close',
-      'dialog.loading': 'Loading messages…',
-      'dialog.loadFail': 'Failed to load messages: ',
-      'dialog.empty': 'No operable messages in this session.',
-      'dialog.session': 'Session: ',
       'dialog.runningWarn': '⚠ Session is running: stop it before revert / delete / branch.',
-      'dialog.pick': 'Pick a message:',
-      'dialog.pickFirst': 'Step 1 · pick a message below, then choose an operation here.',
-      'dialog.pickedAs': 'Selected #{seq} · {text}',
-      'dialog.invisible': ' (shadowed, log-only)',
-      'dialog.showMore': 'Show more ({n} older)',
-      'dialog.more': '…(showing latest 200 of {n})',
-      'op.revert': 'Revert to here',
-      'op.revertDesc':
-        'Shadows the picked message and all later visible content; the log stays append-only so context can be restored by re-sending.',
-      'op.delete': 'Hide this message',
-      'op.deleteDesc': 'Shadows only the picked message; everything else stays.',
-      'op.branch': 'Fork into a new session from here',
-      'op.branchDesc':
-        'Copies the conversation above the picked message into a new session and puts this message back in the new composer (original untouched, non-destructive).',
       'slot.revert': 'Revert to here',
       'slot.revertPrivacyHint': 'Revert to here (not deletion: hidden from the AI, but the original text stays in the local session file)',
       'slot.revertUnmatched':
@@ -294,12 +253,16 @@ window.__ModuleLoader__.load({
       'slot.forkHint': 'Copies the conversation above this message into a new session and puts this message back in the new composer',
       'slot.forkDone': 'Branched: new session {id}',
       'slot.forkUnavailable': 'Branch unavailable: the session is running, or the host provides no session/fork',
-      // 0.20.0: pencil edit overlay on the user-message action row (revert-then-send).
-      'slot.edit': 'Edit and resend',
-      'slot.editHint': 'Opens the editor; nothing is reverted until you press "Send and revert"',
+      // 0.24.0 (P3): renamed to disambiguate from the third-party message-edit plugin,
+      // which also says "Edit and resend" but forks a NEW branch and leaves the source
+      // session untouched. This one REVERTS the source session. Same words, opposite
+      // consequences — so the revert is now spelled out in the label itself.
+      'slot.edit': 'Edit & revert-resend',
+      'slot.editHint':
+        'Opens the editor. Pressing "Send and revert" reverts this message and every visible message after it, then sends the edited text as a new message.',
       'slot.editNoText': 'This message has no text to edit',
       'slot.editUnmatched': 'Cannot locate this message seq in the log, so it cannot be edited yet',
-      'edit.title': 'Edit and resend',
+      'edit.title': 'Edit & revert-resend',
       'edit.subtitle': 'This message · seq #{seq}',
       'edit.loading': 'Loading the original text…',
       'edit.loadFail': 'Could not load the original text: ',
@@ -320,16 +283,8 @@ window.__ModuleLoader__.load({
       'fork.official': 'Branched (official fork): new session {id}',
       'fork.unavailable':
         'Built-in branch unavailable — usually because the session is running. Stop it and retry. Branching is provided by the dsh built-in session/fork.',
-      'ack.revert': 'I understand: revert shadows the picked message and everything after it',
-      'ack.delete': 'I understand: this message will be shadowed (kept in the log)',
-      'confirm.revert': 'Revert',
-      'confirm.delete': 'Delete',
-      'confirm.branch': 'Branch',
-      'busy.revert': 'Reverting…',
-      'busy.delete': 'Deleting…',
-      'busy.branch': 'Branching…',
       'done.restore': 'Restored: replayed {n}, skipped non-replayable {s}',
-      'done.revert': 'Reverted (original text stays in the local session file and can be restored); reload to apply',
+      'done.revert': 'Reverted — restore the original from the restore area',
       'done.revertNoRefill':
         'Reverted, but the original text could not be put back in the composer (the view may not be mounted yet); retry or copy it manually from Message Ops',
       'done.delete': 'Hidden; reload to apply',
@@ -377,9 +332,7 @@ window.__ModuleLoader__.load({
       'panel.revertHint': 'Includes this message and all visible messages after it',
       'panel.revertConfirmTitle': 'Revert to #{seq}?',
       'panel.revertConfirmBody':
-        'This shadows {n} messages (#{start}–#{end}), including {v} visible. The original text stays in the local session file and can be put back.',
-      'panel.revertPrivacyNote':
-        'Note: this is not deletion. The AI will no longer see these messages, but the original text stays in the local session file and can be recovered — reading the session file directly still reveals it.',
+        'Shadows {n} messages (#{start}–#{end}, {v} visible). The AI will no longer see them, but the original text stays in the local session file and can be restored.',
       'panel.deleteConfirmTitle': 'Delete only #{seq}?',
       'panel.deleteConfirmBody': 'This shadows this one message; everything else stays. The log stays append-only and can be restored.',
       'panel.confirmRevert': 'Confirm revert',
@@ -418,7 +371,61 @@ window.__ModuleLoader__.load({
 
     var __locale = null
     var __sessionsSvc = null
-    var __inputActions = null // 0.4.0: 从 session 槽捕获（InputActions.setDraft → composer 回填）
+    /**
+     * 0.24.0 P4：InputActions **按会话隔离**。
+     *
+     * 为什么必须隔离：宿主 `conversation.chat.assistant-actions` 槽声明
+     * `scope: "session"`（dsh-client-ui-chat:9238），且 `inputActions` 由
+     * `inputHub.shellFor(binding).actions` 提供（dsh-client-ui-conversation:22713）。
+     * `shellFor` 按 binding 缓存**独立的 SessionInputShell**（:16145-16147），
+     * 每个会话的 `.actions` 是不同对象。
+     *
+     * 旧实现用模块级单变量 `__inputActions`，写入点是 per-session 组件：
+     *   · MsgSlotActions —— 每条 AI 消息一个实例
+     *   · RevertDock      —— 每个会话一个实例
+     * 多会话同时挂载 / 切会话 / HMR 时会被**最后挂载的会话**覆盖，
+     * 于是回填、编辑框提交、dock 内联恢复都可能写进**别的会话的 composer**。
+     *
+     * 现在：`sessionId -> InputActions`。读写一律按会话取，
+     * 取不到就走**明确失败路径**，绝不静默退到别的会话。
+     */
+    var __inputActionsBySession = new Map()
+    // 兜底：仅用于**确实拿不到 sessionId** 的全局路径（如无 session 上下文的
+    // 工具调用）。任何能拿到 sessionId 的地方都必须用上面的 Map，
+    // 不允许读这个变量 —— 它是「最后一次已知」，可能属于另一个会话。
+    var __inputActions = null
+
+    /** 会话键归一：`session-x` 与 `x` 视为同一会话（宿主两种拼写都会传）。 */
+    function sessionKeyOf(sessionId) {
+      if (typeof sessionId !== 'string' || sessionId === '') return null
+      return sessionId.startsWith('session-') ? sessionId.slice('session-'.length) : sessionId
+    }
+
+    /**
+     * 按会话取 InputActions。
+     * @returns 该会话的 InputActions，或 null（调用方必须显式处理 null，不得回退到别的会话）
+     */
+    function inputActionsFor(sessionId) {
+      const key = sessionKeyOf(sessionId)
+      if (key == null) return null
+      return __inputActionsBySession.get(key) || null
+    }
+
+    /** 捕获：会话挂载时登记它自己的 InputActions。 */
+    function rememberInputActions(sessionId, inputActions) {
+      if (!inputActions || typeof inputActions.setDraft !== 'function') return
+      const key = sessionKeyOf(sessionId)
+      __inputActions = inputActions // 仅供无 sessionId 的全局兜底
+      if (key == null) return
+      __inputActionsBySession.set(key, inputActions)
+    }
+
+    /** 卸载：只在登记的仍是这一个实例时才删，避免把同会话新挂的实例删掉。 */
+    function forgetInputActions(sessionId, inputActions) {
+      const key = sessionKeyOf(sessionId)
+      if (key == null) return
+      if (__inputActionsBySession.get(key) === inputActions) __inputActionsBySession.delete(key)
+    }
     var __uiWorkspace = null
     var __currentSessionId = null
     // 0.9.1：视图重建后刷新 transcript 可见性的钩子。
@@ -481,92 +488,6 @@ window.__ModuleLoader__.load({
       color: 'var(--dsw-alias-label-tertiary, #8a8a8e)',
       cursor: 'pointer',
       flex: 'none',
-    }
-    const metaStyle = {
-      color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
-      fontSize: 13,
-      lineHeight: '20px',
-      margin: '0 0 8px',
-      overflow: 'hidden',
-      textOverflow: 'ellipsis',
-    }
-    const warnStyle = {
-      color: 'var(--dsw-alias-state-warn-primary, #f5a524)',
-      fontSize: 13,
-      lineHeight: '20px',
-      margin: '0 0 10px',
-    }
-    const errStyle = {
-      color: 'var(--dsw-alias-state-error-primary, #e5484d)',
-      fontSize: 12,
-      lineHeight: '16px',
-      marginTop: 8,
-    }
-    const statusStyle = {
-      color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
-      fontSize: 12,
-      lineHeight: '16px',
-      marginTop: 8,
-    }
-    const listStyle = {
-      maxHeight: 260,
-      overflowY: 'auto',
-      border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.35))',
-      borderRadius: 8,
-      margin: '8px 0 4px',
-      padding: '4px 0',
-    }
-    const rowStyle = {
-      display: 'flex',
-      alignItems: 'flex-start',
-      gap: 8,
-      padding: '4px 10px',
-      fontSize: 13,
-      lineHeight: '18px',
-      cursor: 'pointer',
-    }
-    const descStyle = {
-      color: 'var(--dsw-alias-label-secondary, #8a8a8e)',
-      fontSize: 12,
-      lineHeight: '17px',
-      margin: '6px 0 0',
-    }
-    const cancelBtnStyle = {
-      padding: '6px 14px',
-      borderRadius: 8,
-      border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.4))',
-      background: 'transparent',
-      color: 'var(--dsw-alias-label-primary, inherit)',
-      fontSize: 13,
-      cursor: 'pointer',
-      marginRight: 8,
-    }
-    const primaryBtnStyle = {
-      padding: '6px 14px',
-      borderRadius: 8,
-      border: 'none',
-      background: 'var(--dsw-alias-brand-primary, #4d6bfe)',
-      color: '#fff',
-      fontSize: 13,
-      cursor: 'pointer',
-    }
-    const dangerBtnStyle = {
-      padding: '6px 14px',
-      borderRadius: 8,
-      border: '1px solid var(--dsw-alias-state-error-primary, #e5484d)',
-      background: 'var(--dsw-alias-state-error-primary, #e5484d)',
-      color: '#fff',
-      fontSize: 13,
-      cursor: 'pointer',
-    }
-    const optStyle = {
-      display: 'flex',
-      alignItems: 'center',
-      gap: 8,
-      fontSize: 13,
-      lineHeight: '20px',
-      color: 'var(--dsw-alias-label-primary, inherit)',
-      marginTop: 10,
     }
 
     // 头部按钮图标：三叉分支（git-branch 风格，16x16）。
@@ -664,419 +585,6 @@ window.__ModuleLoader__.load({
           d: 'M8.97212 14.3693C9.17511 14.5723 9.37811 14.7753 9.5811 14.9783C9.67012 14.8953 9.75914 14.8123 9.84815 14.7293C11.4505 13.2352 13.0528 11.7411 14.6551 10.247C14.7441 10.164 14.8331 10.081 14.9221 9.99803C14.5989 9.6748 14.2756 9.35157 13.9524 9.02834C13.8694 9.11736 13.7864 9.20637 13.7034 9.29539C12.2093 10.8977 10.7152 12.5 9.22113 14.1023C9.13813 14.1913 9.05513 14.2803 8.97212 14.3693Z',
           fill: 'currentColor',
         }),
-      )
-    }
-
-    // --- 共享对话框 -------------------------------------------------------------
-    // 模块级缓存最近一次 target，事件驱动打开。
-    const MAX_RENDER = 200
-    const PAGE_SIZE = 50 // 低成本分批渲染：先渲 50 条，按钮渐进展开
-
-    function OpsDialog(props) {
-      const t = (props && props.t) || __t
-      useLocaleRevision()
-      const [target, setTarget] = useState(null) // {sessionId, title, running}
-      const [state, setState] = useState('idle') // idle|loading|ready|busy|done
-      const [messages, setMessages] = useState([])
-      const [sessionMeta, setSessionMeta] = useState(null)
-      const [picked, setPicked] = useState(null) // seq
-      const [mode, setMode] = useState(null) // revert|delete|branch|restore
-      const [childId, setChildId] = useState(null) // 官方 fork 成功后的子会话 id
-      const [acknowledged, setAcknowledged] = useState(false)
-      const [busyMsg, setBusyMsg] = useState('')
-      const [renderLimit, setRenderLimit] = useState(PAGE_SIZE) // 已展开的渲染条数
-      const [doneMsg, setDoneMsg] = useState('')
-      const [error, setError] = useState(null)
-
-      useEffect(() => {
-        const handler = e => {
-          const d = e && e.detail ? e.detail : {}
-          setTarget({ sessionId: d.sessionId || null, title: d.title || null, running: d.running === true })
-          setState('loading')
-          setMessages([])
-          setSessionMeta(null)
-          // 槽按钮预置：携带 seq（picked）与 mode 直接进入确认态
-          setPicked(typeof d.seq === 'number' ? d.seq : null)
-          setMode(typeof d.mode === 'string' ? d.mode : null)
-          setAcknowledged(false)
-          setError(null)
-          setDoneMsg('')
-          setRenderLimit(PAGE_SIZE)
-        }
-        window.addEventListener(EVENT, handler)
-        return () => window.removeEventListener(EVENT, handler)
-      }, [])
-
-      useEffect(() => {
-        if (state !== 'loading' || !target || !target.sessionId) return
-        let cancelled = false
-        fetchMessagesJson('/api/message-ops/messages?sessionId=' + encodeURIComponent(target.sessionId))
-          .then(data => {
-            if (cancelled) return
-            if (!data || !data.ok) throw new Error(data && data.error ? data.error : `HTTP ${data && data.status}`)
-            setMessages(data.messages || [])
-            setSessionMeta(data.session || null)
-            if (data.running === true) setTarget(prev => ({ ...(prev || {}), running: true }))
-            setState('ready')
-          })
-          .catch(reason => {
-            if (cancelled) return
-            setError(t('dialog.loadFail') + (reason && reason.message ? reason.message : String(reason)))
-            setState('ready')
-          })
-        return () => {
-          cancelled = true
-        }
-      }, [state, target, t])
-
-      const close = useCallback(() => {
-        if (state === 'busy') return
-        setTarget(null)
-        setError(null)
-      }, [state])
-
-      const pick = useCallback(
-        m => {
-          if (state === 'busy') return
-          setPicked(m.seq)
-          setMode(null)
-          setAcknowledged(false)
-          setError(null)
-        },
-        [state],
-      )
-
-      const chooseMode = useCallback(
-        m => {
-          if (picked == null || state === 'busy') return
-          setMode(m)
-          setAcknowledged(false)
-          setError(null)
-        },
-        [picked, state],
-      )
-
-      const run = useCallback(() => {
-        if (state === 'busy' || picked == null || !mode) return
-        if (mode !== 'branch' && !acknowledged) return
-        setBusyMsg(t('busy.' + (mode === 'revert' || mode === 'delete' ? mode : 'branch')))
-        setState('busy')
-        setError(null)
-        if (mode === 'branch') {
-          // 0.12.0：与面板/消息行同一实现 —— opencode 的 before 语义
-          // （新会话不含此条，原文回新会话输入框）。只对用户消息成立；
-          // 分支不再回落写盘（被删的磁盘 applyBranch 语义复盘见 README）。
-          const pickedRow = picked != null ? messages.find(m => m.seq === picked) : null
-          if (!pickedRow || pickedRow.role !== 'user') {
-            setError(t('panel.branchUserOnly'))
-            setBusyMsg('')
-            setState('error')
-            return
-          }
-          Promise.resolve()
-            .then(() =>
-              forkFromUserMessage(target.sessionId, picked, pickedRow.fullText || pickedRow.snippet || '', pickedRow.turnStartSeq),
-            )
-            .then(childId => {
-              setDoneMsg(t('fork.official', { id: String(childId || '') }))
-              setBusyMsg('')
-              setChildId(childId || null)
-              setState('done')
-              notifyDone(t('fork.official', { id: String(childId || '') }))
-            })
-            .catch(reason => {
-              setError(String((reason && reason.message) || reason || t('fork.unavailable')))
-              setBusyMsg('')
-              setState('error')
-            })
-          return
-        }
-        const path = mode
-        const body = { sessionId: target.sessionId, seq: picked }
-        Promise.resolve()
-          .then(() =>
-            fetch('/api/message-ops/' + path, {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify(body),
-            }),
-          )
-          .then(async res => {
-            let data = {}
-            try {
-              data = await res.json()
-            } catch {
-              /* keep {} */
-            }
-            if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`)
-            // S6 修复（G-M1）：不再 900ms 裸 location.reload。成功走 devkit
-            // 标准 toast（无 devkit 时降级为对话框内 doneMsg），并提供手动
-            // 「刷新页面」按钮。
-            // 0.9.7：补回 ec862d6(0.9.0) 误删的 `const okMsg =`——留下悬挂的
-            // `? :` 会让成功路径抛 ReferenceError 落进 .catch（用户看到「操作失败」，
-            // notifyDone/emitChanged/openSession/回填全不执行），失败路径则恒走
-            // `?` 分支把成功文案当错误抛出。对话框 mode 只有 revert|delete|branch，
-            // branch 在上面已 return，故 done.restore 分支在此不可达，一并删掉。
-            const okMsg = mode === 'revert' ? t('done.revert') : t('done.delete')
-            // 0.19.0：回填统一由 refillComposer 承担；老 setDraft 路径已删（见 spec §9）。
-            setDoneMsg(okMsg)
-            setBusyMsg('')
-            setState('done')
-            notifyDone(okMsg)
-            emitChanged()
-            // 0.5.7：store-miss 的磁盘追加没有 live 投影事件 —— 成功后强制
-            // 重建视图（与 restoreRow 同款 openSession 模式），遮蔽即刻可见。
-            try {
-              if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(target.sessionId)
-            } catch {
-              /* 视图重建失败不阻断成功反馈 */
-            }
-          })
-          .catch(reason => {
-            setBusyMsg('')
-            setState('ready')
-            setError(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)))
-          })
-      }, [state, picked, mode, acknowledged, target, t])
-
-      if (!target) return null
-
-      // 0.6.0：system prompt 行不可作为回滚/删除/分支目标（引擎拒之以 node0 守卫，
-      // 但不该给用户一个必然500的选项）——列表直接排除 role=system。
-      const visible = messages.filter(m => m.visible !== false && m.role !== 'system')
-      const shownBase = visible.slice(-MAX_RENDER)
-      const hiddenCount = visible.length - shownBase.length
-      // 分批渲染（评审 M1）：只渲染 renderLimit 条，更早的留给「显示更多」
-      // 渐进展开，避免 200 行 radio 列表一次进 DOM。
-      const shown = shownBase.slice(-renderLimit)
-      const pagedCount = shownBase.length - shown.length
-      const pickedMsg = picked != null ? messages.find(m => m.seq === picked) : null
-
-      // 0.9.0 可发现性：操作区固定在**消息列表之前**。
-      // 原先它在列表之后，而列表是 260px 滚动 + 分批渲染 50 条/页 ——
-      // 未选中消息时三个 radio 完全不在视野内，用户以为「只有列表、没有操作」。
-      // 未选中时给明确指引，而不是空着。
-      const opsPanel = pickedMsg
-        ? React.createElement(
-            'div',
-            { key: 'ops', style: { margin: '8px 0 0' } },
-            React.createElement(
-              'div',
-              { style: { ...metaStyle, margin: '0 0 4px' } },
-              t('dialog.pickedAs', { seq: String(pickedMsg.seq), text: (pickedMsg.snippet || '').slice(0, 60) }),
-            ),
-            ['revert', 'delete', 'branch'].map((m, i) =>
-              React.createElement(
-                'div',
-                { key: m, style: { marginTop: i === 0 ? 6 : 4 } },
-                React.createElement(
-                  'label',
-                  { style: optStyle },
-                  React.createElement('input', {
-                    type: 'radio',
-                    name: 'dsh-message-ops-mode',
-                    checked: mode === m,
-                    onChange: () => chooseMode(m),
-                    disabled: state === 'busy',
-                  }),
-                  t('op.' + m),
-                ),
-                mode === m ? React.createElement('div', { style: descStyle }, t('op.' + m + 'Desc')) : null,
-              ),
-            ),
-            mode && mode !== 'branch'
-              ? React.createElement(
-                  'label',
-                  { key: 'ack', style: optStyle },
-                  React.createElement('input', {
-                    type: 'checkbox',
-                    checked: acknowledged,
-                    disabled: state === 'busy',
-                    onChange: e => setAcknowledged(e.target.checked),
-                  }),
-                  t(mode === 'revert' ? 'ack.revert' : 'ack.delete'),
-                )
-              : null,
-          )
-        : React.createElement(
-            'div',
-            {
-              key: 'opshint',
-              style: {
-                ...metaStyle,
-                margin: '8px 0 0',
-                padding: '6px 8px',
-                borderRadius: 6,
-                background: 'var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.1))',
-              },
-            },
-            t('dialog.pickFirst'),
-          )
-
-      let body
-      if (state === 'loading') {
-        body = React.createElement('div', { key: 'load', style: statusStyle }, t('dialog.loading'))
-      } else if (!messages.length) {
-        body = React.createElement('div', { key: 'empty', style: statusStyle }, t('dialog.empty'))
-      } else {
-        body = React.createElement(React.Fragment, null, [
-          target.running ? React.createElement('div', { key: 'warn', style: warnStyle }, t('dialog.runningWarn')) : null,
-          opsPanel,
-          React.createElement('div', { key: 'pick', style: metaStyle }, t('dialog.pick')),
-          React.createElement(
-            'div',
-            { key: 'list', style: listStyle },
-            hiddenCount > 0
-              ? React.createElement(
-                  'div',
-                  { key: 'more', style: { ...rowStyle, cursor: 'default', color: 'var(--dsw-alias-label-secondary,#8a8a8e)' } },
-                  t('dialog.more', { n: String(visible.length) }),
-                )
-              : null,
-            pagedCount > 0
-              ? React.createElement(
-                  'button',
-                  {
-                    key: 'show-more',
-                    type: 'button',
-                    style: {
-                      ...rowStyle,
-                      border: 'none',
-                      width: '100%',
-                      color: 'var(--dsw-alias-label-secondary,#8a8a8e)',
-                      cursor: 'pointer',
-                    },
-                    onClick: () => setRenderLimit(l => Math.min(l + PAGE_SIZE, MAX_RENDER)),
-                  },
-                  t('dialog.showMore', { n: String(pagedCount) }),
-                )
-              : null,
-            shown.map((m, i) =>
-              React.createElement(
-                'label',
-                {
-                  key: m.seq + '-' + i,
-                  style: {
-                    ...rowStyle,
-                    background: picked === m.seq ? 'var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.14))' : 'transparent',
-                  },
-                },
-                React.createElement('input', {
-                  type: 'radio',
-                  name: 'dsh-message-ops-pick',
-                  checked: picked === m.seq,
-                  onChange: () => pick(m),
-                  disabled: state === 'busy',
-                }),
-                React.createElement(
-                  'span',
-                  {
-                    style: {
-                      flex: 1,
-                      minWidth: 0,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      color: m.visible === false ? 'var(--dsw-alias-label-tertiary,#b0b0b4)' : 'inherit',
-                    },
-                  },
-                  '#' + m.seq + ' ' + (m.role || '') + ' · ' + (m.snippet || '') + (m.visible === false ? t('dialog.invisible') : ''),
-                ),
-              ),
-            ),
-          ),
-          // 0.9.7：删掉列表**之后**的旧 opsPanel——0.9.0 把操作区挪到列表之前时
-          // 没删旧位置，两组同名 radio（name='dsh-message-ops-mode'）互抢，
-          // checked 状态在两份 DOM 之间互相顶掉。
-        ])
-      }
-
-      const canRun = state !== 'busy' && state !== 'loading' && picked != null && mode != null && (mode === 'branch' || acknowledged)
-      const confirmLabel = busyMsg || (mode ? t('confirm.' + mode) : t('dialog.cancel'))
-
-      return React.createElement(
-        Modal,
-        {
-          open: true,
-          onClose: close,
-          title: t('dialog.title'),
-          closeLabel: t('dialog.cancel'),
-          description: t('dialog.session') + (target.title || target.sessionId || ''),
-          footer: [
-            React.createElement(
-              'button',
-              {
-                key: 'cancel',
-                type: 'button',
-                disabled: state === 'busy',
-                onClick: close,
-                style: { ...cancelBtnStyle, ...(state === 'busy' ? { opacity: 0.5, cursor: 'default' } : {}) },
-              },
-              t('dialog.cancel'),
-            ),
-            React.createElement(
-              'button',
-              {
-                key: 'confirm',
-                type: 'button',
-                disabled: !canRun,
-                onClick: run,
-                style: {
-                  ...(mode === 'delete' || mode === 'revert' ? dangerBtnStyle : primaryBtnStyle),
-                  ...(!canRun ? { opacity: 0.5, cursor: 'default' } : {}),
-                },
-              },
-              confirmLabel,
-            ),
-            ...(state === 'done' && (mode === 'revert' || mode === 'delete')
-              ? [
-                  React.createElement(
-                    'button',
-                    {
-                      key: 'reload',
-                      type: 'button',
-                      onClick: () => {
-                        try {
-                          window.location.reload()
-                        } catch {
-                          /* non-browser guard */
-                        }
-                      },
-                      style: primaryBtnStyle,
-                    },
-                    t('action.reload'),
-                  ),
-                ]
-              : []),
-            ...(state === 'done' && mode === 'branch' && childId
-              ? [
-                  React.createElement(
-                    'button',
-                    {
-                      key: 'open-new',
-                      type: 'button',
-                      onClick: () => {
-                        try {
-                          // 0.2.0+：uiWorkspace.openSession 是宿主唯一打开通道
-                          if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(childId)
-                        } catch {
-                          /* 打开失败不阻断 */
-                        }
-                      },
-                      style: primaryBtnStyle,
-                    },
-                    t('toast.openNew'),
-                  ),
-                ]
-              : []),
-          ],
-        },
-        [
-          React.createElement('div', { key: 'meta', style: metaStyle }, t('dialog.session'), target.sessionId || ''),
-          body,
-          doneMsg ? React.createElement('div', { key: 'done', style: statusStyle }, doneMsg) : null,
-          error ? React.createElement('div', { key: 'err', style: errStyle, role: 'alert' }, error) : null,
-        ],
       )
     }
 
@@ -2261,11 +1769,6 @@ window.__ModuleLoader__.load({
                                     })
                                   : t('panel.deleteConfirmBody'),
                               ),
-                              // 0.21.0：revert 的常显隐私告知（零副作用、纯文案）。
-                              // 只在回滚确认态出现；删除确认不需要（删单条同样遮蔽，但语义不同）。
-                              confirmAction === 'revert'
-                                ? React.createElement('div', { className: 'mopsPrivacyNote', role: 'note' }, t('panel.revertPrivacyNote'))
-                                : null,
                               React.createElement(
                                 'div',
                                 { className: 'mopsConfirmRow' },
@@ -2497,21 +2000,26 @@ window.__ModuleLoader__.load({
     /**
      * 有界等待 composer 重挂后提交**一次**。
      *
-     * 判据：`__inputActions` 换成新对象 = 宿主重挂了编辑器（openSession 之后必然发生）。
+     * 判据：该会话的 InputActions 换成新对象 = 宿主重挂了编辑器（openSession 之后必然发生）。
      * 到上限仍没换（例如视图没重建的内联路径）就用当前这个提交一次 —— 宁可多一条
      * 兜底提示，也不要无限等。**只提交一次**：重复 submit 会发出两条消息，比失败更糟。
      *
      * @param text - 要提交的文本
-     * @param options - { attempts, intervalMs }，测试注入更小值
+     * @param options - { attempts, intervalMs, sessionId }，测试注入更小值
      * @returns Promise<boolean> 是否成功调用了宿主 submit
      */
     function submitEditedText(text, options) {
       const opts = options || {}
       const attempts = Number.isSafeInteger(opts.attempts) && opts.attempts > 0 ? opts.attempts : EDIT_SUBMIT_ATTEMPTS
       const intervalMs = Number.isSafeInteger(opts.intervalMs) && opts.intervalMs >= 0 ? opts.intervalMs : EDIT_SUBMIT_INTERVAL_MS
-      // 0.23.0：允许真执行测试注入 inputActions（生产路径仍读模块级 __inputActions）。
-      // 之前测试把 deps.submitEdited 整个 stub 掉，真实提交逻辑从未被执行过。
-      const readInputActions = typeof opts.getInputActions === 'function' ? opts.getInputActions : () => __inputActions
+      // 0.24.0 P4：按会话读 InputActions。opts.getInputActions 保留给真执行测试注入。
+      //
+      // ⚠️ 判据语义变化：旧实现用「对象变了」= 宿主重挂编辑器。改成按会话隔离后，
+      // 对象变化只说明**这一会话**的 shell 换了实例（重挂），跨会话不会误触发，
+      // 比旧判据更准。读不到该会话的 InputActions 时**不提交** ——
+      // 宁可让调用方提示手动回车，也不能拿别的会话的 submit 发出去。
+      const targetSessionId = opts.sessionId
+      const readInputActions = typeof opts.getInputActions === 'function' ? opts.getInputActions : () => inputActionsFor(targetSessionId)
       const before = readInputActions()
       return new Promise(resolve => {
         let n = 0
@@ -2602,12 +2110,25 @@ window.__ModuleLoader__.load({
       const doWrite = deps.writeSessionDraft || writeSessionDraft
       const doRead = deps.readSessionDraft || readSessionDraft
       const markShadowed = deps.markRowsShadowedFrom || markRowsShadowedFrom
-      const doSetDraft = deps.setDraft || (v => (__inputActions && __inputActions.setDraft ? __inputActions.setDraft(v) : false))
+      const doSetDraft =
+        deps.setDraft ||
+        (v => {
+          // 0.24.0 P4：必须按会话取，取不到就明确失败（返回 false），
+          // 绝不静默退到 __inputActions —— 那可能是别的会话的 composer。
+          const ia = inputActionsFor(rawSessionId)
+          if (!ia || typeof ia.setDraft !== 'function') return false
+          return ia.setDraft(v)
+        })
       const doPersistDraft =
-        deps.persistDraft || (() => (__inputActions && __inputActions.persistDraft ? __inputActions.persistDraft() : false))
+        deps.persistDraft ||
+        (() => {
+          const ia = inputActionsFor(rawSessionId)
+          if (!ia || typeof ia.persistDraft !== 'function') return false
+          return ia.persistDraft()
+        })
       const doEmitChanged = deps.emitChanged || emitChanged
       const doOpenSession = deps.openSessionById || openSessionById
-      const doSubmit = deps.submitEdited || submitEditedText
+      const doSubmit = deps.submitEdited || (t => submitEditedText(t, { sessionId: rawSessionId }))
 
       // ② 防 409 护栏：本地缓存里 >= seq 的行立刻标成已遮蔽（与 runUserRevert/runUndo 同一函数）
       try {
@@ -3154,7 +2675,11 @@ window.__ModuleLoader__.load({
       const { messageId, sessionId, useSessions, inputActions, useChat } = props
       const t = (props && props.t) || __t
       useLocaleRevision()
-      if (inputActions && typeof inputActions.setDraft === 'function') __inputActions = inputActions
+      // 0.24.0 P4：按会话登记（本组件每条 AI 消息一个实例，必须带 sessionId 隔离）。
+      React.useEffect(() => {
+        rememberInputActions(sessionId, inputActions)
+        return () => forgetInputActions(sessionId, inputActions)
+      }, [sessionId, inputActions])
       const sessions = useSessions ? useSessions(s => s) : undefined
       const summary = sessions && sessions.byId ? sessions.byId[sessionId] : undefined
       const running = summary ? summary.running === true : false
@@ -3433,9 +2958,9 @@ window.__ModuleLoader__.load({
       //     引用当前会话里未被遮蔽的消息 = 同一内容在 prompt 里出现两遍，纯冗余。
       // 所以正确做法是让位给宿主，不再重复造轮子。
       //
-      // ⚠️ 本组件**必须保留**：它负责捕获 inputActions 到 __inputActions
-      //（编辑框 / 面板 / 行内回填都依赖），删组件会让这些功能静默失效。
-      // 只 return null，不删注册。
+      // ⚠️ 本组件**必须保留**：它负责按会话捕获 inputActions 到
+      // __inputActionsBySession（编辑框 / 面板 / 行内回填都依赖），
+      // 删组件会让这些功能静默失效。只 return null，不删注册。
       return null
     }
 
@@ -3496,7 +3021,11 @@ window.__ModuleLoader__.load({
       if (sessionId) __currentSessionId = sessionId
       const t = (props && props.t) || __t
       useLocaleRevision()
-      if (inputActions && typeof inputActions.setDraft === 'function') __inputActions = inputActions
+      // 0.24.0 P4：dock 也是 per-session 实例，登记时必须带 sessionId。
+      React.useEffect(() => {
+        rememberInputActions(sessionId, inputActions)
+        return () => forgetInputActions(sessionId, inputActions)
+      }, [sessionId, inputActions])
       const sessions = useSessions ? useSessions(s => s) : undefined
       const summary = sessions && sessions.byId ? sessions.byId[sessionId] : undefined
       const running = summary ? summary.running === true : false
@@ -4845,10 +4374,13 @@ window.__ModuleLoader__.load({
         // 编辑器是否已挂载、也不依赖 inputActions 此刻绑在哪个会话上。
         const persisted = writeSessionDraft(rawSid, text)
         // 再尽力更新活着的编辑器（视图没重建的路径，例如 dock 内联恢复）。
+        // 0.24.0 P4：按 rawSid 取该会话自己的 InputActions；取不到就跳过 ——
+        // 绝不能用别的会话的编辑器，那会把原文写进用户正在看的另一个会话。
         let editorSet = false
-        if (__inputActions && typeof __inputActions.setDraft === 'function') {
+        const liveActions = inputActionsFor(rawSid)
+        if (liveActions && typeof liveActions.setDraft === 'function') {
           try {
-            __inputActions.setDraft(text)
+            liveActions.setDraft(text)
             editorSet = true
           } catch (e) {
             console.warn('[message-ops] setDraft failed:', e)
@@ -5079,7 +4611,9 @@ window.__ModuleLoader__.load({
             order: 101,
             ...(__locale ? { locale: NS } : {}),
           },
-          window.__MOPS_LEGACY_DIALOG === true ? OpsDialog : OpsPanel,
+          // 0.24.0：旧对话框（约 407 行）已删除 —— 它只能通过一个从未有人
+          // 设置的 LEGACY 开关到达（全仓库零处赋值）。面板是唯一实现。
+          OpsPanel,
         ),
       )
       // 0.20.0：编辑并重发浮层（同族模态，order 102 排在 OpsPanel 之后 —— 两者互斥打开）
@@ -5108,6 +4642,12 @@ window.__ModuleLoader__.load({
         // 0.20.0：编辑并重发的编排层（可注入 deps 真执行断言时序）
         sendEditAndRevert,
         submitEditedText,
+        // 0.24.0 P4：按会话隔离的 InputActions 访问面（真执行测试用）
+        rememberInputActions,
+        forgetInputActions,
+        inputActionsFor,
+        sessionKeyOf,
+        __inputActionsBySession,
         EDIT_EVENT,
         EDIT_ID,
       },

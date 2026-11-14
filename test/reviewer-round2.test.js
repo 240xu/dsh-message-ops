@@ -84,11 +84,11 @@ test('LOW-6：不许引用未定义的 i18n key', () => {
   assert.deepEqual(missing, [], `代码引用了未定义的 i18n key：${missing.join(', ')}`)
 })
 
-test('LOW-7：对话框的分叉文案必须是 before 语义（与其它入口一致）', () => {
-  const opBranch = src.match(/'op\.branchDesc': '([^']*)'/)
-  assert.ok(opBranch, '缺 op.branchDesc')
-  assert.doesNotMatch(opBranch[1], /含/, '中文文案不能再说「含该条」')
-  assert.match(opBranch[1], /放回新会话输入框|之前的对话/, '必须说明 before 语义 + 原文回输入框')
-  const en = src.match(/'op\.branchDesc': '([^']*)'[\s\S]*?'op\.branchDesc': '([^']*)'/)
-  if (en) assert.doesNotMatch(en[2], /including/i, '英文文案不能再说 "including"')
+test('LOW-7：op.branchDesc 随 OpsDialog 删除（0.24.0）', () => {
+  // 原锁校验 OpsDialog 里那段 radio 文案的 before 语义。OpsDialog 已删，
+  // 该 key 只被死代码使用，一并删除。分叉的 before 语义现在由
+  // panel.branchHint / slot.forkHint 承载（它们有各自的锁）。
+  assert.doesNotMatch(src, /'op\.branchDesc'/, 'op.branchDesc 应随 OpsDialog 删除')
+  assert.match(src, /'panel\.branchHint'/, '分叉 before 语义仍由 panel.branchHint 承载')
+  assert.match(src, /'slot\.forkHint'/, '分叉 before 语义仍由 slot.forkHint 承载')
 })

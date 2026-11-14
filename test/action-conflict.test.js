@@ -108,5 +108,7 @@ test('0.23：AI 动作槽不再注入引用按钮（让位宿主划词引用）�
   assert.doesNotMatch(src, /return act\(React\.createElement\(IconQuote,/, '不再渲染引用按钮')
   assert.match(src, /return null\s*\}\s*\n\s*\/\/ 0\.4\.2|return null/, '动作槽 return null')
   // 组件必须保留：inputActions 捕获是编辑框/面板/回填的依赖
-  assert.match(src, /if \(inputActions && typeof inputActions\.setDraft === 'function'\) __inputActions = inputActions/, 'inputActions 捕获仍在')
+  // 0.24.0 P4：捕获改为按会话登记（__inputActionsBySession），不再是裸赋值。
+  assert.match(src, /rememberInputActions\(sessionId, inputActions\)/, 'inputActions 捕获仍在（按会话）')
+  assert.match(src, /__inputActionsBySession/, '必须是按会话隔离的 Map')
 })
