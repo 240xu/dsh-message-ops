@@ -1372,3 +1372,33 @@ Lead 逐条复核后落地 3 个修复。汇总见 `design-demos/audit-round-sum
 
 过程中 Lead 误删 `ensureBtn` 导致用户消息按钮全失效，已从 git 取回并真机复验
 `mopsRevert=9 / mopsEdit=9`。测试 360（356 pass / 4 skip），`prettier --check` 全绿。
+
+### 0.24.0 · 四项专项收敛（删 553 行死代码 / 文案瘦身 43% / 入口改名 / 跨会话隔离）
+
+用户要求「分配专项专家子代理进行处理」，针对审计留下的 4 项待拍板问题。
+4 个专项并行，各自独立改代码，Lead 统一收口。
+
+1. **删 OpsDialog 死代码**：`src/client.js` **5115 → 4562 行（净减 553）**。
+   OpsDialog 函数体 413 行 + 11 个独占样式常量 86 行 + `Modal` 导入 +
+   24 个 i18n key（zh/en 各 24）。它只能通过一个**全仓库从未有人设置**的
+   `window.__MOPS_LEGACY_DIALOG` 到达。保留 3 个名字带 `dialog.` 前缀但
+   实际被 OpsPanel / MsgSlotActions 使用的 key（`dialog.title`/`cancel`/`runningWarn`）。
+   功能无空洞：遮蔽单条、删整条会话、服务端 `/delete` 全在 OpsPanel。
+2. **回撤确认瘦身 130 → 74 字（-43%）**：把独立的 56 字隐私告知条合并进
+   确认正文，成功 toast 30 → 13 字。隐私信息一条没少，只是不再分四层说。
+3. **入口改名消除同名不同义**：行内铅笔「编辑并重发」→ **「编辑并回撤重发」**
+   （en `Edit & revert-resend`）。此前它和已装的第三方 message-edit 插件
+   文案一字不差、后果却相反（我们毁源会话、它 fork 保留源会话）。
+   现在名字差异 = 后果差异。`slot.editHint` 同步说清「会回撤此条及之后」。
+4. **`__inputActions` 跨会话污染修复**（真 bug）：宿主 `assistant-actions` 是
+   `scope: "session"` 且按 messageId 逐条渲染，每个会话的 InputActions 是
+   不同对象；旧实现用模块级单变量，后挂载的覆盖先挂载的。反向验证实测
+   `getOld('session-aaa')` 返回 B、未登记会话也串到别人 —— 最严重时
+   `submitEditedText` 会把编辑后的文本**发进别的会话**。
+   改成 `Map<sessionId, InputActions>` + 三个访问器，两个捕获点改
+   `useEffect` 注册/卸载（顺带补上原来完全没有的清理），4 个读取点全部
+   按会话取、取不到走明确失败。
+
+测试 364（360 pass / 4 skip），新增 4 条跨会话隔离真执行测试（旧实现下会挂）。
+`prettier --check` 全绿，i18n zh/en 115/115 序列一致。
+真机 Chromium：`revert=9 / edit=9 / fork=0`、官方 branch=3、无隐藏。

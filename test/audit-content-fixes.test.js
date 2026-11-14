@@ -16,12 +16,26 @@ test('S-1：planRestore 对多段消息产出完整全文，不是首段', () =>
   const events = [
     { seq: 0, type: 'turn/start', data: { turn: 1 } },
     { seq: 1, type: 'step/start', data: { turn: 1, step: 1 } },
-    { seq: 2, type: 'user/message', surfaceOp: 'append', data: {
-      id: 'u1', source: { kind: 'user' },
-      content: [{ type: 'text', text: 'FIRST PART' }, { type: 'text', text: 'SECOND PART' }],
-    } },
-    { seq: 3, type: 'system/message', surfaceOp: { op: 'replace', startSeq: 2, endSeq: 2 },
-      sourceEventSeqs: [2], data: { turn: 2, step: 1, message: { role: 'system', content: [{ type: 'text', text: '[marker]' }] } } },
+    {
+      seq: 2,
+      type: 'user/message',
+      surfaceOp: 'append',
+      data: {
+        id: 'u1',
+        source: { kind: 'user' },
+        content: [
+          { type: 'text', text: 'FIRST PART' },
+          { type: 'text', text: 'SECOND PART' },
+        ],
+      },
+    },
+    {
+      seq: 3,
+      type: 'system/message',
+      surfaceOp: { op: 'replace', startSeq: 2, endSeq: 2 },
+      sourceEventSeqs: [2],
+      data: { turn: 2, step: 1, message: { role: 'system', content: [{ type: 'text', text: '[marker]' }] } },
+    },
   ]
   const plan = planRestore(events, 3)
   const hit = plan.replayable.find(r => r.seq === 2)
@@ -50,30 +64,38 @@ test('S-2：dock 计数读 startSeq/endSeq（服务端真实形状），并兼�
 // ── 引用让位宿主 ────────────────────────────────────────────────────────────
 test('0.23：AI 动作槽不再渲染引用按钮，但仍捕获 inputActions', () => {
   assert.doesNotMatch(src, /return act\(React\.createElement\(IconQuote,/, '引用按钮已删')
-  assert.match(src, /if \(inputActions && typeof inputActions\.setDraft === 'function'\) __inputActions = inputActions/, '捕获仍在')
+  // 0.24.0 P4：捕获改为按会话登记（__inputActionsBySession），不再是裸赋值。
+  assert.match(src, /rememberInputActions\(sessionId, inputActions\)/, '捕获仍在（按会话）')
 })
 
 // ── 文案：删除/回撤不再自我打脸 ─────────────────────────────────────────────
-test('0.23：op.delete 不再说「删除」（实现是遮蔽）', () => {
-  const m = src.match(/'op\.delete': '([^']*)'/)
-  assert.ok(m)
-  assert.doesNotMatch(m[1], /删除/, '不许说删除')
-  assert.match(m[1], /遮蔽/, '应说遮蔽')
-  assert.doesNotMatch(src, /'op\.delete': 'Delete only/, '英文也不许说 Delete')
+// 0.24.0：op.delete / op.revertDesc 只被 OpsDialog 的死 radio 使用，
+// 已随该函数一起删除。原锁「文案不许说删除」保护的是死代码里的活 bug，
+// 现在改成锁「这些 key 不存在」，并保留对**活文案**的同类检查。
+test('0.24：op.* 文案已随 OpsDialog 删除', () => {
+  for (const k of ['op.delete', 'op.revertDesc', 'op.revert', 'op.deleteDesc', 'op.branch', 'op.branchDesc']) {
+    assert.doesNotMatch(src, new RegExp(`'${k.replace(/\./g, '\\.')}':`), `${k} 应随 OpsDialog 删除`)
+  }
 })
 
-test('0.23：op.revertDesc 不再给用户看 append-only', () => {
-  const m = src.match(/'op\.revertDesc': '([^']*)'/)
-  assert.ok(m)
-  assert.doesNotMatch(m[1], /append-only/, '外行看不懂的技术词')
+test('0.24：活着的删除/回撤文案仍不许自我打脸', () => {
+  // 面板里真正的删除按钮文案
+  const del = src.match(/'panel\.delete': '([^']*)'/)
+  assert.ok(del, '缺 panel.delete')
+  assert.match(del[1], /遮蔽|删除/, 'panel.delete 必须有明确语义')
+  // 回撤确认文案不许出现 append-only 这种外行词
+  const note = src.match(/'panel\.revertConfirmBody':\s*\n?\s*'([^']*)'/)
+  assert.ok(note, '缺 panel.revertConfirmBody')
+  assert.doesNotMatch(note[1], /append-only/, '外行看不懂的技术词')
 })
 
 // ── 0.23 · i18n 值语义锁（变异测试：改 en 值成反义仍全绿）────────────────────
 test('0.23：破坏性动作的 en 文案不得出现 Delete / Cancel 这类反义', () => {
   const enStart = src.indexOf('const enDict = {')
   const enBlock = src.slice(enStart, src.indexOf('\n    }', enStart))
+  // 0.24.0：confirm.revert 已随 OpsDialog 删除，换成面板的活 key
   const bad = [
-    ["'confirm.revert'", /Delete everything|Cancel/i],
+    ["'panel.revert'", /Delete everything|Cancel/i],
     ["'dock.restore'", /^'Delete'/i],
     ["'edit.send'", /^'Cancel'/i],
   ]
