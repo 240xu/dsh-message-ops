@@ -127,7 +127,7 @@ window.__ModuleLoader__.load({
       // 外部插件在 turnTail 也叫「编辑并重发」，但它 fork 出新分支、源会话不动；
       // 我们（铅笔）是**回撤源会话**再重发。同名让用户无法预判后果，故显式写出「回撤」。
       'slot.edit': '编辑并回撤重发',
-      'slot.editHint': '打开编辑框；点「发送并回撤」会回撤此条及之后的全部可见消息，再把改后文本当新消息发出',
+      'slot.editHint': '打开编辑框；点「撤销并发送」会回撤此条及之后的全部可见消息，再把改后文本当新消息发出',
       'slot.editNoText': '这条消息没有可编辑的文本',
       'slot.editUnmatched': '在日志里定位不到这条消息的 seq，暂时无法编辑',
       'edit.title': '编辑并回撤重发',
@@ -137,7 +137,7 @@ window.__ModuleLoader__.load({
       'edit.retry': '重试',
       'edit.placeholder': '编辑这条消息…',
       'edit.cancel': '取消',
-      'edit.send': '发送并回撤',
+      'edit.send': '撤销并发送',
       'edit.sending': '回撤并发送中…',
       'edit.empty': '内容为空，无法发送',
       'edit.failed': '回撤失败：',
@@ -147,6 +147,7 @@ window.__ModuleLoader__.load({
       'edit.running': '会话正在运行：需先停止会话再编辑重发',
       'edit.replaceHint':
         '发送会先回撤此条及其之后的全部可见消息，再把改后的文本作为新消息发出。注意：这不是删除——AI 看不到被回撤的内容，但原文仍保留在本地会话文件、可被恢复，直接翻看会话文件仍能读到。',
+      'edit.shortcut': 'Ctrl/⌘ + Enter 发送 · Esc 取消',
       'toast.openNew': '打开新会话',
       'fork.official': '分支完成：新会话 {id}',
       'fork.unavailable': '官方分支不可用：通常是因为会话正在运行，请先停止会话后重试。分支功能由 dsh 内置的 session/fork 提供。',
@@ -259,7 +260,7 @@ window.__ModuleLoader__.load({
       // consequences — so the revert is now spelled out in the label itself.
       'slot.edit': 'Edit & revert-resend',
       'slot.editHint':
-        'Opens the editor. Pressing "Send and revert" reverts this message and every visible message after it, then sends the edited text as a new message.',
+        'Opens the editor. Pressing "Undo and send" reverts this message and every visible message after it, then sends the edited text as a new message.',
       'slot.editNoText': 'This message has no text to edit',
       'slot.editUnmatched': 'Cannot locate this message seq in the log, so it cannot be edited yet',
       'edit.title': 'Edit & revert-resend',
@@ -269,7 +270,7 @@ window.__ModuleLoader__.load({
       'edit.retry': 'Retry',
       'edit.placeholder': 'Edit this message…',
       'edit.cancel': 'Cancel',
-      'edit.send': 'Send and revert',
+      'edit.send': 'Undo and send',
       'edit.sending': 'Reverting and sending…',
       'edit.empty': 'Nothing to send — the text is empty',
       'edit.failed': 'Revert failed: ',
@@ -279,6 +280,7 @@ window.__ModuleLoader__.load({
       'edit.running': 'The session is running: stop it before editing and resending',
       'edit.replaceHint':
         'Sending reverts this message and every visible message after it, then sends the edited text as a new message. Note: this is not deletion — the AI will not see the reverted content, but the original text stays in the local session file, can be restored, and is still readable by opening that file directly.',
+      'edit.shortcut': 'Ctrl/⌘ + Enter to send · Esc to cancel',
       'toast.openNew': 'Open new session',
       'fork.official': 'Branched (official fork): new session {id}',
       'fork.unavailable':
@@ -2463,6 +2465,7 @@ window.__ModuleLoader__.load({
             error ? React.createElement('div', { className: 'mopsErError', role: 'alert' }, error) : null,
             done ? React.createElement('div', { className: 'mopsErOk', role: 'status' }, done) : null,
             React.createElement('div', { className: 'mopsErHint' }, t('edit.replaceHint')),
+            React.createElement('div', { className: 'mopsErHint mopsErShortcut' }, t('edit.shortcut')),
           ),
           React.createElement(
             'div',
@@ -2474,7 +2477,13 @@ window.__ModuleLoader__.load({
             ),
             React.createElement(
               'button',
-              { type: 'button', className: 'mopsErBtn mopsErPrimary', onClick: send, disabled: !canSubmit },
+              {
+                type: 'button',
+                className: 'mopsErBtn mopsErPrimary',
+                onClick: send,
+                disabled: !canSubmit,
+                title: t('edit.shortcut'),
+              },
               saving ? t('edit.sending') : t('edit.send'),
             ),
           ),
@@ -3393,7 +3402,7 @@ window.__ModuleLoader__.load({
     function installUserRevertInjector() {
       if (window.__MOPS_USER_REVERT_INSTALLED) return
       window.__MOPS_USER_REVERT_INSTALLED = true
-      var rowsCache = { sid: null, rows: null, at: 0 }
+      var rowsCache = { sid: null, rows: null, at: 0, running: false }
       __peekRowsCache = () => rowsCache
       var norm = x => String(x || '').replace(/\s+/g, '')
 
@@ -3463,7 +3472,9 @@ window.__ModuleLoader__.load({
               .filter(r => r.sn && !injected(r.raw))
             // 0.9.1：同时产出 node-key 查表索引（隐藏 transcript 用）
             const idx = buildIndex(d)
-            rowsCache = { sid: sid, rows: rows, idx: idx, at: Date.now() }
+            // 0.25.0：把服务端 isRunning 一起缓存 —— 注入器是纯 DOM 闭包，拿不到
+            // useSessions，只能靠这里带出来的 running 给按钮做状态提示。
+            rowsCache = { sid: sid, rows: rows, idx: idx, at: Date.now(), running: d && d.running === true }
             syncSeqIndex(sid, d && d.messages, idx)
             return rowsCache
           })
@@ -3670,7 +3681,13 @@ window.__ModuleLoader__.load({
         const ok = block.getAttribute('data-mops-seq')
         if (ok) {
           btn.disabled = false
-          btn.title = __t(hintKey)
+          // 0.25.0：会话运行中时，铅笔仍可点（用户要能点开看原文），但 title
+          // 换成 edit.running 明确告知「需先停止会话」—— 用户反馈「运行时
+          // 铅笔无法点击」，实际是点开后才发现不能提交，属于告知太晚。
+          const isEdit = btn.classList.contains('mopsUserEdit')
+          btn.title = rowsCache.running && isEdit ? __t('edit.running') : __t(hintKey)
+          if (rowsCache.running && isEdit) btn.setAttribute('data-mops-running', '1')
+          else btn.removeAttribute('data-mops-running')
           btn.removeAttribute('data-mops-unmatched')
         } else {
           btn.disabled = true
@@ -3976,7 +3993,12 @@ window.__ModuleLoader__.load({
           const sid = __currentSessionId
           if (!sid) return
           const blocks = userAnchors()
-          for (const b of blocks) ensureUserActions(b)
+          for (const b of blocks) {
+            ensureUserActions(b)
+            // 0.25.0：running 变了要立刻同步按钮 title（否则要等 8s 缓存过期）。
+            // 用缓存值，零额外请求。
+            syncBlockButtons(b)
+          }
           // 0.9.1：**始终**刷新（原先只在按钮未打标时刷）——
           // 打标后 transcript 再变化（openSession 重建 / 分页 / restore 重放）
           // 就再也不会重算隐藏，导致「界面停在旧状态，必须重载页面才对」。
@@ -4100,6 +4122,7 @@ window.__ModuleLoader__.load({
             '.mopsUserRevert svg,.mopsUserEdit svg{width:14px;height:14px;display:block}',
             '.mopsUserRevert:hover,.mopsUserEdit:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));color:var(--dsw-alias-label-secondary,#6b6b70)}',
             '.mopsUserRevert:disabled,.mopsUserEdit:disabled{opacity:.4;cursor:default;background:transparent}',
+            '.mopsUserEdit[data-mops-running="1"]{opacity:.5}',
             '.mopsUserRevert:focus-visible,.mopsUserEdit:focus-visible{outline:2px solid var(--dsw-alias-border-l2,#b8b8b8);outline-offset:1px}',
             // 0.18.0：用户反馈「点时间图标也会回撤」——根因不是绑定错误，而是
             // 我们的按钮被 appendChild 到宿主 .actions 行末尾，而该行在
