@@ -37,7 +37,8 @@ function block(name) {
 test('1：行内铅笔回归（.mopsUserEdit），且与回撤同一动作行', () => {
   assert.match(src, /mopsUserEdit/, '0.20.0 起铅笔按钮回归')
   const fn = block('ensureEditBtn')
-  assert.match(fn, /xzv4MW_actions/, '必须挂进宿主官方动作行（与回撤同排）')
+  // 0.26.0：hash 抽成 HOST_CLS 单点。断言改为「消费常量」而非字面量。
+  assert.match(fn, /HOST_CLS\.actions|ensureActionsHost\(/, '必须挂进宿主官方动作行（与回撤同排）')
 })
 
 test('0.23：动作行 = 回撤 → 编辑（分叉让位官方）', () => {
@@ -57,16 +58,19 @@ test('1：铅笔点开的是编辑框，不是把原文塞回 composer（0.18 �
 })
 
 // ── 2 · 引用必须用官方 insertQuote，不能手拼 markdown ────────────────────────
-test('2：引用走官方 insertQuote（结构化 QuoteNode），不再手工拼 "> "', () => {
-  const fn = block('runQuote')
-  assert.match(fn, /inputActions\.insertQuote\(/, '必须调用宿主官方 insertQuote')
-  assert.doesNotMatch(fn, /'> ' \+ l/, '不许再手工拼 markdown 引用前缀')
-  assert.doesNotMatch(fn, /inputActions\.insertText\(/, '不该再用 insertText 裸插文本')
-})
-
-test('2：不再依赖 captureInsertion（那是位置快照，异步期间会失效）', () => {
-  const fn = block('runQuote')
-  assert.doesNotMatch(fn, /captureInsertion\(\)/, 'insertQuote 自带光标定位，不需要位置快照')
+test('2 / 0.25：引用让位宿主（dsh-message-quotes），本插件不造第二个入口', () => {
+  // 0.5.0 起这里曾自绘引用按钮（runQuote → inputActions.insertQuote 拼 QuoteNode）；
+  // 0.23.0 起 AI 动作槽 return null（选区体系与宿主不匹配，会退化成塞整条全文）；
+  // 0.25.0 把已不可达的整套引用机械删除（docs/DECISIONS.md D-4）。
+  assert.match(src, /dsh-message-quotes/, '契约注释必须写明引用来源是宿主插件')
+  assert.doesNotMatch(src, /function runQuote\(/, '不得在本插件重建引用按钮（D-4）')
+  // 注释里会解释宿主怎么用它（那是文档），只禁**代码形态**的调用：
+  const codeOnly = src
+    .split('\n')
+    .filter(l => !l.trim().startsWith('//'))
+    .join('\n')
+  assert.doesNotMatch(codeOnly, /inputActions\.insertQuote\(/, 'insertQuote 归宿主 text-interaction 槽，不在本插件调用')
+  assert.match(src, /function MsgSlotActions\(/, '该槽仍需注册 —— 它负责捕获 inputActions')
 })
 
 // ── 3 · 时间文本与破坏性操作必须有视觉分隔 ───────────────────────────────────
@@ -113,25 +117,21 @@ test('5：面板不出现裸 hex 颜色（必须走 --dsw-alias-* token）', () 
 })
 
 // ── 0.19.0 · 引用：选中片段优先、截断+标注、非 copy 图标 ─────────────────────
-test('0.19：引用图标不再回退到 IconCopyOutlineRegular', () => {
-  // 只检查代码赋值，不检查注释（注释里会说明为什么删掉它）
-  assert.doesNotMatch(src, /IconQuote\s*=\s*[^\n]*IconCopyOutlineRegular/, '不许把复制图标赋给 IconQuote（会与宿主 Copy 撞脸）')
+test('0.19 / 0.25：引用图标（IconQuote + fallback）已删，不得复活', () => {
+  // 原锁防「把 Copy 图标当引用图标」。引用机械整体删除后，要防的是有人重新引入自绘引用图标。
+  assert.doesNotMatch(src, /var IconQuote = null/, 'IconQuote 初始化块已删')
+  assert.doesNotMatch(src, /IconQuote\s*=\s*[^\n]*IconCopyOutlineRegular/, '不许把复制图标当引用图标（会与宿主 Copy 撞脸）')
+  assert.doesNotMatch(src, /function QuoteFallback\(/, '引号 fallback 组件已随 IconQuote 删除')
 })
 
-test('0.20：引用优先取选中片段，且不再把整条未截断全文塞进 composer', () => {
-  const fn = block('runQuote')
-  assert.match(fn, /selectionInMessage\(\)/, '必须有选中片段优先逻辑')
-  // 0.20.0（bug-hunt M-1）：截断抽成 clipQuote（按 code point + 边界回退），
-  // 所以长度上限不再内联在 runQuote 里 —— 但**每一处放进 composer 的文本**
-  // 都必须经过 clipQuote，直接塞全文不行。
-  assert.match(fn, /clipQuote\(/, '放进 composer 的文本必须经过 clipQuote 截断')
-  const clip = block('clipQuote')
-  assert.match(clip, /QUOTE_MAX_CHARS/, 'clipQuote 必须用 QUOTE_MAX_CHARS 作为上限')
-  // 0.22.0：改为 Intl.Segmenter 按 grapheme 切（比 code point 更严：
-  // 不拆散 ZWJ 序列 / 组合字符）。真执行实测 family emoji 曾被切碎。
-  assert.match(clip, /graphemes\(/, '必须按 grapheme 截断，不是 code point 也不是 UTF-16 slice')
-  assert.doesNotMatch(fn, /insertQuote\(fullText\)|insertQuote\(d\.text\)/, '不许直接把未截断全文塞进 insertQuote')
-  assert.match(fn, /insertQuote\(/, '必须走官方结构化引用')
+test('0.20 / 0.25：自建引用链路（fullText 拉取 + 截断）已删，不再有「塞满全文」入口', () => {
+  // 旧风险 = 把整条 fullText 塞进 composer。引用让位宿主后这条链路没有消费者：
+  //   fullText state / __fullTextCache 拉取 effect / clipQuote / graphemes / QUOTE_MAX_CHARS
+  assert.doesNotMatch(src, /const clipQuote = /, '截断函数已删（截断是宿主职责）')
+  assert.doesNotMatch(src, /selectionInMessage\(/, '选区判定已删')
+  assert.doesNotMatch(src, /QUOTE_MAX_CHARS/, '引用长度上限常量已删')
+  // 全文拉取本身仍是活的 —— 编辑框（/text 接口）必须还在
+  assert.ok((src.match(/\/api\/message-ops\/text\?/g) || []).length >= 1, '编辑框仍必须走 /text 取全文（引用删了不代表全文接口死）')
 })
 
 // ── 0.19.0 · dock：不再自动折叠 ──────────────────────────────────────────────
@@ -142,36 +142,35 @@ test('0.19：dock 不再因 markers 变化自动 setOpen(false)', () => {
 })
 
 // ── 0.20.0 · bug-hunt 修复回归锁 ─────────────────────────────────────────────
-test('0.20 H-2：引用选区必须 anchor/focus 同属一个精确 chat node', () => {
-  const fn = block('selectionInMessage')
-  assert.match(fn, /ownerOf\(sel\.anchorNode\)/, '必须取 anchor 归属')
-  assert.match(fn, /ownerOf\(sel\.focusNode\)/, '必须取 focus 归属')
-  assert.match(fn, /anchorOwner !== focusOwner/, '跨消息选区必须拒绝')
-  const owner = block('ownerOf')
-  assert.match(owner, /closest\('\[data-chat-node-key\]'\)/, '只认精确节点，不用通用 flow-kind 兜底')
-  assert.doesNotMatch(owner, /data-chat-flow-kind/, '不许用通用 flow-kind 兜底')
+test('0.20 H-2 / 0.25：旧选区归属判定已删；不得以通用 flow-kind 复活', () => {
+  // 旧 bug：用 [data-chat-flow-kind] 兜底判归属 → 选中 A 的消息却引用成 B。
+  // 引用机械删除后，风险只剩「有人把它加回来」。
+  assert.doesNotMatch(src, /const ownerOf = node =>/, '选区归属判定已删')
+  assert.doesNotMatch(src, /function selectionInMessage\(/, '选区判定已删，不得复活')
+  // 防御性：将来若重做，也不许用通用 flow-kind 认消息边界（要认 data-chat-node-key）
+  assert.doesNotMatch(src, /closest\('\[data-chat-flow-kind\]'\)/, '不许用通用 flow-kind 兜底判归属')
 })
 
-test('0.22 M-1：引用截断按 grapheme（Intl.Segmenter），不拆散 emoji ZWJ 序列', () => {
-  assert.match(src, /const clipQuote = /, '必须有安全截断函数')
-  assert.match(src, /Intl\.Segmenter/, '必须用 grapheme 分段器')
-  const fn = block('clipQuote')
-  assert.match(fn, /graphemes\(/, '按 grapheme 切')
-  assert.match(fn, /\[\\s\\n\]/, '必须在空白/换行边界收尾')
-  // 真执行：grapheme 切不会留下悬空 ZWJ 或半个家庭 emoji
-  assert.ok(typeof Intl !== 'undefined' && Intl.Segmenter, '运行时需支持 Intl.Segmenter')
+test('0.22 M-1 / 0.25：grapheme 截断器已随引用机械删除', () => {
+  // 原锁保护「按 grapheme 而不是 code point 切」，但该截断器只服务于自建引用。
+  // 引用删除后无消费者 —— 留着只会让人误判还有一个活的引用入口。
+  assert.doesNotMatch(src, /let quoteSegmenter = null/, '分段器缓存已删')
+  assert.doesNotMatch(src, /const graphemes = raw =>/, 'grapheme 切分函数已删')
+  assert.doesNotMatch(src, /new Intl\.Segmenter\(/, '不得复活引用用分段器')
 })
 
-test('0.20 M-2：来源标注不进 QuoteNode 正文（只走 toast）', () => {
-  const fn = block('runQuote')
-  assert.doesNotMatch(fn, /sourcePrefix.*\\n.*clipped|withSource/, '不许把来源拼进引用正文')
-  assert.match(fn, /quote\.doneWithSource/, '来源只放在 toast')
-  assert.match(fn, /insertQuote\(text/, 'insertQuote 收到的仍是纯原文')
+test('0.20 M-2 / 0.25：引用来源标注链路（5 个 quote.* key）已删', () => {
+  // 旧方案把「来源 seq」放 toast 而非 QuoteNode 正文，靠 quote.doneWithSource 承载。
+  // 引用入口删除后这 5 个 key 一起从 zh / en 两侧删除（单侧残留会被 P0-4 锁抓到）。
+  for (const k of ['slot.quote', 'quote.done', 'quote.unavailable', 'quote.sourcePrefix', 'quote.doneWithSource']) {
+    const re = new RegExp(`'${k.replace(/\./g, '\\.')}':`)
+    assert.doesNotMatch(src, re, k + ' 应随引用机械删除（zh / en 两侧都不能留）')
+  }
 })
 
 test('0.20 H-1/M-3：面板回滚限定用户消息，删除不受限', () => {
   assert.match(src, /const canRevert = canAct && pickedLive && pickedLive\.role === 'user'/, '回滚需用户消息')
-  const at = src.indexOf("ref: revertBtnRef")
+  const at = src.indexOf('ref: revertBtnRef')
   const seg = src.slice(Math.max(0, at - 300), at)
   assert.match(seg, /disabled: !canRevert/, '回滚按钮用 canRevert')
   const delAt = src.indexOf('ref: deleteOneBtnRef')

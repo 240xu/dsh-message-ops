@@ -87,8 +87,10 @@ test('LOW-6：不许引用未定义的 i18n key', () => {
 test('LOW-7：op.branchDesc 随 OpsDialog 删除（0.24.0）', () => {
   // 原锁校验 OpsDialog 里那段 radio 文案的 before 语义。OpsDialog 已删，
   // 该 key 只被死代码使用，一并删除。分叉的 before 语义现在由
-  // panel.branchHint / slot.forkHint 承载（它们有各自的锁）。
+  // panel.branchHint 承载；slot.forkHint 已随行内分叉删除（0.25.0）。
   assert.doesNotMatch(src, /'op\.branchDesc'/, 'op.branchDesc 应随 OpsDialog 删除')
   assert.match(src, /'panel\.branchHint'/, '分叉 before 语义仍由 panel.branchHint 承载')
-  assert.match(src, /'slot\.forkHint'/, '分叉 before 语义仍由 slot.forkHint 承载')
+  // 0.25.0：行内分叉删除后 slot.forkHint 随之删除，before 语义现在只由面板文案承载。
+  assert.doesNotMatch(src, /'slot\.forkHint'/, 'slot.forkHint 应随行内分叉删除')
+  assert.match(src, /'panel\.branchHint': '[^']*放回新会话输入框'/, '分叉 before 语义仍由 panel.branchHint 承载')
 })

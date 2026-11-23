@@ -9,8 +9,23 @@ window.__ModuleLoader__.load({
   factory: require => {
     const React = require('react')
     const { useCallback, useEffect, useRef, useState } = React
-    // 0.24.0：不再 require('@deepseek-ai/dsh-client-ui-primitives') 的 Modal ——
-    // 唯一使用者 OpsDialog 已删；面板/编辑框都是自绘浮层。
+    // 0.26.0：官方 primitives 回到本文件的依赖面（编辑框改用官方定位 / 点外关闭）。
+    //
+    // 为什么能直接 require：client-modules 的 require 第一分支就是 **platform seed 表**
+    // 命中（host shell bundle 的 seed 表显式列了 '@deepseek-ai/dsh-client-ui-primitives'），
+    // 与是否在 package.json 的 dsh.client.external 里声明无关。0.20.0 的 IconQuote
+    // 已经用同一条路径拿过组件，有实证。
+    //
+    // 拿不到时不能炸（老宿主 / 测试桩）：两个 hook 退化成**同签名 no-op**，
+    // 保证 hooks 调用顺序在所有环境里恒定（条件调用 hook 是 React 的硬违规）。
+    let __primitives = null
+    try {
+      __primitives = require('@deepseek-ai/dsh-client-ui-primitives')
+    } catch {
+      /* 老宿主：走下面的降级定位；编辑本身不受影响 */
+    }
+    const useAnchoredPosition = (__primitives && __primitives.useAnchoredPosition) || (() => null)
+    const useDismissOnOutsidePointer = (__primitives && __primitives.useDismissOnOutsidePointer) || (() => {})
 
     const SLOT = 'conversation.session.header.actions'
     const ROW_ID = 'message-ops'
@@ -19,20 +34,80 @@ window.__ModuleLoader__.load({
     const INPUT_DOCK_ID = 'message-ops-revert-dock'
     const DIALOG_ID = 'message-ops-dialog'
     const EVENT = 'dsh-message-ops:open'
+    /**
+     * 宿主 CSS-module hash（**单点**，审计 §3.1）。
+     *
+     * ⚠️ 这是本插件跨版本最脆的一处依赖：这些类名是宿主 CSS module 编译产物，
+     * **每个版本都可能变**（README 事故：0.9.0 写死 `Sixlwa_*` 前缀 → 宿主换成
+     * `EvIC1a_*` → 锚点集为空 → 按钮拿不到 seq → 点击必失败；`_flowItem` 当兜底
+     * → 把官方 turn-tail 当用户消息挂回滚按钮）。现在写法已修正为
+     * 「**稳定属性 `data-chat-flow-kind` 优先 + hash-immune 后缀 `_userRow` 兜底**」，
+     * 全 hash 只在宿主确实提供、且无法用稳定属性表达的地方用。
+     *
+     * 新增候选**只加这里**，不许在各调用点各写一份 —— 否则宿主一升级，
+     * 4 处漏 1 处 = 「一半按钮挂得上、一半挂不上」。
+     * 只收录**真有消费点**的 hash：`Sixlwa_userStack`/`EvIC1a_flowItem`/`TS9iAW_*`
+     * 在本文件没有任何全 hash 消费（前两者靠 `_userStack`/`_flowItem` 后缀与稳定属性，
+     * 后者宿主换过一轮、我们根本没碰 TurnTailNodeView），收进来就是新的死配置。
+     */
+    const HOST_CLS = {
+      actions: 'xzv4MW_actions', // MessageIconActions.module.css（官方用户消息动作行）
+      userRow: 'Sixlwa_userRow', // MessageItem.module.css（用户消息容器）
+    }
     // 0.5.2（P2）：回滚/恢复成功后广播 → RevertDock 重拉标记（否则 dock 只在切会话时刷新）
     const CHANGED_EVENT = 'dsh-message-ops:changed'
-    // 0.9.7（P4）：messageId→seq 索引失效（dataSig 变化）—— 已挂载的
-    // MsgSlotActions 靠它重跑解析 effect，否则「新 AI 消息旁没有按钮」。
-    const SEQ_INDEX_EVENT = 'dsh-message-ops:seq-index'
-    // 0.9.7（P0-2 读合并）：一次写操作会同时触发 150/700/1600ms 三连 +
+    // 0.9.7（P0-2 读合并）：一次写操作会同时触发「写后立即一次刷新」+
     // RevertDock 的 CHANGED 重拉 + openSession 后 MO 调度的 scan（5~6 次 GET）。
-    // 同一会话在此窗口内的请求共享同一个 promise；窗口**必须 < 1600ms**，
-    // 否则「视图重建后重算隐藏」的 1600ms 兜底会被上一次响应吞掉。
+    // 同一会话在此窗口内的请求共享同一个 promise。
+    // 0.25.0（手感）：尾随兜底刷新由 __refreshSurface 的 300ms 防抖承担，且它拉取前
+    // 会先 invalidateMessagesMemo() 强制走真网络 —— 所以本窗口值不再与刷新时机挂钩。
     const MSG_COALESCE_MS = 1000
     var __messagesMemo = { url: null, at: 0, p: null, settled: false }
     var invalidateMessagesMemo = () => {
       __messagesMemo = { url: null, at: 0, p: null, settled: false }
     }
+
+    /**
+     * 统一读 `/api/message-ops/*` 响应体（审计 §2.4 单点）。
+     *
+     * 改前有**三套**写法：`res.json().catch(() => null)`（6 处）、
+     * `.catch(() => ({}))`（2 处）、`try { ... } catch {}`（2 处）。其中
+     * `catch(() => null)` 把「服务端返回非 JSON 的 500 页面」与「返回了 JSON 但
+     * `ok:false`」压成同一个 `null` → 真正的 `data.error` 丢了 → 写操作
+     * （revert / restore）的用户可见文案坍缩成 `HTTP 500`，看不到「会话正在运行」
+     * 这类真原因。
+     *
+     * 本函数**只负责读**：恒返回对象（解析失败 / 空 body = `{}`），**绝不抛、绝不
+     * null** —— 调用方才能统一按 `data.error || 'HTTP ' + status` 拼文案。
+     * 成功判定统一走 `ok`（HTTP 2xx **且** 业务 `data.ok === true`，服务端所有
+     * 路由成功都回 `{ ok: true, ... }`）。
+     *
+     * ⚠️ 它**不**替代 fetch、不判 409、不碰 AbortController —— `setTarget(running:true)`
+     * 这类组件语义分支仍留在各调用点（审计 §6.1：万能 `fetchOpsJson` 不值得抽）。
+     *
+     * @returns {Promise<{ok: boolean, status: number, data: object}>}
+     */
+    var readOpsJson = async res => {
+      let data = null
+      try {
+        data = await res.json()
+      } catch {
+        /* 非 JSON 响应（网关 HTML 500 页 / 空 body）：按空对象处理，别丢 round-trip */
+      }
+      if (!data || typeof data !== 'object') data = {}
+      return { ok: res.ok === true && data.ok === true, status: Number(res.status) || 0, data }
+    }
+
+    /**
+     * 把任意 catch 值转成用户可读文案（审计 §3.4 单点：原先同一表达式写 13 遍）。
+     *
+     * @param reason - catch 到的任意值（Error / string / undefined）
+     * @param prefix - 前置文案（通常是 `t('errorPrefix')` / `t('panel.loadFail')`）
+     */
+    var errText = (reason, prefix) => String(prefix || '') + (reason && reason.message ? reason.message : String(reason))
+
+    /** 统一失败出口：服务端文案优先，退 `HTTP <status>`（`status` 为 0 时退 `?`）。 */
+    var opsError = (status, data) => new Error((data && data.error) || 'HTTP ' + (status || '?'))
     const SYNTHETIC_TURN_STYLE_ID = 'dsh-message-ops-synthetic-turn-hide'
     const syncSyntheticTurnStyle = messages => {
       if (typeof document === 'undefined' || !document.head) return
@@ -54,9 +129,78 @@ window.__ModuleLoader__.load({
         .map(turn => '[data-chat-flow-kind="turn-process"][data-chat-turn="' + turn + '"]{display:none!important}')
         .join('\n')
     }
+    /**
+     * 0.25.0（手感）面板全文取数层：缓存 + 尾随防抖 + 单飞。
+     *
+     * 改前：面板 `pick` 每选中一条就直连一次 `GET /api/message-ops/text`，
+     * 无缓存、无防抖 —— 用 ↑/↓ 连续划过列表时按条发请求（服务端每条都要
+     * 解析一次会话日志），而用户真正停下来看的只有最后那一条；回看同一
+     * seq 也照样重打一遍。
+     * 改后：① 命中过的 `sid|seq` 零请求；② 150ms 尾随防抖，快速划过时只发
+     * 停下来的那一条；③ 同 key 在途请求共享同一个 promise（不重复发）。
+     *
+     * 失效：`emitChanged()`（任何写操作后全文都可能变）清空整张表；缓存键
+     * 带 sessionId，切会话天然隔离。**只缓存成功拿到的非空全文** —— 失败
+     * 不缓存，否则一次网络抖动会把详情永久钉在 snippet 上（MED-5 红线：
+     * snippet 不许冒充原文，失败时由调用方回退并保持「这不是全文」的语义）。
+     */
+    const PANEL_TEXT_DEBOUNCE_MS = 150
+    var __panelTextCache = new Map()
+    var __panelTextInflight = new Map()
+    var __panelTextPending = null
+    const clearPanelTextCache = () => {
+      __panelTextCache.clear()
+      __panelTextInflight.clear()
+      if (__panelTextPending) {
+        clearTimeout(__panelTextPending.timer)
+        __panelTextPending.resolve(null)
+        __panelTextPending = null
+      }
+    }
+    var loadPanelText = (sessionId, seq) => {
+      const sid = String(sessionId == null ? '' : sessionId)
+      if (!sid || seq == null) return Promise.resolve(null)
+      const key = sid + '|' + String(seq)
+      const hit = __panelTextCache.get(key)
+      if (hit != null) return Promise.resolve(hit)
+      const inflight = __panelTextInflight.get(key)
+      if (inflight) return inflight
+      // 尾随防抖：被更新的一次选择取代时，上一次的 promise 以 null 收尾
+      // （调用方本来就按 detailReq 竞态序号丢弃过期结果）。
+      if (__panelTextPending) {
+        clearTimeout(__panelTextPending.timer)
+        __panelTextPending.resolve(null)
+        __panelTextPending = null
+      }
+      return new Promise(resolve => {
+        const timer = setTimeout(() => {
+          __panelTextPending = null
+          const url = '/api/message-ops/text?sessionId=' + encodeURIComponent(sid) + '&seq=' + encodeURIComponent(seq)
+          const started = fetch(url)
+            .then(readOpsJson)
+            .then(r => {
+              if (!r.ok) throw opsError(r.status, r.data)
+              const full = typeof r.data.text === 'string' && r.data.text !== '' ? r.data.text : null
+              if (full != null) __panelTextCache.set(key, full)
+              return full
+            })
+            .catch(() => null)
+          __panelTextInflight.set(
+            key,
+            started.then(text => {
+              __panelTextInflight.delete(key)
+              return text
+            }),
+          )
+          started.then(resolve)
+        }, PANEL_TEXT_DEBOUNCE_MS)
+        __panelTextPending = { key, timer, resolve }
+      })
+    }
     const emitChanged = () => {
       // 数据变了：连同本地缓存一起作废（否则 8s TTL 会让 openSession 后的
       // scan 拿旧 payload 重算隐藏 = 「回滚了但界面没变」）。
+      clearPanelTextCache()
       invalidateMessagesMemo()
       if (__peekRowsCache) {
         const c = __peekRowsCache()
@@ -75,7 +219,8 @@ window.__ModuleLoader__.load({
      * - 并发调用共享同一个 promise；
      * - 已结算的响应在 MSG_COALESCE_MS 内复用（一次写操作的 5~6 路重拉 → 1~2 次网络）；
      * - 只在 `ok:true` 时才留窗口：失败/非 2xx 立刻作废，免得把后续重试也吃掉；
-     * - 1600ms 那档兜底刷新由调用方先 `invalidateMessagesMemo()` 再拉，保证是真网络。
+     * - 尾随兜底刷新（`__refreshSurface` 的 300ms 防抖）自己先 `invalidateMessagesMemo()`
+     *   再拉，保证是真网络。
      */
     var fetchMessagesJson = rawUrl => {
       // 归一 sessionId 写法：本文件有的调用方传 `session-xxx`（dock / 对话框），
@@ -86,17 +231,12 @@ window.__ModuleLoader__.load({
       if (m.url === url && m.p && (!m.settled || Date.now() - m.at < MSG_COALESCE_MS)) return m.p
       const entry = { url, at: Date.now(), p: null, settled: false }
       entry.p = fetch(url)
-        .then(r =>
-          r
-            .json()
-            .catch(() => null)
-            .then(d => ({ r, d })),
-        )
-        .then(({ r, d }) => {
-          if (!r.ok || !d || d.ok !== true) throw new Error((d && d.error) || 'HTTP ' + r.status)
+        .then(readOpsJson)
+        .then(r => {
+          if (!r.ok) throw opsError(r.status, r.data)
           entry.settled = true
           entry.at = Date.now()
-          return d
+          return r.data
         })
         .catch(e => {
           if (__messagesMemo === entry) invalidateMessagesMemo()
@@ -115,13 +255,9 @@ window.__ModuleLoader__.load({
       'button.title': '消息操作（回滚/删除/分支）',
       'dialog.title': '消息操作',
       'dialog.cancel': '关闭',
-      'dialog.runningWarn': '⚠ 会话正在运行：请先停止该会话再执行回滚/删除/分支。',
       'slot.revert': '回滚到此条',
       'slot.revertPrivacyHint': '回滚到此条（不是删除：AI 看不到，但原文仍在本地会话文件）',
       'slot.revertUnmatched': '在日志里定位不到这条消息的 seq（通常是模型写的摘要与渲染文本偏差过大）——请改用「消息操作」对话框。',
-      'slot.fork': '从此条分叉',
-      'slot.forkHint': '复制此条之前的对话到新会话，并把此条原文放回新会话输入框',
-      'slot.forkDone': '已分叉：新会话 {id}',
       'slot.forkUnavailable': '分叉不可用：会话正在运行，或宿主未提供 session/fork',
       // 0.24.0（P3 入口收敛）：改名消除与外部插件 message-edit 的「同名不同义」。
       // 外部插件在 turnTail 也叫「编辑并重发」，但它 fork 出新分支、源会话不动；
@@ -138,37 +274,27 @@ window.__ModuleLoader__.load({
       'edit.placeholder': '编辑这条消息…',
       'edit.cancel': '取消',
       'edit.send': '撤销并发送',
-      'edit.sending': '回撤并发送中…',
+      'edit.sending': '撤销并发送中…',
+      'edit.resend': '重新发送',
+      'edit.sendFailed': '回撤已生效，但发送被拒：',
       'edit.empty': '内容为空，无法发送',
       'edit.failed': '回撤失败：',
-      'edit.done': '已回撤',
       'edit.doneSubmitted': '已回撤，改后的消息已提交',
       'edit.manual': '已回撤，改后的文本已放进输入框——请按回车发送',
-      'edit.running': '会话正在运行：需先停止会话再编辑重发',
+      'edit.running': '会话正在运行：可以先改文字，但要等它停下来才能撤销并发送',
       'edit.replaceHint':
         '发送会先回撤此条及其之后的全部可见消息，再把改后的文本作为新消息发出。注意：这不是删除——AI 看不到被回撤的内容，但原文仍保留在本地会话文件、可被恢复，直接翻看会话文件仍能读到。',
       'edit.shortcut': 'Ctrl/⌘ + Enter 发送 · Esc 取消',
-      'toast.openNew': '打开新会话',
-      'fork.official': '分支完成：新会话 {id}',
-      'fork.unavailable': '官方分支不可用：通常是因为会话正在运行，请先停止会话后重试。分支功能由 dsh 内置的 session/fork 提供。',
       'done.restore': '恢复完成：重放 {n} 条，跳过不可重放 {s} 条',
       'done.revert': '已回滚，原文可从恢复区放回',
       'done.revertNoRefill': '已回滚，但原文未能放回输入框（会话可能尚未挂载）；可重试或从消息操作面板手动复制',
-      'done.delete': '已遮蔽，刷新页面后生效',
-      'action.reload': '刷新页面',
       errorPrefix: '操作失败：',
       'dock.title': '已回撤 {n} 条消息',
       'dock.expand': '展开回撤列表',
       'dock.collapse': '折叠回撤列表',
-      'dock.shadowedN': '{n} 条已遮蔽',
       'dock.restore': '恢复',
       'dock.restoreHint': '恢复为重放：消息将出现在会话末尾，不会回到原位',
       'dock.restoring': '恢复中…',
-      'slot.quote': '引用到输入框',
-      'quote.done': '已引用到输入框',
-      'quote.unavailable': '引用不可用（输入框不可写或无全文）',
-      'quote.sourcePrefix': '引用自 seq {seq}',
-      'quote.doneWithSource': '已引用（来自 seq {seq}）',
       'undo.label': '回滚上一条消息',
       'undo.desc': '移除最后一条用户消息，原文回填输入框',
       'undo.done.undo': '已回滚上一条消息',
@@ -245,14 +371,10 @@ window.__ModuleLoader__.load({
       'button.title': 'Message ops (revert / delete / branch)',
       'dialog.title': 'Message ops',
       'dialog.cancel': 'Close',
-      'dialog.runningWarn': '⚠ Session is running: stop it before revert / delete / branch.',
       'slot.revert': 'Revert to here',
       'slot.revertPrivacyHint': 'Revert to here (not deletion: hidden from the AI, but the original text stays in the local session file)',
       'slot.revertUnmatched':
         'Cannot locate this message seq in the log (usually the model-written summary drifted too far from the rendered text) — use the Message ops dialog instead.',
-      'slot.fork': 'Branch from here',
-      'slot.forkHint': 'Copies the conversation above this message into a new session and puts this message back in the new composer',
-      'slot.forkDone': 'Branched: new session {id}',
       'slot.forkUnavailable': 'Branch unavailable: the session is running, or the host provides no session/fork',
       // 0.24.0 (P3): renamed to disambiguate from the third-party message-edit plugin,
       // which also says "Edit and resend" but forks a NEW branch and leaves the source
@@ -271,39 +393,28 @@ window.__ModuleLoader__.load({
       'edit.placeholder': 'Edit this message…',
       'edit.cancel': 'Cancel',
       'edit.send': 'Undo and send',
-      'edit.sending': 'Reverting and sending…',
+      'edit.sending': 'Undoing and sending…',
+      'edit.resend': 'Send again',
+      'edit.sendFailed': 'The revert went through, but sending was rejected: ',
       'edit.empty': 'Nothing to send — the text is empty',
       'edit.failed': 'Revert failed: ',
-      'edit.done': 'Reverted',
       'edit.doneSubmitted': 'Reverted; the edited message has been submitted',
       'edit.manual': 'Reverted; the edited text is in the composer — press Enter to send',
-      'edit.running': 'The session is running: stop it before editing and resending',
+      'edit.running': 'The session is running: edit freely, but Undo and send waits until it stops',
       'edit.replaceHint':
         'Sending reverts this message and every visible message after it, then sends the edited text as a new message. Note: this is not deletion — the AI will not see the reverted content, but the original text stays in the local session file, can be restored, and is still readable by opening that file directly.',
       'edit.shortcut': 'Ctrl/⌘ + Enter to send · Esc to cancel',
-      'toast.openNew': 'Open new session',
-      'fork.official': 'Branched (official fork): new session {id}',
-      'fork.unavailable':
-        'Built-in branch unavailable — usually because the session is running. Stop it and retry. Branching is provided by the dsh built-in session/fork.',
       'done.restore': 'Restored: replayed {n}, skipped non-replayable {s}',
       'done.revert': 'Reverted — restore the original from the restore area',
       'done.revertNoRefill':
         'Reverted, but the original text could not be put back in the composer (the view may not be mounted yet); retry or copy it manually from Message Ops',
-      'done.delete': 'Hidden; reload to apply',
-      'action.reload': 'Reload page',
       errorPrefix: 'Operation failed: ',
       'dock.title': '{n} rolled back messages',
       'dock.expand': 'Expand revert list',
       'dock.collapse': 'Collapse revert list',
-      'dock.shadowedN': '{n} shadowed',
       'dock.restore': 'Restore',
       'dock.restoreHint': 'Restores by replay: messages appear at the end of the session, not in their original place',
       'dock.restoring': 'Restoring…',
-      'slot.quote': 'Quote to composer',
-      'quote.done': 'Quoted into composer',
-      'quote.unavailable': 'Quote unavailable (composer locked or no full text)',
-      'quote.sourcePrefix': 'Quoted from seq {seq}',
-      'quote.doneWithSource': 'Quoted (from seq {seq})',
       'undo.label': 'Undo last message',
       'undo.desc': 'Remove the last user message and put its original text back into the composer',
       'undo.done.undo': 'Undid the last message',
@@ -390,12 +501,10 @@ window.__ModuleLoader__.load({
      *
      * 现在：`sessionId -> InputActions`。读写一律按会话取，
      * 取不到就走**明确失败路径**，绝不静默退到别的会话。
+     * （0.25.0 清理：无 sessionId 的全局兜底变量 `__inputActions` 已删除——
+     *   它 0 个读取方，留着只会让后来者以为还有一条「最后一次已知」的退路。）
      */
     var __inputActionsBySession = new Map()
-    // 兜底：仅用于**确实拿不到 sessionId** 的全局路径（如无 session 上下文的
-    // 工具调用）。任何能拿到 sessionId 的地方都必须用上面的 Map，
-    // 不允许读这个变量 —— 它是「最后一次已知」，可能属于另一个会话。
-    var __inputActions = null
 
     /** 会话键归一：`session-x` 与 `x` 视为同一会话（宿主两种拼写都会传）。 */
     function sessionKeyOf(sessionId) {
@@ -417,7 +526,6 @@ window.__ModuleLoader__.load({
     function rememberInputActions(sessionId, inputActions) {
       if (!inputActions || typeof inputActions.setDraft !== 'function') return
       const key = sessionKeyOf(sessionId)
-      __inputActions = inputActions // 仅供无 sessionId 的全局兜底
       if (key == null) return
       __inputActionsBySession.set(key, inputActions)
     }
@@ -439,10 +547,10 @@ window.__ModuleLoader__.load({
     // rowsCache 声明在 installUserRevertInjector() 内（闭包私有），而 /undo 的
     // onPick 在模块级作用域 —— 直接引用会 ReferenceError，表现为点菜单毫无反应。
     var __peekRowsCache = null // 0.6.0：会话视图会话 id（RevertDock/MsgSlotActions 刷新）
-    // messageId→seq 索引缓存（每会话一次拉取；0.3.0 assistant-actions 槽用）
-    var __seqIndexCache = new Map()
-    // messageId→全文缓存（0.5.0 消息引用用）
-    var __fullTextCache = new Map()
+    // 0.25.0 清理：messageId→seq / messageId→全文 两份缓存已删。
+    // 它们唯一的读者是 MsgSlotActions 的引用解析（0.23.0 起该插槽 return null），
+    // 写入方 syncSeqIndex 也随之删除；dataSig 驱动的失效广播一并退场。
+    // 现在 seq 的唯一权威来源是 rowsCache（DOM 注入器自己按会话维护）。
 
     function localeFallbackLang() {
       if (typeof navigator === 'undefined') return 'zh'
@@ -536,35 +644,9 @@ window.__ModuleLoader__.load({
      * 几何取自宿主 icon sprite 的 `dsw-icon-list-pen-outline-regular`
      * （16 viewBox，描边 1.2，与宿主动作行图标同一套视觉）。
      */
-    /**
-     * 分叉图标组件。0.18.0 起**不再用于面板唤起按钮**（那曾造成语义错位：
-     * "消息操作"面板长着"分叉"的脸），但保留它是因为 `branchIconMarkup`
-     * 与它共用 `BRANCH_PATH` 常量 —— `test/icon-render.test.js` 锁定了这条同源约束，
-     * 防止两处各画一套分叉几何而慢慢漂移。
-     */
-    function BranchIcon() {
-      return React.createElement(
-        'svg',
-        {
-          width: 16,
-          height: 16,
-          viewBox: '0 0 16 16',
-          fill: 'none',
-          xmlns: 'http://www.w3.org/2000/svg',
-          'aria-hidden': 'true',
-          focusable: 'false',
-        },
-        React.createElement('path', {
-          d: BRANCH_PATH,
-          stroke: 'currentColor',
-          strokeWidth: BRANCH_STROKE,
-          strokeLinecap: 'round',
-          strokeLinejoin: 'round',
-          fill: 'none',
-        }),
-      )
-    }
-
+    // 0.25.0 清理：React 版 `BranchIcon` 组件已删（0 处渲染）。
+    // 分叉几何现在只有一个入口 —— 侧栏菜单用的 `branchIconMarkup()`（innerHTML 场景），
+    // 两者原本共用 `BRANCH_PATH` / `BRANCH_STROKE`，删掉组件后常量仍是唯一数据源。
     function OpsPanelIcon() {
       return React.createElement(
         'svg',
@@ -827,7 +909,7 @@ window.__ModuleLoader__.load({
             setState('ready')
           } catch (reason) {
             if (requestId !== loadSeqRef.current) return
-            const message = t('panel.loadFail') + (reason && reason.message ? reason.message : String(reason))
+            const message = errText(reason, t('panel.loadFail'))
             if (quiet) setError(message)
             else {
               setLoadError(message)
@@ -864,20 +946,15 @@ window.__ModuleLoader__.load({
             '&limit=' +
             PANEL_SEARCH_LIMIT
           fetch(url)
-            .then(res =>
-              res
-                .json()
-                .catch(() => null)
-                .then(data => ({ res, data })),
-            )
-            .then(({ res, data }) => {
+            .then(readOpsJson)
+            .then(r => {
               if (cancelled) return
-              if (!res.ok || !data || data.ok !== true) throw new Error((data && data.error) || 'HTTP ' + res.status)
-              setHits(Array.isArray(data.results) ? data.results : [])
+              if (!r.ok) throw opsError(r.status, r.data)
+              setHits(Array.isArray(r.data.results) ? r.data.results : [])
               setError(null)
             })
             .catch(reason => {
-              if (!cancelled) setError(t('panel.searchFail') + (reason && reason.message ? reason.message : String(reason)))
+              if (!cancelled) setError(errText(reason, t('panel.searchFail')))
             })
             .finally(() => {
               if (!cancelled) setSearching(false)
@@ -894,16 +971,17 @@ window.__ModuleLoader__.load({
         setTrashState('loading')
         setTrashError(null)
         try {
-          const res = await fetch('/api/message-ops/session/trash')
-          const data = await res.json().catch(() => null)
+          // 竞态门是组件语义（requestId 是 hook state），保留在调用点；
+          // 只把「读响应体 + 校验 + 转文案」换成单点（审计 §2.4）。
+          const r = await readOpsJson(await fetch('/api/message-ops/session/trash'))
           if (requestId !== trashSeqRef.current) return
-          if (!res.ok || !data || data.ok !== true) throw new Error((data && data.error) || 'HTTP ' + res.status)
-          setTrash(Array.isArray(data.entries) ? data.entries : [])
+          if (!r.ok) throw opsError(r.status, r.data)
+          setTrash(Array.isArray(r.data.entries) ? r.data.entries : [])
           setTrashError(null)
           setTrashState('ready')
         } catch (reason) {
           if (requestId !== trashSeqRef.current) return
-          setTrashError(t('panel.loadFail') + (reason && reason.message ? reason.message : String(reason)))
+          setTrashError(errText(reason, t('panel.loadFail')))
           setTrashState('error')
         }
       }, [t])
@@ -1195,25 +1273,15 @@ window.__ModuleLoader__.load({
           setDetailState('loading')
           setDone('')
           const req = ++detailReq.current
-          fetch('/api/message-ops/text?sessionId=' + encodeURIComponent(sid) + '&seq=' + encodeURIComponent(m.seq))
-            .then(res =>
-              res
-                .json()
-                .catch(() => null)
-                .then(data => ({ res, data })),
-            )
-            .then(({ res, data }) => {
-              if (req !== detailReq.current) return
-              if (!res.ok || !data || data.ok !== true) throw new Error((data && data.error) || 'HTTP ' + res.status)
-              const full = typeof data.text === 'string' && data.text !== '' ? data.text : null
-              setDetail(full ?? (m.snippet || ''))
-              setDetailState('ready')
-            })
-            .catch(() => {
-              if (req !== detailReq.current) return
-              setDetail(m.snippet || '') // 拉全文失败 → 只有截断的 snippet，不许冒充原文
-              setDetailState('ready')
-            })
+          // 0.25.0（手感）：全文取数交给 loadPanelText —— 命中缓存零请求、
+          // 快速划过列表只发停下来的那一条、同 seq 在途共享。竞态仍由
+          // detailReq 把关（过期结果一律丢弃）。
+          loadPanelText(sid, m.seq).then(full => {
+            if (req !== detailReq.current) return
+            // 失败（null）→ 只有截断的 snippet，不许冒充原文（MED-5）
+            setDetail(full ?? (m.snippet || ''))
+            setDetailState('ready')
+          })
         },
         [busy, sid],
       )
@@ -1271,11 +1339,8 @@ window.__ModuleLoader__.load({
             }, 0)
             notifyDone(msg)
             emitChanged()
-            try {
-              if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(target.sessionId)
-            } catch {
-              /* view rebuild is best effort */
-            }
+            // 0.26.0：统一走 safeOpenSession（失败 warn，不静默吞 —— 审计 §2.3）
+            safeOpenSession(target.sessionId, 'panel-action')
             setTimeout(() => {
               loadMessages(true).catch(() => {})
             }, 650)
@@ -1531,11 +1596,7 @@ window.__ModuleLoader__.load({
                         className: 'mopsAction primary',
                         style: { marginLeft: 10 },
                         onClick: () => {
-                          try {
-                            if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(childId)
-                          } catch {
-                            /* best effort */
-                          }
+                          safeOpenSession(childId, 'panel-branch')
                         },
                       },
                       t('panel.openNew'),
@@ -1971,231 +2032,268 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // --- 0.20.0 · 「编辑并重发」的编排层 ----------------------------------------
+    // --- 0.26.0 · 「编辑并回撤重发」的编排层 -------------------------------------
     //
-    // 语义（用户明确要求 + lead 决断；**不是** opencode 的立即回填，也**不是** fork）：
+    // 语义（用户原话：干净的定制编辑框，就在那条消息旁边弹出，然后发送）：
     //
-    //   点铅笔 → 只读：GET /text 取全文，在编辑框里改文字。零写操作。
-    //   点「取消」/ Esc / 点遮罩 → 只清本地 state。零 fetch、零写盘、零 openSession。
-    //   点「发送并回撤」这一刻才写，顺序严格如下：
+    //   点铅笔 → **纯读**：GET /text 取全文，在贴着该消息的浮层里改文字。零写操作。
+    //   取消 / Esc / 点外面 → 只清本地 state。零 fetch、零写盘、零 openSession。
+    //   点「撤销并发送」这一刻才写，顺序严格如下：
     //     ① POST /api/message-ops/revert { sessionId, seq }
-    //          失败（含 409 运行中）→ 保留编辑框与用户已输入的文本，报错，不再往下走
-    //     ② markRowsShadowedFrom(seq)        —— 与其它回滚入口共用同一个防 409 护栏
-    //     ③ writeSessionDraft(rawSessionId)  —— 合并写入，保住 view 偏好；这是权威值
-    //     ④ setDraft + persistDraft          —— 尽力同步「活着的」编辑器
-    //     ⑤ emitChanged + openSessionById    —— 视图重建；remount 时从 localStorage 读回同一份草稿
-    //     ⑥ 有界等待重挂后 submit() 一次      —— 不可用则明确提示「请按回车发送」，绝不静默
+    //          失败（含 409 运行中）→ 保留浮层与用户已改的文本，报错，**零副作用**
+    //     ② markRowsShadowedFrom(seq)  —— 与其它回滚入口共用同一个防 409 护栏
+    //     ③ emitChanged + openSession  —— 视图重建（遮蔽才立即可见）
+    //     ④ sessions.using(...).prompt([{ type: 'text', text }], 'queue')
+    //          —— 官方发送面。失败按 error.code/message 上抛，**不再**假成功
     //
-    // 为什么 ③ 必须在 ⑤ 之前：openSession 会卸载并重挂编辑器，新挂载走
-    // `readConversationDraft(sid)` 从 localStorage 初始化。先落盘才是无竞态路径
-    // （0.11.3 / 0.14.0 两次事故的同一个教训，见 refillComposer 注释）。
+    // 为什么删掉 0.20~0.25 的「写草稿 + 轮询 inputActions.submit」：
+    //   老路径要先写 localStorage 草稿 → 重建视图 → 等宿主重挂编辑器（8×120ms 有界
+    //   轮询）→ 再 setDraft + submit()。它有两个副作用：①改后的文本**留在 composer**
+    //   （用户发完还看得见同一段字，正是「UI 上又复现一遍」）；②轮询期间宿主任何重渲染
+    //   都可能让 submit 打到已 dispose 的实例。官方 `sessions.using` + `session.prompt`
+    //   是宿主自己的发送面：排队语义由宿主保证，失败有结构化 error code。
     //
-    // 为什么不用 fork：「分叉」按钮的语义是源会话一字不动。同一个「编辑」动作若在
-    // 铅笔里改写源会话、在分叉里保留源会话，就是两套相反语义 —— 用户无法预期。
+    // 老宿主降级（sessions 服务 / session.prompt 缺席）：**唯一**兜底 = 把文本写进该
+    // 会话草稿并回读校验，再提示按回车（edit.manual）。只有这一条，绝不复制第二套
+    // composer 逻辑。降级路径返回 persisted，组件据此选择文案。
+    //
+    // 为什么不用 fork：「分叉」的语义是源会话一字不动；同一个「编辑」动作若在铅笔里
+    // 改写源会话、在分叉里保留源会话，就是两套相反语义 —— 用户无法预期。
     const EDIT_EVENT = 'dsh-message-ops:edit'
     const EDIT_ID = 'message-ops-edit-resend'
     const EDIT_STYLE_ID = 'dsh-message-ops-edit-style'
-    /** 等待 composer 重挂的最大轮数 / 间隔：有界，不无限自旋。 */
-    const EDIT_SUBMIT_ATTEMPTS = 8
-    const EDIT_SUBMIT_INTERVAL_MS = 120
+    /** 视口边距 / 与锚点的间距：与官方 Menu 的 PANEL_MARGIN / PANEL_GAP 对齐。 */
+    const EDIT_PANEL_MARGIN = 12
+    const EDIT_PANEL_GAP = 8
+    /** 浮层宽度跟随目标消息块，落在 280~560 之间（不再是固定 560 居中模态）。 */
+    const EDIT_PANEL_MIN_WIDTH = 280
+    const EDIT_PANEL_MAX_WIDTH = 560
+    /** 锚点下方空间不足这个预算就上翻（官方 useAnchoredPosition 只 clamp、不翻转）。 */
+    const EDIT_FLIP_MIN_HEIGHT = 260
+    /**
+     * 官方 session 引用来源标签。
+     *
+     * `SessionReferenceSource` 是**声明合并可扩展**的开放表（宿主只内置
+     * controllerOperation / gateway 两项），第三方插件自报一个标签是官方允许的用法
+     * （第三方 message-edit 插件同样用 'messageEdit'）。它只进 retainedBy 计数，
+     * 运行时**不做白名单校验**（已读 dsh-api-session-controller 的 retainScope 源码）。
+     */
+    const EDIT_SOURCE = 'messageEdit'
 
     /**
-     * 有界等待 composer 重挂后提交**一次**。
+     * 浮层落座决策（**纯函数**，可真执行断言）。
      *
-     * 判据：该会话的 InputActions 换成新对象 = 宿主重挂了编辑器（openSession 之后必然发生）。
-     * 到上限仍没换（例如视图没重建的内联路径）就用当前这个提交一次 —— 宁可多一条
-     * 兜底提示，也不要无限等。**只提交一次**：重复 submit 会发出两条消息，比失败更糟。
+     * 官方 `useAnchoredPosition` 只做视口 clamp，**不翻转**（已读 shell bundle 里的
+     * 实现：算完 top/bottom 后只有 Math.min/max，没有 side 切换）。所以「下方空间不够
+     * 就上翻」由本层决定，再把 side 交给官方 hook —— 定位本身仍由官方实现，
+     * 我们只补一个官方没有的输入。
      *
-     * @param text - 要提交的文本
-     * @param options - { attempts, intervalMs, sessionId }，测试注入更小值
-     * @returns Promise<boolean> 是否成功调用了宿主 submit
+     * @param anchorRect - 目标消息块的 getBoundingClientRect 快照（只需 top/bottom/width）
+     * @param viewport - { width, height }
+     * @returns { side: 'bottom'|'top', width, gap, margin }
      */
-    function submitEditedText(text, options) {
-      const opts = options || {}
-      const attempts = Number.isSafeInteger(opts.attempts) && opts.attempts > 0 ? opts.attempts : EDIT_SUBMIT_ATTEMPTS
-      const intervalMs = Number.isSafeInteger(opts.intervalMs) && opts.intervalMs >= 0 ? opts.intervalMs : EDIT_SUBMIT_INTERVAL_MS
-      // 0.24.0 P4：按会话读 InputActions。opts.getInputActions 保留给真执行测试注入。
-      //
-      // ⚠️ 判据语义变化：旧实现用「对象变了」= 宿主重挂编辑器。改成按会话隔离后，
-      // 对象变化只说明**这一会话**的 shell 换了实例（重挂），跨会话不会误触发，
-      // 比旧判据更准。读不到该会话的 InputActions 时**不提交** ——
-      // 宁可让调用方提示手动回车，也不能拿别的会话的 submit 发出去。
-      const targetSessionId = opts.sessionId
-      const readInputActions = typeof opts.getInputActions === 'function' ? opts.getInputActions : () => inputActionsFor(targetSessionId)
-      const before = readInputActions()
-      return new Promise(resolve => {
-        let n = 0
-        const tick = () => {
-          n += 1
-          const ia = readInputActions()
-          const usable = ia && typeof ia.submit === 'function' && typeof ia.setDraft === 'function'
-          const remounted = !!ia && ia !== before
-          if (usable && (remounted || n >= attempts)) {
-            try {
-              // 先确保编辑器里就是这段文字：重挂后 draft 已从 localStorage 读回，
-              // 但内联路径（视图没重建）里编辑器仍是旧内容，必须显式覆盖。
-              ia.setDraft(text)
-              if (typeof ia.persistDraft === 'function') ia.persistDraft()
-              ia.submit()
-              resolve(true)
-            } catch (e) {
-              console.warn('[message-ops] submit failed:', e)
-              resolve(false)
-            }
-            return
-          }
-          if (n >= attempts) {
-            resolve(false)
-            return
-          }
-          setTimeout(tick, intervalMs)
-        }
-        setTimeout(tick, intervalMs)
-      })
+    function editSeatOf(anchorRect, viewport) {
+      const rect = anchorRect || {}
+      const vw = Math.max(0, Number(viewport && viewport.width) || 0)
+      const vh = Math.max(0, Number(viewport && viewport.height) || 0)
+      const anchorBottom = Number(rect.bottom) || 0
+      const anchorWidth = Number(rect.width) || 0
+      // 锚点完全滚出视口（长会话里很常见）→ 判定为「不可锚定」，由调用方退回屏幕中央。
+      // 不看这条的话，官方 clamp 会把面板贴到视口顶/底，用户会以为它「飘」到别处。
+      const inView = Number(rect.top) < vh && anchorBottom > 0
+      // 下方剩余空间 = 视口底 - 消息块底。够 260px 就往下挂（用户最常改的是最后一条）；
+      // 往下挂会盖住 composer 时翻到上方。
+      const side = vh - anchorBottom >= EDIT_FLIP_MIN_HEIGHT ? 'bottom' : 'top'
+      // 宽度**跟随消息块**（用户要的「贴着那条消息」），但不无限拉宽、也不窄到没法编辑。
+      const wanted = Math.max(EDIT_PANEL_MIN_WIDTH, Math.min(EDIT_PANEL_MAX_WIDTH, anchorWidth))
+      const room = vw - EDIT_PANEL_MARGIN * 2
+      const width = Math.max(EDIT_PANEL_MIN_WIDTH, Math.min(wanted, Math.max(EDIT_PANEL_MIN_WIDTH, room)))
+      return { side: side, width: width, gap: EDIT_PANEL_GAP, margin: EDIT_PANEL_MARGIN, inView: inView }
     }
 
     /**
-     * 「发送并回撤」的唯一编排实现。
+     * 官方发送面：`sessions.using(target, { source }, ref => ref.binding.session.prompt(...))`。
+     *
+     * 为什么手写 using 而不是 retain/release：官方 `using` 的实现就是
+     * `retain()` → `await reference.ready` → `operation()` → **`finally release()`**
+     * （已读 dsh-api-session-controller/lib/client.js）。自己 retain 就得多写一遍
+     * release，失败路径更容易漏 —— 漏了就是 scope 永远不回收。
+     *
+     * 为什么 `prompt(..., 'queue')`：queue = 追加一轮，steer = 打断当前轮。回撤之后
+     * 会话本来就在等新输入，queue 是官方的「接着跑一轮」语义（与宿主 composer 回车
+     * 同一条 API）。运行中会话的回撤会被服务端 409 拦住（见 ①），所以不需要 steer 抢跑。
+     *
+     * @param text - 改后的文本
+     * @param options - { rawSessionId, sessions }
+     * @returns { ok, accepted?, unavailable?, reason? }
+     */
+    async function promptEditedText(text, options) {
+      const opts = options || {}
+      const rawSessionId = String(opts.rawSessionId || '').trim()
+      const sessions = opts.sessions || __sessionsSvc
+      if (!sessions || typeof sessions.using !== 'function') {
+        return { ok: false, unavailable: true, reason: 'sessions service unavailable' }
+      }
+      try {
+        return await sessions.using(rawSessionId, { source: EDIT_SOURCE }, async reference => {
+          if (reference && reference.ready) await reference.ready
+          const face = reference && reference.binding ? reference.binding.session : null
+          if (!face || typeof face.prompt !== 'function') {
+            return { ok: false, unavailable: true, reason: 'session.prompt unavailable' }
+          }
+          let result = null
+          try {
+            result = await face.prompt([{ type: 'text', text: text }], 'queue')
+          } catch (e) {
+            return { ok: false, reason: e && e.message ? e.message : String(e) }
+          }
+          if (!result || result.ok !== true) {
+            const err = result && result.error
+            return { ok: false, reason: (err && (err.code || err.message)) || 'prompt rejected' }
+          }
+          return { ok: true, accepted: true }
+        })
+      } catch (e) {
+        // `using` 的 acquisition 失败（未知会话 / generation 已 dispose）也走这里。
+        return { ok: false, reason: e && e.message ? e.message : String(e) }
+      }
+    }
+
+    /**
+     * 「撤销并发送」的唯一编排实现。
      *
      * 抽成具名函数（而不是埋在组件里）有两个理由：
      *   1. 时序是本功能的核心契约，必须能被测试**真执行**断言
-     *      （revert 失败 → 不写草稿、不 openSession、用户文本保留）。
+     *      （revert 失败 → 零 prompt、零草稿、零视图重建）。
      *   2. 组件只负责 UI 状态；失败时「保留文本」由调用方按返回值决定。
      *
-     * @param options - { sessionId, rawSessionId, seq, text, deps }
+     * @param options - { sessionId, rawSessionId, seq, text, deps, reverted }
      *   sessionId    裸 uuid（给 HTTP）
-     *   rawSessionId `session-` 前缀（给 openSession 与草稿键）；缺省从 sessionId 补
+     *   rawSessionId `session-` 前缀（给 sessions.using 与草稿键）；缺省从 sessionId 补
+     *   reverted     已经成功回撤过一次（「重新发送」）：跳过 ①~③，直接走 ④。
+     *                同一个 seq 再回撤必然 409，所以重试只能重发。
      *   deps         可注入的副作用集合（测试用）；缺省取真实实现
-     * @returns Promise<{ok, stage, submitted?, persisted?, reason?, status?}>
-     *   stage: 'validate' | 'revert' | 'done'
+     * @returns Promise<{ok, stage, submitted?, mode?, manual?, persisted?, reason?, status?}>
+     *   stage: 'validate' | 'revert' | 'send' | 'done'
      */
     async function sendEditAndRevert(options) {
       const opts = options || {}
       const sessionId = String(opts.sessionId || '').trim()
-      // 草稿键与 openSession 都必须用带 `session-` 前缀的写法：
-      // 裸 uuid 会让宿主 `sessions.retain` 抛 `unknown session` 并被外层 catch 静默吞掉
-      // （0.9.6 事故，见 afterWrite 注释）。这里显式补齐，不假设调用方传对。
+      // sessions.using 与草稿键都必须用带 `session-` 前缀的写法：裸 uuid 会让宿主
+      // `sessions.retain` 抛 `unknown session`（0.9.6 事故，见 afterWrite 注释）。
       const rawSessionId = String(opts.rawSessionId || '').trim() || (sessionId ? 'session-' + sessionId : '')
       const seq = opts.seq
       const text = typeof opts.text === 'string' ? opts.text : ''
       const deps = opts.deps || {}
-      // ⚠️ 这里只先解析 fetch：revert 失败时**不得**触碰任何草稿/视图副作用，
+      const reverted = opts.reverted === true
+      // ⚠️ 先只解析 fetch：revert 失败时**不得**触碰任何草稿/视图副作用，
       // 连「解析实现」都不该发生在失败之前（解析顺序 = 语义顺序）。
       const doFetch = deps.fetch || fetch
 
-      if (!sessionId || !Number.isSafeInteger(seq) || seq < 0) return { ok: false, stage: 'validate', reason: 'invalid target' }
+      if (!sessionId) return { ok: false, stage: 'validate', reason: 'invalid target' }
+      if (!reverted && !(Number.isSafeInteger(seq) && seq >= 0)) return { ok: false, stage: 'validate', reason: 'invalid target' }
       if (text.trim() === '') return { ok: false, stage: 'validate', reason: 'empty' }
 
-      // ① 回撤：失败就**什么都不做**（不写草稿、不重建视图、不动编辑器）
-      let res = null
-      let data = null
-      try {
-        res = await doFetch('/api/message-ops/revert', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sessionId, seq }),
-        })
-        data = await res.json().catch(() => null)
-      } catch (e) {
-        return { ok: false, stage: 'revert', reason: e && e.message ? e.message : String(e) }
-      }
-      if (!res || !res.ok || !data || data.ok !== true) {
-        return {
-          ok: false,
-          stage: 'revert',
-          status: res ? res.status : 0,
-          reason: (data && data.error) || 'HTTP ' + (res ? res.status : '?'),
-        }
-      }
-
-      // ── 回撤已成功 ── 从这里开始才解析并使用其余副作用 ──────────────────────
-      const doWrite = deps.writeSessionDraft || writeSessionDraft
-      const doRead = deps.readSessionDraft || readSessionDraft
-      const markShadowed = deps.markRowsShadowedFrom || markRowsShadowedFrom
-      const doSetDraft =
-        deps.setDraft ||
-        (v => {
-          // 0.24.0 P4：必须按会话取，取不到就明确失败（返回 false），
-          // 绝不静默退到 __inputActions —— 那可能是别的会话的 composer。
-          const ia = inputActionsFor(rawSessionId)
-          if (!ia || typeof ia.setDraft !== 'function') return false
-          return ia.setDraft(v)
-        })
-      const doPersistDraft =
-        deps.persistDraft ||
-        (() => {
-          const ia = inputActionsFor(rawSessionId)
-          if (!ia || typeof ia.persistDraft !== 'function') return false
-          return ia.persistDraft()
-        })
-      const doEmitChanged = deps.emitChanged || emitChanged
-      const doOpenSession = deps.openSessionById || openSessionById
-      const doSubmit = deps.submitEdited || (t => submitEditedText(t, { sessionId: rawSessionId }))
-
-      // ② 防 409 护栏：本地缓存里 >= seq 的行立刻标成已遮蔽（与 runUserRevert/runUndo 同一函数）
-      try {
-        markShadowed(seq)
-      } catch (e) {
-        console.warn('[message-ops] markRowsShadowedFrom failed:', e)
-      }
-
-      // ③ 权威落盘（合并写，保住 view 偏好）
-      let persisted = false
-      try {
-        persisted = doWrite(rawSessionId, text) === true
-      } catch (e) {
-        console.warn('[message-ops] writeSessionDraft failed:', e)
-      }
-      // 回读校验：只有读到**不同的非空值**才算落盘失败（读不到时保持原判断，不误判）
-      if (persisted && typeof doRead === 'function') {
+      if (!reverted) {
+        // ① 回撤：失败就**什么都不做**（不写草稿、不重建视图、不动编辑器）
+        let res = null
+        let data = null
         try {
-          const stored = doRead(rawSessionId)
-          if (stored != null && stored !== text) persisted = false
+          res = await doFetch('/api/message-ops/revert', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionId, seq }),
+          })
+          data = await res.json().catch(() => null)
         } catch (e) {
-          /* 读回失败不推翻写入结果 */
+          return { ok: false, stage: 'revert', reason: e && e.message ? e.message : String(e) }
+        }
+        if (!res || !res.ok || !data || data.ok !== true) {
+          return {
+            ok: false,
+            stage: 'revert',
+            status: res ? res.status : 0,
+            reason: (data && data.error) || 'HTTP ' + (res ? res.status : '?'),
+          }
+        }
+
+        // ── 回撤已成功 ── 从这里开始才解析并使用其余副作用 ──────────────────────
+        const markShadowed = deps.markRowsShadowedFrom || markRowsShadowedFrom
+        const doEmitChanged = deps.emitChanged || emitChanged
+        const doOpenSession = deps.openSessionById || openSessionById
+
+        // ② 防 409 护栏：本地缓存里 >= seq 的行立刻标成已遮蔽（与 runUserRevert/runUndo 同一函数）
+        try {
+          markShadowed(seq)
+        } catch (e) {
+          console.warn('[message-ops] markRowsShadowedFrom failed:', e)
+        }
+
+        // ③ 通知 + 重建视图（rawSessionId 带前缀；裸 uuid 会抛 unknown session）
+        try {
+          doEmitChanged()
+        } catch (e) {
+          /* 广播失败不阻断写结果 */
+        }
+        try {
+          doOpenSession(rawSessionId)
+        } catch (e) {
+          console.warn('[message-ops] openSession failed:', e)
         }
       }
 
-      // ④ 尽力同步活着的编辑器（重挂路径靠 ③；这里只覆盖「视图没重建」的内联路径）
+      // ④ 官方 prompt —— **恰好一次**。注入位是 deps.prompt(text, 'queue')：
+      //    真执行测试与 contract-hardening 都从这个面观测，不靠源码形状。
+      const doPrompt = deps.prompt || (t => promptEditedText(t, { rawSessionId: rawSessionId, sessions: deps.sessions }))
+      let sent = null
       try {
-        doSetDraft(text)
+        sent = await doPrompt(text, 'queue')
       } catch (e) {
-        console.warn('[message-ops] setDraft failed:', e)
+        sent = { ok: false, reason: e && e.message ? e.message : String(e) }
       }
-      try {
-        doPersistDraft()
-      } catch (e) {
-        /* persistDraft 缺席不阻断 —— ③ 已经落盘 */
-      }
-
-      // ⑤ 通知 + 重建视图（rawSessionId 带前缀；裸 uuid 会抛 unknown session）
-      try {
-        doEmitChanged()
-      } catch (e) {
-        /* 广播失败不阻断写结果 */
-      }
-      try {
-        doOpenSession(rawSessionId)
-      } catch (e) {
-        console.warn('[message-ops] openSession failed:', e)
+      if (sent && sent.ok === true) {
+        return { ok: true, stage: 'done', submitted: true, mode: 'official' }
       }
 
-      // ⑥ 有界等待重挂后提交一次；不可用 → 调用方提示手动回车
-      let submitted = false
-      try {
-        submitted = (await doSubmit(text)) === true
-      } catch (e) {
-        console.warn('[message-ops] submitEdited failed:', e)
+      // 老宿主（官方发送面缺席）→ **唯一**降级：写草稿 + 回读校验 + 提示按回车。
+      // 这一条真落盘才算成功；回读到的值不同就如实报 persisted=false。
+      if (sent && sent.unavailable === true) {
+        const doWrite = deps.writeSessionDraft || writeSessionDraft
+        const doRead = deps.readSessionDraft || readSessionDraft
+        let persisted = false
+        try {
+          persisted = doWrite(rawSessionId, text) === true
+        } catch (e) {
+          console.warn('[message-ops] writeSessionDraft failed:', e)
+        }
+        // 回读校验：只有读到**不同的非空值**才算落盘失败（读不到时保持原判断，不误判）
+        if (persisted && typeof doRead === 'function') {
+          try {
+            const stored = doRead(rawSessionId)
+            if (stored != null && stored !== text) persisted = false
+          } catch (e) {
+            /* 读回失败不推翻写入结果 */
+          }
+        }
+        return { ok: true, stage: 'done', submitted: false, mode: 'manual', manual: true, persisted: persisted }
       }
-      return { ok: true, stage: 'done', submitted: submitted === true, persisted: persisted }
+
+      // 官方面在、但拒收/抛错：**回撤已经成功**，绝不能返回 ok:false 让 UI 报「回撤失败」。
+      // 单列 stage:'send'，组件据此给「回撤成功但发送被拒」的文案。
+      const reason = sent && sent.reason ? String(sent.reason) : 'prompt rejected'
+      return { ok: false, stage: 'send', submitted: false, mode: 'official', reason: reason }
     }
 
     /**
      * 编辑框样式：颜色全走 `--dsw-alias-*`，圆角全走 `--dsw-radius-*`，无裸 hex。
      *
-     * ⚠️ 只用**已确认存在**的 token：`--dsw-alias-label-error` 与 `--dsw-alias-bg-layer-1`
-     * 在宿主 theme 包里并不存在（别处有误用），错误色一律用 `--dsw-alias-state-error-primary`，
-     * 背景用 `--dsw-alias-bg-layer-1`。全部带 fallback，深色模式不吃亏。
+     * 0.26.0 形态变化：从「全屏遮罩 + 居中 560px 模态」改成「贴着目标消息的浮层」——
+     * 所以不再有 .mopsErScrim（不再遮住整个会话），面板宽度由 JS 按锚点消息块算好后
+     * 内联给出（不写死 560px）。定位坐标同样由官方 useAnchoredPosition 以 fixed 内联
+     * 给出，样式表只负责观感。
+     *
+     * ⚠️ 只用**已确认存在**的 token：`--dsw-alias-label-error` 在宿主 theme 包里并不存在
+     * （别处有误用），错误色一律 `--dsw-alias-state-error-primary`。
      */
     function ensureEditStyle() {
       try {
@@ -2204,36 +2302,40 @@ window.__ModuleLoader__.load({
         const tag = document.createElement('style')
         tag.id = EDIT_STYLE_ID
         tag.textContent = [
-          '.mopsErScrim{position:fixed;inset:0;z-index:1200;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--dsw-alias-bg-mask-1,rgba(15,17,21,.42));animation:mopsErFade .12s ease-out}',
-          '@keyframes mopsErFade{from{opacity:0}to{opacity:1}}',
-          '@keyframes mopsErRise{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:none}}',
-          '@media(prefers-reduced-motion:reduce){.mopsErScrim,.mopsErPanel{animation:none}}',
-          '.mopsErPanel{width:min(560px,100%);max-height:min(720px,100%);display:flex;flex-direction:column;gap:10px;padding:16px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#0f1115);border:1px solid var(--dsw-alias-border-l2,#e6e6e6);border-radius:var(--dsw-radius-md,12px);box-shadow:0 24px 64px rgba(15,17,21,.24);font-family:inherit;font-size:13px;line-height:1.45;animation:mopsErRise .16s cubic-bezier(.2,.8,.3,1)}',
+          '.mopsErPanel{position:fixed;z-index:60;display:flex;flex-direction:column;gap:8px;padding:12px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#0f1115);border:1px solid var(--dsw-alias-border-l2,#e6e6e6);border-radius:var(--dsw-radius-md,12px);box-shadow:0 12px 32px rgba(15,17,21,.18);font-family:inherit;font-size:13px;line-height:1.45}',
           '.mopsErPanel *{box-sizing:border-box}',
-          '.mopsErHead{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex:none}',
-          '.mopsErTitle{font-size:15px;font-weight:600;line-height:22px}',
-          '.mopsErSub{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#8a8a8e);margin-top:2px;font-variant-numeric:tabular-nums}',
-          '.mopsErClose{width:28px;height:28px;flex:none;display:inline-flex;align-items:center;justify-content:center;border:1px solid transparent;border-radius:var(--dsw-radius-xs,4px);background:transparent;color:var(--dsw-alias-label-tertiary,#8a8a8e);cursor:pointer;font-size:16px;line-height:1}',
-          '.mopsErClose:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));color:var(--dsw-alias-label-primary,#0f1115)}',
-          '.mopsErClose:disabled{opacity:.4;cursor:default}',
-          '.mopsErBody{flex:1;min-height:0;display:flex;flex-direction:column;gap:8px}',
-          '.mopsErText{width:100%;min-height:120px;max-height:40vh;resize:vertical;padding:10px;border:1px solid var(--dsw-alias-border-l2,#e6e6e6);border-radius:var(--dsw-radius-sm,8px);background:var(--dsw-alias-bg-layer-2,#f7f7f8);color:var(--dsw-alias-label-primary,#0f1115);font:inherit;font-size:14px;line-height:1.6;outline:none}',
+          // 测量 pass：useAnchoredPosition 需要面板真实尺寸才能 clamp。首帧没有坐标时
+          // 面板必须**已挂载但不可见且不可点**（visibility:hidden 仍会吃掉点击，所以
+          // 必须同时 pointer-events:none —— 否则透明面板会挡住消息本身）。
+          '.mopsErPanel[data-mops-measure="1"]{visibility:hidden;pointer-events:none}',
+          // 锚点块已不在 DOM（宿主重建/切会话）：退化为屏幕中央，不再追求贴附。
+          '.mopsErPanel[data-mops-fallback="1"]{left:50%;top:50%;transform:translate(-50%,-50%)}',
+          '.mopsErHead{display:flex;align-items:baseline;gap:6px;flex:none;min-width:0}',
+          '.mopsErTitle{font-size:13px;font-weight:600;line-height:18px;white-space:nowrap}',
+          '.mopsErSub{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#8a8a8e);font-variant-numeric:tabular-nums;white-space:nowrap}',
+          '.mopsErText{width:100%;min-height:74px;max-height:32vh;resize:vertical;padding:8px 9px;border:1px solid var(--dsw-alias-border-l2,#e6e6e6);border-radius:var(--dsw-radius-sm,8px);background:var(--dsw-alias-bg-layer-2,#f7f7f8);color:var(--dsw-alias-label-primary,#0f1115);font:inherit;font-size:13px;line-height:1.55;outline:none}',
           '.mopsErText::placeholder{color:var(--dsw-alias-label-tertiary,#8a8a8e)}',
           '.mopsErText:focus-visible{box-shadow:0 0 0 2px var(--dsw-alias-bg-layer-1,#fff),0 0 0 4px var(--dsw-alias-brand-primary,#4d6bfe)}',
           '.mopsErText:disabled{opacity:.6;cursor:progress}',
           '.mopsErText[aria-invalid="true"]{border-color:var(--dsw-alias-state-error-primary,#c63b32)}',
-          '.mopsErHint{font-size:11px;line-height:17px;color:var(--dsw-alias-label-tertiary,#8a8a8e)}',
-          '.mopsErError{font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary,#c63b32);overflow-wrap:anywhere}',
-          '.mopsErOk{font-size:12px;line-height:18px;color:var(--dsw-alias-state-success-primary,#2f7d4a)}',
-          '.mopsErActions{flex:none;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}',
-          '.mopsErBtn{min-height:30px;padding:4px 9px;border-radius:var(--dsw-radius-xs,4px);font:inherit;font-size:12px;line-height:20px;cursor:pointer;border:1px solid transparent}',
+          '.mopsErHint{font-size:11px;line-height:15px;color:var(--dsw-alias-label-tertiary,#8a8a8e);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}',
+          '.mopsErError{font-size:12px;line-height:17px;color:var(--dsw-alias-state-error-primary,#c63b32);overflow-wrap:anywhere}',
+          '.mopsErOk{font-size:12px;line-height:17px;color:var(--dsw-alias-state-success-primary,#2f7d4a)}',
+          // 一条极简行：提示在左，[取消] 与 [撤销并发送] 在右 —— 不再有独立的
+          // actions 区、快捷键行、关闭 ×，也不复现 composer 的布局。
+          '.mopsErActions{flex:none;display:flex;align-items:center;gap:8px;min-width:0}',
+          '.mopsErActions .mopsErHint{flex:1;min-width:0}',
+          '.mopsErBtn{min-height:26px;padding:3px 9px;border-radius:var(--dsw-radius-xs,4px);font:inherit;font-size:12px;line-height:18px;cursor:pointer;border:1px solid transparent;flex:none}',
           '.mopsErGhost{color:var(--dsw-alias-label-secondary,#6b6b70);background:transparent}',
           '.mopsErGhost:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));color:var(--dsw-alias-label-primary,#0f1115)}',
           '.mopsErPrimary{background:var(--dsw-alias-button-primary-fill,#2b2b2e);color:var(--dsw-alias-label-primary-foreground,#fff)}',
           '.mopsErPrimary:hover:not(:disabled){background:var(--dsw-alias-button-primary-hover,#3a3a3e)}',
           '.mopsErBtn:disabled{opacity:.5;cursor:not-allowed}',
-          '.mopsErBtn:focus-visible,.mopsErClose:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4d6bfe);outline-offset:1px}',
-          '@media(max-width:760px){.mopsErScrim{padding:0}.mopsErPanel{width:100%;height:100%;max-height:100%;border:0;border-radius:0}}',
+          '.mopsErBtn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#4d6bfe);outline-offset:1px}',
+          '@media(prefers-reduced-motion:no-preference){.mopsErPanel{animation:mopsErRise .12s cubic-bezier(.2,.8,.3,1)}}',
+          '@keyframes mopsErRise{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}',
+          // 窄屏：贴边铺满，但仍不遮整屏（无 scrim，会话内容依旧可读）。
+          '@media(max-width:760px){.mopsErPanel{width:auto!important;left:8px!important;right:8px;transform:none}}',
         ].join('')
         document.head.appendChild(tag)
       } catch (e) {
@@ -2241,11 +2343,23 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** 按 node-key 精确定位目标消息块（宿主重渲染后 node-key 保持不变）。 */
+    function findChatNode(nodeKey) {
+      const key = String(nodeKey || '')
+      if (!key || typeof document === 'undefined') return null
+      const nodes = document.querySelectorAll('[data-chat-node-key]')
+      for (let i = 0; i < nodes.length; i++) if (nodes[i].getAttribute('data-chat-node-key') === key) return nodes[i]
+      return null
+    }
+
     /**
-     * 「编辑并重发」浮层（`shell.overlay` 槽，与本插件 OpsPanel 同族）。
+     * 「撤销并发送」浮层 —— 贴着那条消息弹出，**不是**居中模态。
      *
-     * 常驻挂载、内部 state 控制显隐 —— 与 OpsPanel 完全同款（list 槽的条目没有
-     * 「开关」概念，只能靠组件自身状态）。未打开时返回 null。
+     * 为什么仍走 shell.overlay 槽：`ctx.slots.register` 的组件在 overlay 层里常驻挂载，
+     * 内部 state 控制显隐（与 OpsPanel 同款）。改成「就地渲染进消息块旁边」需要把
+     * React 子树塞进宿主 DOM（portal），宿主没提供这种跨树能力；而 overlay 槽 +
+     * 官方 useAnchoredPosition 计算的 fixed 坐标，视觉上等价于「贴着消息」，
+     * 且不依赖宿主内部结构 —— 这是约束下最干净的一种。
      */
     function EditResendOverlay(props) {
       const { sessionId, useSessions } = props
@@ -2253,28 +2367,96 @@ window.__ModuleLoader__.load({
       useLocaleRevision()
       if (sessionId) __currentSessionId = sessionId
       const sessions = useSessions ? useSessions(s => s) : undefined
-      const [target, setTarget] = useState(null) // { sessionId, rawSessionId, seq }
+      // target: { sessionId, rawSessionId, seq, nodeKey }
+      const [target, setTarget] = useState(null)
       const [draft, setDraft] = useState('')
       const [textState, setTextState] = useState('idle') // idle|loading|ready|error
       const [loadError, setLoadError] = useState(null)
       const [saving, setSaving] = useState(false)
       const [error, setError] = useState(null)
       const [done, setDone] = useState('')
+      // 「回撤已成功、发送被拒」时只允许重发（同 seq 再回撤必然 409）
+      const [sendOnly, setSendOnly] = useState(false)
+      // 锚点：宿主重渲染会换掉块节点，ref 存**当前**节点，定位由官方 hook 在
+      // scroll/resize 时按 ref.current 重算。
+      const [anchorRect, setAnchorRect] = useState(null)
+      const [anchored, setAnchored] = useState(false)
       const textRef = useRef(null)
+      const panelRef = useRef(null)
+      const anchorRef = useRef(null)
+      const dismissRef = useRef(null)
       const reqRef = useRef(0)
+
+      const open = !!target
+      // 落座决策（side / 宽度）是纯函数，官方 hook 只负责 clamp 与坐标。
+      const seat = editSeatOf(
+        anchorRect,
+        typeof window === 'undefined' ? { width: 0, height: 0 } : { width: window.innerWidth, height: window.innerHeight },
+      )
+      // ⚠️ 两个官方 hook 必须**无条件调用**（React hooks 顺序恒定）。
+      // 锚点缺失时 open 传 false：官方 hook 不做非锚点定位，由 CSS 的 fallback 兜底。
+      const pos = useAnchoredPosition({
+        open: open && anchored,
+        anchorRef: anchorRef,
+        panelRef: panelRef,
+        side: seat.side,
+        gap: seat.gap,
+        margin: seat.margin,
+      })
+      // 点面板外关闭（官方实现：pointerdown 落在 panel 与 anchor 之外才触发）。
+      useDismissOnOutsidePointer(
+        anchorRef,
+        open,
+        () => {
+          if (dismissRef.current) dismissRef.current(false)
+        },
+        panelRef,
+      )
+
+      const resetState = () => {
+        reqRef.current += 1
+        setTarget(null)
+        setDraft('')
+        setTextState('idle')
+        setLoadError(null)
+        setError(null)
+        setDone('')
+        setSendOnly(false)
+        setAnchorRect(null)
+        setAnchored(false)
+        anchorRef.current = null
+      }
 
       useEffect(() => {
         ensureEditStyle()
         const handler = e => {
           const d = e && e.detail ? e.detail : {}
           if (!d.sessionId || !Number.isSafeInteger(d.seq)) return
+          // 锚点解析顺序：① 事件直接带的元素（最准，零查询）② node-key 精确查表
+          // ③ 都没有 → 退回屏幕中央（宿主已重建块时常见）。
+          const block = (d.block && d.block.nodeType === 1 ? d.block : null) || findChatNode(d.nodeKey)
+          // 只有块**还在视口里**才锚定；块已被滚走/被宿主卸载时退回屏幕中央，
+          // 否则官方 clamp 会把面板贴到视口边缘，看起来像「飘到别处」。
+          const viewport =
+            typeof window === 'undefined' ? { width: 0, height: 0 } : { width: window.innerWidth, height: window.innerHeight }
+          let rect = null
+          try {
+            rect = block ? block.getBoundingClientRect() : null
+          } catch (e) {
+            rect = null
+          }
+          const anchoredNow = !!block && !!rect && editSeatOf(rect, viewport).inView
+          anchorRef.current = anchoredNow ? block : null
+          setAnchored(anchoredNow)
+          setAnchorRect(rect)
           reqRef.current += 1
-          setTarget({ sessionId: String(d.sessionId), rawSessionId: d.rawSessionId || d.sessionId, seq: d.seq })
+          setTarget({ sessionId: String(d.sessionId), rawSessionId: d.rawSessionId || d.sessionId, seq: d.seq, nodeKey: d.nodeKey || null })
           setDraft('')
           setTextState('loading')
           setLoadError(null)
           setError(null)
           setDone('')
+          setSendOnly(false)
         }
         window.addEventListener(EDIT_EVENT, handler)
         return () => window.removeEventListener(EDIT_EVENT, handler)
@@ -2298,7 +2480,6 @@ window.__ModuleLoader__.load({
             if (!res.ok || !data || data.ok !== true) throw new Error((data && data.error) || 'HTTP ' + res.status)
             if (typeof data.text !== 'string' || data.text === '') throw new Error(t('slot.editNoText'))
             // ⚠️ 只认 /text 的全文：绝不拿 160 字 snippet 冒充原文
-            // （service 侧硬截断，见 session-file.js 的 snippet.slice(0,160)）
             setDraft(data.text)
             setTextState('ready')
           })
@@ -2331,20 +2512,33 @@ window.__ModuleLoader__.load({
       const cancel = useCallback(() => {
         if (saving) return
         // 零副作用：只清本地 state。不清宿主草稿、不碰会话、不发请求。
-        reqRef.current += 1
-        setTarget(null)
-        setDraft('')
-        setTextState('idle')
-        setLoadError(null)
-        setError(null)
-        setDone('')
+        resetState()
       }, [saving])
+      useEffect(() => {
+        dismissRef.current = cancel
+      }, [cancel])
+      // Esc 关闭（面板内 textarea 有焦点时靠冒泡；焦点跑到别处时靠 document）
+      useEffect(() => {
+        if (!open) return undefined
+        const onKeyDown = e => {
+          if (e.key !== 'Escape' || e.defaultPrevented) return
+          e.preventDefault()
+          if (!saving) cancel()
+        }
+        document.addEventListener('keydown', onKeyDown)
+        return () => document.removeEventListener('keydown', onKeyDown)
+      }, [open, saving, cancel])
 
+      // 运行中：发送会被服务端 409 拦住，所以只拦「发送」，**不拦打开**（打开是纯读）。
       const running = (() => {
-        if (!target || !sessions || !sessions.byId) return false
-        const summary =
-          sessions.byId[target.rawSessionId] || sessions.byId['session-' + target.sessionId] || sessions.byId[target.sessionId]
-        return summary ? summary.running === true : false
+        if (!target) return false
+        if (sessions && sessions.byId) {
+          const summary =
+            sessions.byId[target.rawSessionId] || sessions.byId['session-' + target.sessionId] || sessions.byId[target.sessionId]
+          if (summary) return summary.running === true
+        }
+        const cache = __peekRowsCache ? __peekRowsCache() : null
+        return !!(cache && cache.running === true)
       })()
 
       const canSubmit = textState === 'ready' && !saving && draft.trim() !== '' && !running
@@ -2359,10 +2553,17 @@ window.__ModuleLoader__.load({
           rawSessionId: target.rawSessionId,
           seq: target.seq,
           text: draft,
+          reverted: sendOnly,
         })
+        setSaving(false)
         if (!result.ok) {
-          // ⚠️ 失败必须保留编辑框 + 用户已输入的文本（不清 draft、不 close）
-          setSaving(false)
+          // ⚠️ 失败必须保留浮层 + 用户已输入的文本（不清 draft、不 close）
+          if (result.stage === 'send') {
+            // 回撤已成功、发送被拒：不能再回撤（同 seq 必然 409），只允许重发
+            setSendOnly(true)
+            setError(t('edit.sendFailed') + (result.reason || ''))
+            return
+          }
           setError(
             result.stage === 'revert'
               ? t('edit.failed') + (result.reason || 'HTTP ' + result.status)
@@ -2372,120 +2573,106 @@ window.__ModuleLoader__.load({
           )
           return
         }
-        setSaving(false)
+        setSendOnly(true)
         if (result.submitted) {
           notifyDone(t('edit.doneSubmitted'))
           cancel()
           return
         }
-        // 提交不可用：明确告诉用户文本已经在输入框里，别让人以为没发生
+        // 官方发送面缺席（老宿主）：文本已写进草稿，明确让用户按回车，别让人以为没发生
         notifyDone(t('edit.manual'), 'warn')
         setDone(t('edit.manual'))
-      }, [target, canSubmit, draft, t, cancel])
-
-      if (!target) return null
+      }, [target, canSubmit, draft, t, cancel, sendOnly])
 
       const onKeyDown = e => {
-        if (e.key === 'Escape') {
-          e.preventDefault()
-          if (!saving) cancel()
-          return
-        }
         if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
           e.preventDefault()
           if (canSubmit) send()
         }
       }
 
+      if (!target) return null
+
+      const measure = !pos && anchored
+      const style = {}
+      if (measure) {
+        style.visibility = 'hidden'
+        style.pointerEvents = 'none'
+        style.left = 0
+        style.top = 0
+      } else if (anchored && pos) {
+        style.left = pos.left
+        style.top = pos.top
+      }
+      style.width = seat.width
+      style.boxSizing = 'border-box'
+      if (!anchored) style.width = Math.min(EDIT_PANEL_MAX_WIDTH, Math.max(EDIT_PANEL_MIN_WIDTH, seat.width))
+
       return React.createElement(
-        'div',
+        'section',
         {
-          className: 'mopsErScrim',
-          role: 'presentation',
-          onMouseDown: e => {
-            if (e.target === e.currentTarget && !saving) cancel()
-          },
+          className: 'mopsErPanel',
+          role: 'dialog',
+          'aria-modal': 'false',
+          'aria-labelledby': 'mops-er-title',
+          'data-mops-panel': '1',
+          'data-mops-measure': measure ? '1' : undefined,
+          'data-mops-fallback': !anchored ? '1' : undefined,
+          ref: panelRef,
+          style: style,
+          onKeyDown: onKeyDown,
         },
         React.createElement(
-          'section',
-          {
-            className: 'mopsErPanel',
-            role: 'dialog',
-            'aria-modal': 'true',
-            'aria-labelledby': 'mops-er-title',
-            onKeyDown,
-          },
-          React.createElement(
-            'div',
-            { className: 'mopsErHead' },
-            React.createElement(
+          'div',
+          { className: 'mopsErHead' },
+          React.createElement('div', { className: 'mopsErTitle', id: 'mops-er-title' }, t('edit.title')),
+          React.createElement('div', { className: 'mopsErSub' }, t('edit.subtitle', { seq: String(target.seq) })),
+        ),
+        React.createElement('textarea', {
+          className: 'mopsErText',
+          ref: textRef,
+          value: draft,
+          rows: 3,
+          readOnly: saving,
+          disabled: textState !== 'ready',
+          'aria-invalid': error || textState === 'error' ? 'true' : undefined,
+          placeholder: textState === 'loading' ? t('edit.loading') : t('edit.placeholder'),
+          onChange: e => setDraft(e.target.value),
+          'aria-label': t('edit.title'),
+        }),
+        textState === 'error'
+          ? React.createElement(
               'div',
-              null,
-              React.createElement('div', { className: 'mopsErTitle', id: 'mops-er-title' }, t('edit.title')),
-              React.createElement('div', { className: 'mopsErSub' }, t('edit.subtitle', { seq: String(target.seq) })),
-            ),
-            React.createElement(
-              'button',
-              {
-                type: 'button',
-                className: 'mopsErClose',
-                onClick: cancel,
-                disabled: saving,
-                title: t('edit.cancel'),
-                'aria-label': t('edit.cancel'),
-              },
-              '×',
-            ),
+              { className: 'mopsErError', role: 'alert' },
+              loadError,
+              ' ',
+              React.createElement('button', { type: 'button', className: 'mopsErBtn mopsErGhost', onClick: loadText }, t('edit.retry')),
+            )
+          : null,
+        running ? React.createElement('div', { className: 'mopsErError', role: 'alert' }, t('edit.running')) : null,
+        error ? React.createElement('div', { className: 'mopsErError', role: 'alert' }, error) : null,
+        done ? React.createElement('div', { className: 'mopsErOk', role: 'status' }, done) : null,
+        React.createElement(
+          'div',
+          { className: 'mopsErActions' },
+          // 一句提示（含 D-3 的「不是删除 / 原文仍在本地文件」告知，不可删）
+          React.createElement('div', { className: 'mopsErHint' }, t('edit.replaceHint')),
+          React.createElement(
+            'button',
+            { type: 'button', className: 'mopsErBtn mopsErGhost', onClick: cancel, disabled: saving },
+            t('edit.cancel'),
           ),
           React.createElement(
-            'div',
-            { className: 'mopsErBody' },
-            React.createElement('textarea', {
-              className: 'mopsErText',
-              ref: textRef,
-              value: draft,
-              rows: 6,
-              readOnly: saving,
-              disabled: textState !== 'ready',
-              'aria-invalid': error || textState === 'error' ? 'true' : undefined,
-              placeholder: textState === 'loading' ? t('edit.loading') : t('edit.placeholder'),
-              onChange: e => setDraft(e.target.value),
-              'aria-label': t('edit.title'),
-            }),
-            textState === 'error'
-              ? React.createElement(
-                  'div',
-                  { className: 'mopsErError', role: 'alert' },
-                  loadError,
-                  ' ',
-                  React.createElement('button', { type: 'button', className: 'mopsErBtn mopsErGhost', onClick: loadText }, t('edit.retry')),
-                )
-              : null,
-            running ? React.createElement('div', { className: 'mopsErError', role: 'alert' }, t('edit.running')) : null,
-            error ? React.createElement('div', { className: 'mopsErError', role: 'alert' }, error) : null,
-            done ? React.createElement('div', { className: 'mopsErOk', role: 'status' }, done) : null,
-            React.createElement('div', { className: 'mopsErHint' }, t('edit.replaceHint')),
-            React.createElement('div', { className: 'mopsErHint mopsErShortcut' }, t('edit.shortcut')),
-          ),
-          React.createElement(
-            'div',
-            { className: 'mopsErActions' },
-            React.createElement(
-              'button',
-              { type: 'button', className: 'mopsErBtn mopsErGhost', onClick: cancel, disabled: saving },
-              t('edit.cancel'),
-            ),
-            React.createElement(
-              'button',
-              {
-                type: 'button',
-                className: 'mopsErBtn mopsErPrimary',
-                onClick: send,
-                disabled: !canSubmit,
-                title: t('edit.shortcut'),
-              },
-              saving ? t('edit.sending') : t('edit.send'),
-            ),
+            'button',
+            {
+              type: 'button',
+              className: 'mopsErBtn mopsErPrimary',
+              onClick: send,
+              disabled: !canSubmit,
+              // 快捷键提示并进主按钮的 title：不再单独占一行
+              title: t('edit.shortcut'),
+            },
+            saving ? t('edit.sending') : sendOnly ? t('edit.resend') : t('edit.send'),
           ),
         ),
       )
@@ -2581,17 +2768,43 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** 打开会话（宿主唯一通道）。childId 需要 `session-` 前缀才不会抛 unknown session。 */
-    function openSessionById(sessionId) {
+    /**
+     * 打开会话（宿主唯一通道），**失败必须留痕**（审计 §2.3 的 6 处吞错单点）。
+     *
+     * 为什么不能继续静默 `catch {}`：`openSession` 失败的用户可见后果正是本轮反复
+     * 修的那一类 ——「回滚后界面没变灰 / 恢复后消息不回来 / 铅笔点不开」。而
+     * `/undo`、`/redo` 的 `afterWrite` 注释已把 0.9.6 事故写死：传裸 uuid →
+     * 宿主 `sessions.retain` 抛 `unknown session <bare>` → 外层 `catch {}` 静默吞掉
+     * → **「视图重建」这条路径从来没生效过**，只剩 150/700/1600ms 的 DOM 打补丁。
+     * 同一份事故档案写在文档里，代码里 6 个调用点却有 5 个还在吞 —— 这条单点就是
+     * 把「文档说的」变成「代码做的」。
+     *
+     * ⚠️ 仍然必须 catch：不 swallow 会让 React 渲染抛（这是渲染期调用）。
+     * ⚠️ `sessionId` 必须带 `session-` 前缀：宿主 `sessions.retain(bare)` 只认
+     * `session-<uuid>`（manager.js resolveTarget），传裸 uuid 必抛。
+     *
+     * @param sessionId - 会话 id（`session-<uuid>` 形态）
+     * @param where - 调用点标记，写进 warn 文本 —— 排障时一眼看出是哪条路径没重建
+     * @returns `true` = 真的调了宿主 `openSession`；`false` = 服务缺席 / 未挂载 / 抛了
+     */
+    function safeOpenSession(sessionId, where) {
       try {
         if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') {
           __uiWorkspace.openSession(sessionId)
           return true
         }
       } catch (e) {
-        console.warn('[message-ops] openSession failed:', e)
+        console.warn('[message-ops] openSession failed @' + String(where || 'unknown') + ':', e)
       }
       return false
+    }
+
+    /**
+     * `sendEditAndRevert` 的可注入依赖面：测试用 `deps.openSessionById` 观测时序，
+     * 生产路径就是 {@link safeOpenSession}（保留本名是为了不破坏既有注入契约）。
+     */
+    function openSessionById(sessionId) {
+      return safeOpenSession(sessionId, 'send-edit-revert')
     }
 
     /**
@@ -2652,307 +2865,23 @@ window.__ModuleLoader__.load({
       )
     }
 
-    var IconQuote = null
-    try {
-      const P2 = require('@deepseek-ai/dsh-client-ui-primitives')
-      // 0.19.0：不再回退到 IconCopyOutlineRegular —— 宿主在 AI 消息下方本来就
-      // 有一个 Copy 按钮，用复制图标做「引用」会变成两个一模一样的复制按钮。
-      // 优先官方 chat 类图标；拿不到就用下面的引号几何（明确的引用语义）。
-      IconQuote = P2 && P2.IconChatOutlineRegular
-    } catch {
-      /* fallback below */
-    }
-    if (!IconQuote)
-      IconQuote = function QuoteFallback() {
-        return React.createElement(
-          'svg',
-          { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true, stroke: 'currentColor', strokeWidth: 1 },
-          React.createElement('path', {
-            d: 'M3 6.5A3.5 3.5 0 0 1 6.5 3H7v1.5h-.5A2 2 0 0 0 4.5 6.5V7H7v3.5H3V6.5ZM9 6.5A3.5 3.5 0 0 1 12.5 3H13v1.5h-.5A2 2 0 0 0 10.5 6.5V7H13v3.5H9V6.5Z',
-          }),
-        )
-      }
-
-    // --- 0.3.0 assistant-actions 官方槽：每条 AI 消息旁的原生回撤按钮 ------------
+    // --- 0.3.0 assistant-actions 官方槽：AI 消息动作区 -------------------------
     // 契约（dsh-cordis-client-runner）：scope session，条目组件收 { messageId } +
     // 标准props（useSessions/sessionId/useSession/useChat…）。0.1.x 无此 key，
     // slots.inject 自动 no-op。
+    //
+    // 0.23.0 起本槽**不渲染任何按钮**（引用让位宿主、回撤按钮让位行内注入）。
+    // 它留下的唯一职责 = 按会话捕获 inputActions（上面 ⚠️ 注释），必须保留注册。
     const CHAT_ACTIONS_SLOT = 'conversation.chat.assistant-actions'
     const CHAT_ACTIONS_ID = 'message-ops-row'
 
     function MsgSlotActions(props) {
-      const { messageId, sessionId, useSessions, inputActions, useChat } = props
-      const t = (props && props.t) || __t
-      useLocaleRevision()
+      const { sessionId, inputActions } = props
       // 0.24.0 P4：按会话登记（本组件每条 AI 消息一个实例，必须带 sessionId 隔离）。
       React.useEffect(() => {
         rememberInputActions(sessionId, inputActions)
         return () => forgetInputActions(sessionId, inputActions)
       }, [sessionId, inputActions])
-      const sessions = useSessions ? useSessions(s => s) : undefined
-      const summary = sessions && sessions.byId ? sessions.byId[sessionId] : undefined
-      const running = summary ? summary.running === true : false
-      const [seq, setSeq] = React.useState(null)
-      const [fullText, setFullText] = React.useState(null)
-      const [busy, setBusy] = React.useState(null) // 'revert' | null（S11 双提交防护）
-      // 0.9.7（P4）：索引被 dataSig 重建后要重跑解析，否则「新 AI 消息旁
-      // 没有回撤/引用按钮」—— 已经挂载的槽位 effect 不会因缓存被换而重跑。
-      const [idxRev, setIdxRev] = React.useState(0)
-      React.useEffect(() => {
-        const onIdx = () => setIdxRev(v => v + 1)
-        window.addEventListener(SEQ_INDEX_EVENT, onIdx)
-        return () => window.removeEventListener(SEQ_INDEX_EVENT, onIdx)
-      }, [])
-      React.useEffect(() => {
-        if (!messageId || !sessionId) return
-        let alive = true
-        let retried = false
-        const load = () => {
-          const p = fetchMessagesJson('/api/message-ops/messages?sessionId=' + encodeURIComponent(sessionId)).then(data => {
-            const index = new Map()
-            const full = new Map()
-            for (const m of (data && data.messages) || []) {
-              // 0.5.2（P2）：同 id 取**最早** seq——与服务端 buildSeqIndex 口径一致
-              // （重试链取最早可见节点；此前内联 set 覆盖=取最大，双实现分裂）
-              if (m && m.id != null && !index.has(String(m.id))) index.set(String(m.id), m.seq)
-              if (m && m.id != null && m.fullText) full.set(String(m.id), m.fullText)
-            }
-            __seqIndexCache.set(sessionId, index)
-            __fullTextCache.set(sessionId, full)
-            return index
-          })
-          __seqIndexCache.set(sessionId, p)
-          // 0.5.2（P2）：失败必须清缓存——否则 rejected promise 被永久缓存，
-          // 该会话按钮/dock 到刷新页面为止全部失效
-          // 0.9.7：只在缓存里还是**我们这条** promise 时才删（syncSeqIndex 可能已换掉）
-          p.catch(() => {
-            if (__seqIndexCache.get(sessionId) === p) __seqIndexCache.delete(sessionId)
-          })
-          return p
-        }
-        const resolve = index => {
-          if (!alive) return
-          const hit = index && index.get(String(messageId))
-          if (typeof hit === 'number') {
-            setSeq(hit)
-            return
-          }
-          // 0.9.7（P4）：索引里没有这个 messageId = 会话已增长（或索引过期）。
-          // 旧实现这里**什么都不做**，`seq` 永远是 null → 组件 return null →
-          // 按钮再也不渲染。现在失效并重拉一次（retried 保证不自旋）；
-          // 复用 fetchMessagesJson 的 1s 合并窗口，连续上新不会打爆请求。
-          if (retried) return
-          retried = true
-          __seqIndexCache.delete(sessionId)
-          __fullTextCache.delete(sessionId)
-          load()
-            .then(resolve)
-            .catch(() => {})
-        }
-        const cached = __seqIndexCache.get(sessionId)
-        if (cached && typeof cached.then === 'function') cached.then(resolve).catch(() => {})
-        else if (cached) resolve(cached)
-        else
-          load()
-            .then(resolve)
-            .catch(() => {})
-        return () => {
-          alive = false
-        }
-      }, [messageId, sessionId, idxRev])
-
-      // 原文（引用用）：seq 解析后按需取全文
-      React.useEffect(() => {
-        if (seq == null || !sessionId) return
-        let alive = true
-        const cached = __fullTextCache.get(sessionId)
-        const resolve = full => {
-          if (!alive) return
-          const hit = full && full.get(String(messageId))
-          if (typeof hit === 'string') setFullText(hit)
-        }
-        if (cached && typeof cached.then === 'function') cached.then(resolve).catch(() => {})
-        else if (cached) resolve(cached)
-        return () => {
-          alive = false
-        }
-      }, [seq, messageId, sessionId])
-
-      // 0.5.0 回撤后的视图刷新：openSession(reveal) 重建会话视图 → 遮蔽立即呈现。
-      // （宿主 live 投影只处理 compaction 类 replace，插件标记需要视图重建才可见。）
-      const revealSession = () => {
-        try {
-          if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') {
-            __uiWorkspace.openSession(sessionId)
-            return true
-          }
-        } catch {
-          /* fallthrough */
-        }
-        return false
-      }
-
-      // ── 0.18.0：引用改用官方 insertQuote（结构化 QuoteNode）──────────────────
-      //
-      // 旧实现（0.5.0）用 `captureInsertion` + `insertText` 手工拼 `> ` markdown：
-      //
-      //     text.split('\n').map(l => '> ' + l).join('\n') + '\n\n'
-      //
-      // 问题（用户实测反馈「这 UI 做的怎么这么诡异」）：
-      //   1. **不是引用**，是一段普通 markdown 文本 —— 宿主不会渲染成引用块，
-      //      也不会给删除按钮、不进结构化编辑语义；
-      //   2. `captureInsertion` 返回的是**插入位置快照**，用户在菜单里点完到
-      //      文本到达之间若改过草稿，位置就失效，文本会插到奇怪的地方；
-      //   3. 手工拼的 `> ` 会和用户已有内容粘连（无空行分隔时）。
-      //
-      // 宿主其实提供了官方能力（dsh-client-ui-conversation:15369）：
-      //     insertQuote: (text) => this.insertQuote(text)
-      // 它内部走 `draftEditor.insertQuote(text, labels)` →
-      // `$replaceDetectSpanWithNodes([$createQuoteNode(text, labels), Go(" ")])`
-      // 即：在当前光标处插入一个**真正的 QuoteNode**（带 remove 标签、独立 undo），
-      // 并自动补一个空格分隔。这才是"规范"的引用。
-      /**
-       * 0.19.0 引用：只引用「选中的一小段」，不再把整条 AI 消息塞进 composer。
-       *
-       * 用户原话：「这个引用为什么是直接把这个消息直接给我填进输入框，这什么情况？」
-       * 根因：旧实现把 fullText / /text 接口返回的**整条全文**传给 insertQuote，
-       * 于是 composer 里冒出一个几千字的巨大引用块，看起来就像"把消息整个塞进去"。
-       *
-       * 宿主官方 insertQuote 的语义是「引用一段选中文字」（QuoteNode +
-       * QuotePreview 可视化 + 模型可见的 markdown blockquote），本就该用小段。
-       *
-       * 文本来源优先级：
-       *   1. 用户在该消息内选中的文字（window.getSelection，限定消息节点内）
-       *   2. 无选中 → 取整条但截断到 QUOTE_MAX_CHARS，并标注来源（seq / 角色）
-       */
-      const QUOTE_MAX_CHARS = 600
-      // 0.20.0（bug-hunt M-1）：按 Unicode code point 截断，且尽量在换行/空格处收尾，
-      // 避免把 emoji（代理对）或 markdown 围栏 ``` 从中间切坏。
-      // 0.22.0（真执行实测）：按 code point 切会拆散 grapheme cluster。
-      // 实测 'a'.repeat(598) + '👨‍👩‍👧‍👦' → 尾部 U+1f468 U+200d U+2026，
-      // 家庭 emoji 被切成单人 + 悬空 ZWJ。改用 Intl.Segmenter 按 grapheme 切。
-      let quoteSegmenter = null
-      const graphemes = raw => {
-        if (typeof Intl !== 'undefined' && Intl.Segmenter) {
-          quoteSegmenter ||= new Intl.Segmenter('zh', { granularity: 'grapheme' })
-          return Array.from(quoteSegmenter.segment(String(raw)), part => part.segment)
-        }
-        return Array.from(String(raw))
-      }
-      const clipQuote = raw => {
-        const chars = graphemes(raw)
-        if (chars.length <= QUOTE_MAX_CHARS) return chars.join('')
-        let end = QUOTE_MAX_CHARS
-        // 往前找最近的空白/换行边界（最多回退 40 个 grapheme），不破坏单词；
-        // 找不到就硬切（此时至少不会拆散单个 grapheme）
-        for (let i = end; i > Math.max(0, end - 40); i--) {
-          if (/[\s\n]/.test(chars[i - 1])) {
-            end = i
-            break
-          }
-        }
-        return chars.slice(0, end).join('') + '…'
-      }
-      // 0.20.0（bug-hunt H-2）：把「选区归属」收紧，避免静默串味。
-      // 旧实现算出 root 却从未使用，且用宽松的 [data-chat-flow-kind] 兜底
-      // （会命中 turn-tail / tool / system 等通用块），只看 anchorNode，
-      // 导致「选中 A 消息的一段、去点 B 消息的引用」会把 A 的文字当成 B 引用。
-      // 现在要求 anchor 与 focus 落在**同一个** data-chat-node-key 容器内，
-      // 且该容器必须存在；不满足就返回 null，回退到「截断+标注来源」路径。
-      const ownerOf = node => {
-        const el = node && (node.nodeType === 1 ? node : node.parentElement)
-        return el && el.closest ? el.closest('[data-chat-node-key]') : null
-      }
-      const selectionInMessage = () => {
-        try {
-          const sel = window.getSelection && window.getSelection()
-          if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null
-          const text = String(sel.toString() || '').replace(/\s+$/g, '')
-          if (!text || text.length > QUOTE_MAX_CHARS * 2) return null
-          const anchorOwner = ownerOf(sel.anchorNode)
-          const focusOwner = ownerOf(sel.focusNode)
-          // 两端必须属于同一个精确的 chat node；跨消息选区不引用（防串味）
-          if (!anchorOwner || !focusOwner || anchorOwner !== focusOwner) return null
-          return clipQuote(text)
-        } catch {
-          return null
-        }
-      }
-      const runQuote = () => {
-        // 0.20.0（bug-hunt M-2）：来源标注放在 toast，不塞进 QuoteNode 正文。
-        // QuoteNode.getTextContent() 是「模型可见文本」，正文里混入
-        // '[引用自 seq N]' 会污染送进模型的引用内容。
-        const finish = (ok, source) =>
-          notifyDone(
-            ok ? (source ? t('quote.doneWithSource', { seq: String(source) }) : t('quote.done')) : t('quote.unavailable'),
-            ok ? 'ok' : 'warn',
-          )
-        try {
-          if (!inputActions || typeof inputActions.insertQuote !== 'function') {
-            finish(false)
-            return
-          }
-          const put = (text, source) => {
-            if (typeof text !== 'string' || text.trim() === '') {
-              finish(false)
-              return
-            }
-            let ok = false
-            try {
-              ok = inputActions.insertQuote(text.replace(/\r\n?/g, '\n')) !== false
-            } catch (e) {
-              console.warn('[message-ops] insertQuote failed:', e)
-              ok = false
-            }
-            finish(ok, ok ? source : null)
-          }
-          // ① 选中片段优先：正文就是选中的文字，无需来源标注
-          const selected = selectionInMessage()
-          if (selected != null) {
-            put(selected, null)
-            return
-          }
-          // ② 无选中：取整条但截断；来源只通过 toast 告知，不进引用正文
-          if (fullText != null && fullText !== '') {
-            put(clipQuote(fullText), seq)
-            return
-          }
-          fetch('/api/message-ops/text?sessionId=' + encodeURIComponent(sessionId) + '&seq=' + encodeURIComponent(seq))
-            .then(r => (r.ok ? r.json() : null))
-            .then(d => put(d && d.ok && typeof d.text === 'string' ? clipQuote(d.text) : null, seq))
-            .catch(() => put(null))
-        } catch (e) {
-          notifyDone(t('errorPrefix') + (e && e.message ? e.message : String(e)), 'error')
-        }
-      }
-
-      if (seq == null) return null
-      const act = (icon, label, mode, onClick, disabled) =>
-        React.createElement(
-          'button',
-          {
-            type: 'button',
-            title: running && mode === 'revert' ? t('dialog.runningWarn') : label,
-            'aria-label': label,
-            disabled: !!disabled,
-            style: {
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              minWidth: 44,
-              minHeight: 44,
-              padding: 0,
-              border: 'none',
-              background: 'transparent',
-              color: 'inherit',
-              opacity: busy && busy !== mode ? 0.4 : running && mode === 'revert' ? 0.35 : 0.72,
-              cursor: disabled ? 'default' : 'pointer',
-              borderRadius: 6,
-            },
-            onClick,
-          },
-          icon,
-        )
       // 0.23.0：AI 消息动作区**不再注入任何按钮**。
       //
       // 用户反馈：「引用不要每次把一整个上下文重新全部塞给 AI」。核查结论：
@@ -2966,6 +2895,8 @@ window.__ModuleLoader__.load({
       //   · 而 deriveMessages() 本就遍历 surface.nodes 给出完整历史，
       //     引用当前会话里未被遮蔽的消息 = 同一内容在 prompt 里出现两遍，纯冗余。
       // 所以正确做法是让位给宿主，不再重复造轮子。
+      // 引用机械（IconQuote / clipQuote / runQuote / selectionInMessage / 选区归属判定）
+      // 与配套的 fullText / seq 解析已随之删除；不得再在本槽重建（docs/DECISIONS.md D-4）。
       //
       // ⚠️ 本组件**必须保留**：它负责按会话捕获 inputActions 到
       // __inputActionsBySession（编辑框 / 面板 / 行内回填都依赖），
@@ -3230,18 +3161,15 @@ window.__ModuleLoader__.load({
             )
             setRestoring(null)
             // 0.5.0：恢复后重建会话视图（重放消息立即可见）
-            try {
-              if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(sessionId)
-            } catch {
-              /* fallthrough */
-            }
+            // 0.26.0：统一走 safeOpenSession（失败 warn —— 审计 §2.3 指出的 6 处吞错之一）
+            safeOpenSession(sessionId, 'dock-restore')
             // 0.9.1：重放的消息带**新 seq**，被恢复的行必须解除 hidden；dock 的
             // marker 列表要按权威数据重算（restoreComplete 会变 true）后重拉。
             emitChanged()
-            for (const delay of [150, 700, 1600])
-              setTimeout(() => {
-                if (__refreshSurface) __refreshSurface(sessionId)
-              }, delay)
+            // 0.25.0（手感）：三连 [150,700,1600] 改成「立即一次」（__refreshSurface
+            // 自带 300ms 尾随防抖）。恢复是**重放**语义：重放出来的消息带新 seq，
+            // 被恢复的行必须解除 hidden —— 这条兜底路径必须留，只是不再让用户白等。
+            if (__refreshSurface) __refreshSurface(sessionId)
             const fresh = await fetchMessagesJson('/api/message-ops/messages?sessionId=' + encodeURIComponent(sessionId)).catch(() => null)
             if (fresh && fresh.ok) setMarkers(activeMarkers(fresh.messages || []))
           })
@@ -3406,37 +3334,6 @@ window.__ModuleLoader__.load({
       __peekRowsCache = () => rowsCache
       var norm = x => String(x || '').replace(/\s+/g, '')
 
-      // 0.9.7（P4）：messageId→seq / 全文索引挂在**同一个 dataSig** 上。
-      // 旧实现每会话只写一次、仅失败时 delete —— 会话增长后新 assistant 消息的
-      // messageId 不在索引里，`seq == null` → MsgSlotActions 直接 return null，
-      // 那条消息旁的回撤/引用按钮**再也不渲染**。dataSig 变了就用手里这份全量
-      // 载荷就地重建（零额外请求），并广播 SEQ_INDEX_EVENT 让已挂载的槽位重跑解析。
-      var __seqDataSig = null
-      var syncSeqIndex = (sid, messages, idx) => {
-        const sig = sid + '/' + idx.total + '/' + idx.shadowed.size + '/' + idx.visibleTurns.size
-        if (sig === __seqDataSig) return
-        __seqDataSig = sig
-        const index = new Map()
-        const full = new Map()
-        for (const m of messages || []) {
-          if (!m || m.id == null) continue
-          const k = String(m.id)
-          // 同 id 取**最早** seq —— 与槽位自己的 buildSeqIndex 口径一致
-          // （隐藏判据 buildIndex 取最新，两套语义不能混）。
-          if (!index.has(k)) index.set(k, m.seq)
-          if (m.fullText) full.set(k, m.fullText)
-        }
-        for (const key of [sid, 'session-' + sid]) {
-          __seqIndexCache.set(key, index)
-          __fullTextCache.set(key, full)
-        }
-        try {
-          window.dispatchEvent(new CustomEvent(SEQ_INDEX_EVENT))
-        } catch {
-          /* non-browser */
-        }
-      }
-
       var fetchRows = sidIn => {
         // 0.9.7：统一按**裸 uuid** 作缓存键。调用方有的传 `session-xxx`（scan /
         // /undo 的 rawSid）有的传裸 uuid（/redo 的 bareSessionId）—— 混用会让
@@ -3475,7 +3372,6 @@ window.__ModuleLoader__.load({
             // 0.25.0：把服务端 isRunning 一起缓存 —— 注入器是纯 DOM 闭包，拿不到
             // useSessions，只能靠这里带出来的 running 给按钮做状态提示。
             rowsCache = { sid: sid, rows: rows, idx: idx, at: Date.now(), running: d && d.running === true }
-            syncSeqIndex(sid, d && d.messages, idx)
             return rowsCache
           })
           .catch(() => (rowsCache.sid === sid ? rowsCache : null))
@@ -3510,24 +3406,20 @@ window.__ModuleLoader__.load({
         var byTurn = new Map()
         var shadowed = new Set() // 落在 replace 区间内 = 已被回滚（transcript 藏行判据）
         var visibleTurns = new Set() // 含至少一条**未被遮蔽**消息的 turn 号（回合 chrome）
-        var dupByMessageId = new Map()
         for (var i = 0; i < list.length; i++) {
           var m = list[i]
           if (!m || typeof m.seq !== 'number') continue
           if (m.id != null) {
             var k = String(m.id)
             // restore 是「重放」语义 → 原件与副本可能同 id 并存。
-            // 0.9.1：不再「保留最早」，而是收集**全部** seq，隐藏判据取「任一 seq 越过
-            // fence」。回放副本才是当前 surface 上的那条，用最早的 seq 判会让
-            // 「恢复后再回滚」漏藏（实测 fence=70、副本 seq=70、原件 seq=54）。
-            if (byMessageId.has(k)) {
-              const arr = dupByMessageId.get(k) || [byMessageId.get(k)]
-              arr.push(m.seq)
-              dupByMessageId.set(k, arr)
-              byMessageId.set(k, m.seq) // 指向最新的
-            } else {
-              byMessageId.set(k, m.seq)
-            }
+            // ⚠️ 0.26.0（审计 §4.1）：这里**只保留最新 seq 一个值**。
+            // 0.9.1 曾额外维护 `dupByMessageId`（收集同 id 的全部 seq）+ `seqOfNodeKey`
+            // 返回 `hit.all`，声称供「隐藏判据取任一 seq 越过 fence」用 —— 但 0.9.1 的
+            // `fences` 判据早已换成 `idx.shadowed`（见 applySurfaceVisibility），
+            // 生产里**没有任何读取方会读 `hit.all`**（grep `hit.all` = 0）。
+            // 测试（test/surface-visibility.test.js）当时测的是它自己手抄的副本，
+            // 于是「生产 0 读者 / 测试绿」= 假绿灯。0.26.0 删掉：索引只留被消费的字段。
+            byMessageId.set(k, m.seq) // 最新（当前 surface 上的那条）
           }
           if (m.type === 'assistant/message' && m.turn != null && m.step != null) {
             byTurnStep.set(m.turn + ':' + m.step, m.seq)
@@ -3542,10 +3434,15 @@ window.__ModuleLoader__.load({
         }
         // turnEnd 优先：它对「该 turn 内一条消息都没有」的情况仍然有效
         if (turnEnd) for (const k in turnEnd) if (Object.prototype.hasOwnProperty.call(turnEnd, k)) byTurn.set(k, turnEnd[k])
-        return { byMessageId, dupByMessageId, byTurnStep, byCallId, byTurn, shadowed, visibleTurns, total: list.length }
+        // ⚠️ 返回形状 = **被消费的字段全集**（多一个字段 = 多一份要维护却没人读的状态）：
+        //   byMessageId / byTurnStep / byCallId / byTurn → seqOfNodeKey 查表
+        //   shadowed                                    → applySurfaceVisibility 藏行判据
+        //   visibleTurns                                → 回合 chrome 的藏行判据
+        //   total                                       → ensureAssign 的 dataSig（变化重算）
+        return { byMessageId, byTurnStep, byCallId, byTurn, shadowed, visibleTurns, total: list.length }
       }
 
-      /** node-key → { seq, all }（all = 同 id 的全部 seq，处理 restore 重放副本）。 */
+      /** node-key → `{ kind, seq[, turn] }`（**只返回查到的 seq**；同 id 只留最新，见 buildIndex）。 */
       var seqOfNodeKey = (key, idx) => {
         var parsed = parseNodeKey(key)
         if (!parsed || !idx) return null
@@ -3555,16 +3452,15 @@ window.__ModuleLoader__.load({
           case 'developer-message':
           case 'trajectory-note': {
             const hit = idx.byMessageId.get(id)
-            if (hit === undefined) return null
-            return { kind: parsed.kind, seq: hit, all: idx.dupByMessageId.get(id) || [hit] }
+            return hit === undefined ? null : { kind: parsed.kind, seq: hit }
           }
           case 'assistant-step': {
             const hit = idx.byTurnStep.get(id)
-            return hit === undefined ? null : { kind: parsed.kind, seq: hit, all: [hit] }
+            return hit === undefined ? null : { kind: parsed.kind, seq: hit }
           }
           case 'tool-call': {
             const hit = idx.byCallId.get(id)
-            return hit === undefined ? null : { kind: parsed.kind, seq: hit, all: [hit] }
+            return hit === undefined ? null : { kind: parsed.kind, seq: hit }
           }
           case 'turn-tail':
           case 'turn-process':
@@ -3574,7 +3470,7 @@ window.__ModuleLoader__.load({
             const hit = idx.byTurn.get(id)
             // 这类是**回合 chrome**，id 就是 turn 号 —— 判据要按「这个 turn 还有
             // 没有可见消息」而不是按 seq，因为 turn/end 本身多半不在 surface 上。
-            return hit === undefined ? null : { kind: parsed.kind, seq: hit, all: [hit], turn: id }
+            return hit === undefined ? null : { kind: parsed.kind, seq: hit, turn: id }
           }
           default:
             return null // compaction / command / workflow-run 等不参与
@@ -3635,9 +3531,10 @@ window.__ModuleLoader__.load({
         return { hidden, unresolved, shown }
       }
 
-      // 用户消息锚点：优先官方 Sixlwa_userRow（含 .xzv4MW_actions），回退 flow-kind 属性
+      // 用户消息锚点：优先官方 `HOST_CLS.userRow`（含 `HOST_CLS.actions` 动作行），
+      // 回退稳定属性 `data-chat-flow-kind="user"`（二者都在顶部 HOST_CLS 单点定义）。
       // 锚点 = 每条用户消息自己的容器（一个块只算一次）：
-      // 从官方动作行 .xzv4MW_actions 反查最近的消息容器，最贴近"一条消息"的粒度。
+      // 从官方动作行反查最近的消息容器，最贴近"一条消息"的粒度。
       var userAnchors = () => {
         const out = []
         const seen = new Set()
@@ -3647,7 +3544,7 @@ window.__ModuleLoader__.load({
             out.push(el)
           }
         }
-        const rows = Array.from(document.querySelectorAll('[class*="xzv4MW_actions"]'))
+        const rows = Array.from(document.querySelectorAll('[class*="' + HOST_CLS.actions + '"]'))
         for (const r of rows) {
           const block =
             r.closest('[data-chat-flow-kind="user"]') ||
@@ -3674,24 +3571,45 @@ window.__ModuleLoader__.load({
       // 配不上（data-mops-unmatched）→ 禁用 + 说明原因，绝不留装饰按钮。
       var syncEnabled = (block, btn) => {
         if (!btn) return
-        // 0.18.0/0.20.0：三种按钮各有自己的提示文案（编辑按钮不能写 revert 的 hint）
+        // 0.18.0/0.20.0：两种按钮各有自己的提示文案（编辑按钮不能写 revert 的 hint）
         // 0.21.0：回滚按钮统一用「带隐私提示」的 title —— syncEnabled 会在
         // 注入后重设 title，若这里仍用 slot.revert 会覆盖掉 ensureBtn 里的隐私提示。
-        const hintKey = btn.classList.contains('mopsUserEdit') ? 'slot.editHint' : 'slot.revertPrivacyHint'
+        const isEdit = btn.classList.contains('mopsUserEdit')
+        const hintKey = isEdit ? 'slot.editHint' : 'slot.revertPrivacyHint'
         const ok = block.getAttribute('data-mops-seq')
         if (ok) {
+          // 🔴 0.26.0 红线：**铅笔任何时候都可点**。
+          //
+          // 打开浮层是纯读（GET /text），不需要 idle；真正会被服务端 409 拦住的是
+          // 「撤销并发送」，那一层已经由浮层里的发送按钮 disabled + edit.running 拦住。
+          // 所以这里绝不允许出于「会话运行中」把入口 disabled —— 那正是用户投诉
+          // 「运行时铅笔根本无法点击」的形态。
+          //
+          // 0.24~0.25 里这条路径本来就只改 title/attr、没动 disabled（已用真实浏览器
+          // 138 点采样 + 原生鼠标点击验证过：运行中 disabled=false、可点开）。
+          // 保留 running 字样是**告知**，不是禁用；视觉上只做轻微淡化，不再用
+          // 0.5 那样容易被读成「禁用」的透明度。
           btn.disabled = false
-          // 0.25.0：会话运行中时，铅笔仍可点（用户要能点开看原文），但 title
-          // 换成 edit.running 明确告知「需先停止会话」—— 用户反馈「运行时
-          // 铅笔无法点击」，实际是点开后才发现不能提交，属于告知太晚。
-          const isEdit = btn.classList.contains('mopsUserEdit')
-          btn.title = rowsCache.running && isEdit ? __t('edit.running') : __t(hintKey)
-          if (rowsCache.running && isEdit) btn.setAttribute('data-mops-running', '1')
-          else btn.removeAttribute('data-mops-running')
+          const running = rowsCache.running === true
+          if (isEdit) {
+            btn.title = running ? __t('edit.running') : __t(hintKey)
+            // running 是「可点但发送要等」的信号：写进 aria 与 data-*，样式只做
+            // 非常轻的提示（0.82 仍清晰可辨，不像 disabled 的 0.4/0.5）
+            if (running) {
+              btn.setAttribute('data-mops-running', '1')
+              btn.setAttribute('aria-label', __t('edit.running'))
+            } else {
+              btn.removeAttribute('data-mops-running')
+              btn.setAttribute('aria-label', __t('slot.edit'))
+            }
+          } else {
+            btn.title = __t(hintKey)
+            btn.removeAttribute('data-mops-running')
+          }
           btn.removeAttribute('data-mops-unmatched')
         } else {
           btn.disabled = true
-          btn.title = __t('slot.revertUnmatched')
+          btn.title = __t(isEdit ? 'slot.editUnmatched' : 'slot.revertUnmatched')
           btn.setAttribute('data-mops-unmatched', '1')
         }
       }
@@ -3767,9 +3685,14 @@ window.__ModuleLoader__.load({
         const sid = __currentSessionId
         if (!sid) return
         btn.disabled = true
+        // 0.25.0（手感）：ensureAssign 内部第一件事就是 fetchRows，并把同一个
+        // cache 返回出来 —— 旧实现在它后面再 fetchRows(sid) 一次是纯重复
+        // （命中 8s 缓存只是空转，未命中时平白多打一次 GET /messages）。
+        // 复用返回值即可；只有 ensureAssign 彻底拿不到数据（网络失败 → null）
+        // 时才补一次，避免「一次抖动就让这次点击变成点了没用」。
         Promise.resolve()
           .then(() => ensureAssign(sid))
-          .then(() => fetchRows(sid))
+          .then(cache => cache || fetchRows(sid))
           .then(cache => {
             const rows = cache && cache.rows
             // 0.9.1：seq 来自 node-key 精确查表，**不再**做文本前缀匹配验证
@@ -3808,18 +3731,13 @@ window.__ModuleLoader__.load({
                 if (filled) notifyDone(__t('done.revert'))
                 else notifyDone(__t('done.revertNoRefill'), 'warn')
                 emitChanged()
-                try {
-                  if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(sid)
-                } catch {
-                  /* 视图重建失败不阻断 */
-                }
+                // 0.26.0：统一走 safeOpenSession（失败 warn，不静默吞）
+                safeOpenSession(sid, 'user-revert')
                 // 0.9.1：视图重建后重新拉权威可见性并隐藏被遮蔽的行。
                 // openSession 会重挂 DOM，旧节点上的 hidden 属性随之失效，必须重刷。
+                // 0.25.0（手感）：三连 [150,700,1600] → 立即一次（自带 300ms 尾随防抖）。
                 if (rowsCache) rowsCache.at = 0
-                for (const delay of [150, 700, 1600])
-                  setTimeout(() => {
-                    if (__refreshSurface) __refreshSurface(sid)
-                  }, delay)
+                if (__refreshSurface) __refreshSurface(sid)
               })
               .catch(reason => {
                 notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
@@ -3841,13 +3759,29 @@ window.__ModuleLoader__.load({
        *
        * 图标取官方 `edit-outline` 几何（16 viewBox，填充几何 —— 与分叉图标同族写法）。
        */
+      /**
+       * 取得（必要时创建）本条消息的**插件动作行**，返回 `{ host, created }`。
+       *
+       * 审计 §3.2：`ensureBtn` / `ensureEditBtn` 原先是两段**逐字相同**的
+       * 「查宿主动作行 → 查不到就建一个 `mopsUserActionsRow`」。
+       * 合并成一个函数不是为了省 4 行，而是为了消灭一个真实风险：
+       * 若宿主将来只提供 `TS9iAW_actions`、不再有 `xzv4MW_actions`，两个工厂会
+       * **各自**建一行 → 同一条消息下出现**两个**插件动作行（回滚/铅笔分两排），
+       * 这正是 0.16.0「撑裂行高」事故的同一类形态。
+       *
+       * 现在只有这一处会建行：先到先得，后来的复用同一个 host。
+       */
+      var ensureActionsHost = block => {
+        let host = block.querySelector('[class*="' + HOST_CLS.actions + '"]')
+        if (host) return { host: host, created: false }
+        host = document.createElement('div')
+        host.className = 'mopsUserActionsRow'
+        block.appendChild(host)
+        return { host: host, created: true }
+      }
+
       var ensureEditBtn = block => {
-        let host = block.querySelector('[class*="xzv4MW_actions"]')
-        if (!host) {
-          host = document.createElement('div')
-          host.className = 'mopsUserActionsRow'
-          block.appendChild(host)
-        }
+        const { host } = ensureActionsHost(block)
         const existing = host.querySelector('.mopsUserEdit')
         if (existing) return existing
         const btn = document.createElement('button')
@@ -3897,10 +3831,19 @@ window.__ModuleLoader__.load({
               notifyDone(__t('slot.editUnmatched'), 'warn')
               return
             }
-            // 裸 uuid 给 HTTP，带前缀的给 openSession 与草稿键
+            // 裸 uuid 给 HTTP，rawSessionId 给 sessions.using / 草稿键。
+            // node-key 与块元素一起带上：浮层要**贴着这条消息**弹出，而宿主会在
+            // 流式渲染里重建 DOM，所以两者都传 —— block 是最准的锚点（零查询），
+            // node-key 是存活到重渲染之后的重解析依据（块被换掉后仍能找回）。
             window.dispatchEvent(
               new CustomEvent(EDIT_EVENT, {
-                detail: { sessionId: bareSessionId(sid), rawSessionId: sid, seq: seq },
+                detail: {
+                  sessionId: bareSessionId(sid),
+                  rawSessionId: sid,
+                  seq: seq,
+                  nodeKey: block.getAttribute('data-chat-node-key') || null,
+                  block: block,
+                },
               }),
             )
           })
@@ -3908,19 +3851,16 @@ window.__ModuleLoader__.load({
             notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
           })
           .finally(() => {
-            btn.disabled = false
+            // 0.26.0：收尾交给 syncEnabled 而不是无条件 disabled=false ——
+            // 配对失败的块必须保持 disabled（抛 true 会让装饰按钮可点且点了报错）。
+            syncEnabled(block, btn)
           })
       }
 
       // 三个按钮的顺序由 DOM 顺序决定：回滚在前（破坏性更高），编辑居中，分叉最后（非破坏）。
       var ensureBtn = block => {
         // 官方动作行（含 Copy）：把按钮放到这一行里，与 Copy 同级
-        let host = block.querySelector('[class*="xzv4MW_actions"]')
-        if (!host) {
-          host = document.createElement('div')
-          host.className = 'mopsUserActionsRow'
-          block.appendChild(host)
-        }
+        const { host } = ensureActionsHost(block)
         let btn = host.querySelector('.mopsUserRevert')
         if (btn) return btn
         btn = document.createElement('button')
@@ -3954,10 +3894,17 @@ window.__ModuleLoader__.load({
         ensureBtn(block)
         ensureEditBtn(block)
       }
-      // 0.9.7（P0-2 读合并）：把 150/700/1600ms 三档并成**一次**真网络请求，
-      // 落点 = 本 burst 第一档 + 1500ms ≈ 原来的 1600ms 那一档。
-      // 🔴 红线：这一档是「视图重建后重算隐藏」的兜底，绝不能砍成 0。
-      // 调用当下立刻 rowsCache.at = 0 —— openSession 触发的那次 scan 因此能用
+      // 0.9.7（P0-2 读合并）/ 0.25.0（手感）：写操作后的兜底刷新 = **一次**真网络请求。
+      //
+      // 历史：写操作后曾排 150/700/1600ms 三连调用，指望「DOM 重建在不同时刻完成，
+      // 多打几档总能补上」。而本函数自身有防抖（窗口内重复调用只留最后一次），
+      // 三连实际只跑一发 —— 但落点固定在 1500ms 后，用户点完回撤要**白等 1.6 秒**
+      // 才看到灰。0.25.0 改成：调用方写后**立即**调一次（本函数立刻按防抖排程），
+      // 防抖窗口 1500ms → **300ms**（尾随），既够宿主完成 openSession 的 DOM 重挂，
+      // 又不让用户干等。
+      // 🔴 红线：这一档是「视图重建后重算隐藏」的兜底，绝不能砍成 0 —— 300ms 是
+      // 「一帧/两帧 + 一次重挂预算」，宁可多 300ms 也不许没有。
+      // 调用当下立刻 rowsCache.at = 0 —— 紧随其后的 scan 因此能用
       // 共享窗口里的新鲜载荷先把隐藏刷对，不必等兜底那一发。
       var refreshTimer = null
       var refreshDeadline = 0
@@ -3966,7 +3913,7 @@ window.__ModuleLoader__.load({
         if (!id) return
         if (rowsCache) rowsCache.at = 0 // 强制重取权威数据
         const now = Date.now()
-        if (!refreshTimer) refreshDeadline = now + 1500
+        if (!refreshTimer) refreshDeadline = now + 300
         clearTimeout(refreshTimer)
         refreshTimer = setTimeout(
           () => {
@@ -4014,7 +3961,9 @@ window.__ModuleLoader__.load({
           try {
             if (!e || !e.target || !e.target.closest) return
             if (!__currentSessionId) return
-            const block = e.target.closest('[class*="Sixlwa_userRow"], [data-chat-flow-kind="user"]')
+            // hash 单点：HOST_CLS.userRow 不硬编码在选择器里（见顶部常量块）。
+            // 稳定属性 `data-chat-flow-kind="user"` 在前 —— 宿主换 hash 也不会失配。
+            const block = e.target.closest('[class*="' + HOST_CLS.userRow + '"], [data-chat-flow-kind="user"]')
             if (!block) return
             ensureUserActions(block)
             if (!block.hasAttribute('data-mops-seq')) ensureAssign(__currentSessionId)
@@ -4024,7 +3973,32 @@ window.__ModuleLoader__.load({
         },
         { passive: true },
       )
-      window.addEventListener('scroll', scan, { passive: true })
+      // 0.25.0（手感）：滚动走 rAF 合并。
+      //
+      // 改前：`scroll` 上一次事件跑一次 `scan()`，而 scan 每次要做 **3 次全文档
+      // querySelectorAll**（userAnchors / data-chat-node-key / 块内动作行）。
+      // 滚动是每帧多次派发的高频事件 —— 长会话里肉眼可见地发涩。
+      // 改后：一帧内不管派发多少次，只跑一次 scan（rAF 合并，天然对齐宿主渲染节奏）。
+      // 不改成 MO 的 scheduleScan()（200ms 尾随）：那是为「宿主重建块」服务的防抖，
+      // 拿它接滚动会让藏行/打标慢半拍，手感更差。
+      var rafPending = false
+      var onScroll = () => {
+        if (rafPending) return
+        rafPending = true
+        var run = () => {
+          rafPending = false
+          scan()
+        }
+        // 老宿主/测试环境没有 rAF 时退回宏任务，语义仍是「合并到下一拍」
+        try {
+          if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(run)
+          else setTimeout(run, 16)
+        } catch {
+          rafPending = false
+          scan()
+        }
+      }
+      window.addEventListener('scroll', onScroll, { passive: true })
       try {
         // 0.9.7（P1-2）回调过滤 + maxWait。
         // ① 过滤：整个 document.body 的 childList 海量 mutation（流式文本、
@@ -4037,7 +4011,10 @@ window.__ModuleLoader__.load({
         //    这是正确性问题，不只是性能。
         // ③ attributeFilter 只盯 data-chat-node-key：本插件不写该属性（写的是
         //    data-mops-seq / hidden），所以不会被自己触发成环。
-        var MO_SEL = '[data-chat-node-key],[data-chat-flow-kind="user"],[class*="xzv4MW_actions"],[class*="_userRow"],[data-turn-tail]'
+        // ④ `data-chat-flow-kind` / `class*` 只认 **added/removed 节点**（attributeFilter
+        //    不含 className 与 flow-kind，见下方 observe 选项）；hash 单点见 HOST_CLS。
+        var MO_SEL =
+          '[data-chat-node-key],[data-chat-flow-kind="user"],[class*="' + HOST_CLS.actions + '"],[class*="_userRow"],[data-turn-tail]'
         var scanPendingSince = 0
         var scheduleScan = () => {
           var now = Date.now()
@@ -4122,7 +4099,8 @@ window.__ModuleLoader__.load({
             '.mopsUserRevert svg,.mopsUserEdit svg{width:14px;height:14px;display:block}',
             '.mopsUserRevert:hover,.mopsUserEdit:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.12));color:var(--dsw-alias-label-secondary,#6b6b70)}',
             '.mopsUserRevert:disabled,.mopsUserEdit:disabled{opacity:.4;cursor:default;background:transparent}',
-            '.mopsUserEdit[data-mops-running="1"]{opacity:.5}',
+            '.mopsUserEdit[data-mops-running="1"]{opacity:.82}',
+            '.mopsUserEdit[data-mops-running="1"]:hover{opacity:1}',
             '.mopsUserRevert:focus-visible,.mopsUserEdit:focus-visible{outline:2px solid var(--dsw-alias-border-l2,#b8b8b8);outline-offset:1px}',
             // 0.18.0：用户反馈「点时间图标也会回撤」——根因不是绑定错误，而是
             // 我们的按钮被 appendChild 到宿主 .actions 行末尾，而该行在
@@ -4322,16 +4300,14 @@ window.__ModuleLoader__.load({
       // emitChanged = 作废消息读缓存 + 清 rowsCache TTL + 广播 CHANGED
       // （dock 重拉 / 已打标 seq 摘牌），一次写只做一次。
       emitChanged()
-      try {
-        if (__uiWorkspace && typeof __uiWorkspace.openSession === 'function') __uiWorkspace.openSession(rawSid)
-      } catch (e) {
-        if (window.__MOPS_DEBUG) console.warn('[message-ops] openSession failed:', e)
-      }
+      // 0.26.0：统一走 safeOpenSession。原实现只在 __MOPS_DEBUG 下才 warn，
+      // 而这段注释本身就把「静默吞掉 → 视图重建从未生效」写成了事故档案 ——
+      // 现在无条件 warn（排障时不必先知道要开哪个开关）。
+      safeOpenSession(rawSid, 'after-write')
       const bare = bareSessionId(rawSid)
-      for (const delay of [150, 700, 1600])
-        setTimeout(() => {
-          if (__refreshSurface) __refreshSurface(bare)
-        }, delay)
+      // 0.25.0（手感）：三连 [150,700,1600] → 立即一次（__refreshSurface 自带
+      // 300ms 尾随防抖）。视图重建后的「重算隐藏」兜底必须留，只是不再白等 1.6s。
+      if (__refreshSurface) __refreshSurface(bare)
     }
 
     /**
@@ -4662,15 +4638,26 @@ window.__ModuleLoader__.load({
         activityTransition,
         forkBoundaryBefore,
         writeSessionDraft,
-        // 0.20.0：编辑并重发的编排层（可注入 deps 真执行断言时序）
+        // 0.26.0：编辑并重发的编排层 + 官方发送面（可注入 deps 真执行断言时序）
         sendEditAndRevert,
-        submitEditedText,
+        promptEditedText,
+        editSeatOf,
+        EDIT_SOURCE,
+        EDIT_PANEL_GAP,
+        EDIT_PANEL_MARGIN,
+        EDIT_PANEL_MIN_WIDTH,
+        EDIT_PANEL_MAX_WIDTH,
+        EDIT_FLIP_MIN_HEIGHT,
         // 0.24.0 P4：按会话隔离的 InputActions 访问面（真执行测试用）
         rememberInputActions,
         forgetInputActions,
         inputActionsFor,
         sessionKeyOf,
         __inputActionsBySession,
+        // 0.25.0（手感）：面板全文取数层（缓存 + 尾随防抖 + 单飞）的真执行测试面
+        loadPanelText,
+        clearPanelTextCache,
+        PANEL_TEXT_DEBOUNCE_MS,
         EDIT_EVENT,
         EDIT_ID,
       },

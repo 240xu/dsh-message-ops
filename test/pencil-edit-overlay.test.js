@@ -87,7 +87,9 @@ function sendLogic() {
 test('1.1 ensureEditBtn 存在，注入 .mopsUserEdit，并挂进官方动作行（.xzv4MW_actions）', () => {
   const body = mustFn('ensureEditBtn')
   assert.match(body, /mopsUserEdit/, '按钮类名必须是 .mopsUserEdit（样式与测试都靠它识别）')
-  assert.match(body, /xzv4MW_actions/, '必须复用宿主官方动作行，可见性才能跟随 hover 显隐')
+  // 0.26.0：宿主 hash 抽成 HOST_CLS 单点常量。断言改为「消费常量」而非字面量
+  // （否则抽常量后本行仍绿 —— 常量定义行还在文件里，锁强度会退化成「定义存在」）。
+  assert.match(body, /HOST_CLS\.actions|ensureActionsHost\(/, '必须复用宿主官方动作行（经 HOST_CLS 单点），可见性才能跟随 hover 显隐')
   assert.match(body, /slot\.edit/, 'title / aria-label 用 slot.edit')
 })
 
@@ -177,11 +179,17 @@ test('3.1 取消分支只有本地状态重置：无 fetch / 无写盘 / 无 ope
     blockAfter(overlay, 'const cancel') || blockAfter(overlay, 'cancel = useCallback') || blockAfter(overlay, 'function cancel')
   assert.ok(cancel, '找不到取消回调（契约名 cancel）')
   const c = flat(cancel)
-  assert.doesNotMatch(c, /fetch\(/, '取消不得发任何请求')
-  assert.doesNotMatch(c, /writeSessionDraft\(/, '取消不得写草稿键（零副作用）')
-  assert.doesNotMatch(c, /localStorage/, '取消不得碰 localStorage')
-  assert.doesNotMatch(c, /openSessionById\(|openSession\(/, '取消不得重建会话视图')
-  assert.match(c, /setTarget\(\s*null\s*\)|setOpen\(\s*false\s*\)|setVisible\(\s*false\s*\)/, '取消至少要真的关闭界面')
+  // 0.26.0：状态重置抽成 resetState（cancel 只调它 + in-flight 护栏）。
+  // 判据必须跟着走：既认「cancel 直接重置」也认「cancel 委托 resetState」。
+  const reset = blockAfter(overlay, 'const resetState =') || ''
+  const stateCode = c + '\n' + flat(reset)
+  assert.match(c, /resetState\(\)/, 'cancel 必须委托唯一的 resetState（避免两处状态重置漂移）')
+  assert.doesNotMatch(stateCode, /fetch\(/, '取消不得发任何请求')
+  assert.doesNotMatch(stateCode, /writeSessionDraft\(/, '取消不得写草稿键（零副作用）')
+  assert.doesNotMatch(stateCode, /localStorage/, '取消不得碰 localStorage')
+  assert.doesNotMatch(stateCode, /openSessionById\(|openSession\(/, '取消不得重建会话视图')
+  assert.doesNotMatch(stateCode, /prompt\(/, '取消不得发送（取消是纯读的结束）')
+  assert.match(stateCode, /setTarget\(\s*null\s*\)|setOpen\(\s*false\s*\)|setVisible\(\s*false\s*\)/, '取消至少要真的关闭界面')
 })
 
 test('3.2 发送中禁用取消与输入，避免半写状态', () => {
@@ -250,51 +258,47 @@ test('4.2b 组件层：revert 失败不清空 textarea、不关闭、显示 edit
   assert.doesNotMatch(branch, /setDraft\(\s*''\s*\)/, 'revert 失败不得清空用户已改的文本')
 })
 
-test('4.3 成功后依次：标遮蔽 → 写草稿 → 同步编辑器 → emitChanged → openSession → submit', () => {
+test('4.3 成功后依次：标遮蔽 → emitChanged → openSession → 官方 prompt（且不再写草稿）', () => {
   const send = sendLogic()
-  assert.ok(send, '找不到「发送并回撤」的实现体')
+  assert.ok(send, '找不到「撤销并发送」的实现体')
   const s = flat(send || '')
-  // 每个阶段接受「具名调用」或「注入别名调用」两种写法
+  // 0.26.0 契约：官方 prompt 是唯一发送面，所以成功路径只该有这四个阶段。
+  // 「写草稿 / setDraft / persistDraft / inputActions.submit」全部退场 ——
+  // 它们会让改后的文本残留在 composer 里（用户明确反对「UI 上再复现一遍」）。
   const stages = [
     ['markRowsShadowedFrom(', 'markShadowed('],
-    ['doWrite(', 'writeSessionDraft('],
     ['doEmitChanged(', 'emitChanged('],
     ['doOpenSession(', 'openSessionById('],
-    ['doSubmit(', 'submitEditedText('],
+    ['doPrompt(', 'promptEditedText('],
   ]
   let last = -1
   for (const names of stages) {
-    // 0.24.0 P4：`doSubmit` 的默认值里现在也出现 `submitEditedText(`（按会话传参），
-    // 用 indexOf 会命中**定义在前的默认值**而非末尾的真正调用点。
-    // 改为取该阶段所有匹配中位置**最晚**的一个 —— 阶段推进语义不变
-    // （每个阶段都必须出现在上一阶段之后），但不再被前置引用误伤。
     const hits = names.map(n => s.lastIndexOf(n)).filter(i => i !== -1)
-    if (!hits.length) {
-      const anyBefore = names.map(n => s.indexOf(n)).filter(i => i !== -1)
-      assert.ok(anyBefore.length > 0, `成功后必须调用 ${names.join(' 或 ')}`)
-    }
+    assert.ok(hits.length > 0, `成功后必须调用 ${names.join(' 或 ')}`)
     const at = Math.max(...hits)
     assert.ok(at > last, `${names[0]} 顺序不对（必须在前一阶段之后）`)
     last = at
   }
-  assert.match(s, /doSetDraft\(|setDraft\(/, '必须尽力同步活着的编辑器（setDraft）')
-  assert.match(s, /doPersistDraft\(|persistDraft\(/, '必须尽力 persistDraft')
+  // 负向锁：新路径**不得**再写草稿 / 驱动 composer（那是被删掉的旧编排）
+  assert.doesNotMatch(s, /doSetDraft\(|doPersistDraft\(/, '成功路径不得再同步 composer 草稿（新契约走官方 prompt）')
 })
 
-test('4.4 提交不可用必须显式提示 edit.manual，不许静默', () => {
+test('4.4 官方 prompt 被拒必须显式报错（不许静默、不许谎报回撤失败）', () => {
   const overlay = mustFn(['EditResendOverlay'])
-  assert.match(overlay, /edit\.manual/, '提交不可用时必须提示「已回撤，文本在输入框，请按回车」')
-  assert.match(overlay, /edit\.doneSubmitted/, '提交成功要有 edit.doneSubmitted 反馈')
+  // 成功反馈
+  assert.match(overlay, /edit\.doneSubmitted/, '发送成功要有 edit.doneSubmitted 反馈')
+  // 发送被拒的专门文案：回撤**已经成功**，不能再报 edit.failed（那会告诉用户回撤失败）
+  assert.match(overlay, /edit\.sendFailed/, 'prompt 被拒要有独立文案（不能与回撤失败混用）')
+  const raw = fn(['EditResendOverlay'])
+  assert.match(flat(raw), /stage === 'send'/, "必须按 stage === 'send' 分流：回撤成功但发送被拒")
+  // 重试语义：同一 seq 再回撤必然 409，所以发送被拒后只能「重新发送」
+  assert.ok(overlay.includes('reverted: sendOnly'), '重试必须以 reverted 跳过回撤（否则必然 409）')
+  assert.match(overlay, /edit\.resend/, '重试按钮文案是 edit.resend')
 
-  // 提交动作本身在编排层 / 有界重试函数里（组件只按 submitted 分支给反馈）
+  // 编排层：官方发送面（不是 inputActions.submit 轮询）
   const send = mustFn('sendEditAndRevert')
-  assert.match(send, /submitEditedText|doSubmit\(|trySubmitEdited/, '编排层必须有触发提交的动作')
-
-  const submit = mustFn(['submitEditedText', 'trySubmitEdited'])
-  assert.match(submit, /attempts/, '提交必须有次数上限（有界重试，不许无限自旋）')
-  assert.match(submit, /setTimeout/, '提交要等待 composer 重挂（间隔轮询）')
-  assert.match(submit, /\.submit\(/, '最终必须真的调用宿主 inputActions.submit()')
-  assert.match(submit, /setDraft\(/, '提交前必须先 setDraft，否则会用空草稿提交')
+  assert.match(send, /deps\.prompt|promptEditedText/, '编排层必须走官方 prompt 通道')
+  assert.doesNotMatch(send, /submitEditedText|trySubmitEdited|ia\.submit\(/, '不得残留 inputActions.submit 轮询')
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -364,9 +368,10 @@ const EDIT_KEYS = [
   'edit.cancel',
   'edit.send',
   'edit.sending',
+  'edit.resend',
+  'edit.sendFailed',
   'edit.empty',
   'edit.failed',
-  'edit.done',
   'edit.doneSubmitted',
   'edit.manual',
   'edit.running',
@@ -410,17 +415,20 @@ test('7.2 zh 是中文、en 不是中文；占位符集合一致', () => {
   }
 })
 
-test('7.3 zh / en key 序列一致，且新增 key 成块紧接 slot.forkUnavailable', () => {
+test('7.3 zh / en key 序列一致，且编辑 key 成块紧接 slot.forkUnavailable', () => {
   const zhKeys = dictKeyOrder('zhDict')
   const enKeys = dictKeyOrder('enDict')
   assert.deepEqual(zhKeys, enKeys, 'zh / en key 序列必须完全一致（含顺序）')
+  // 0.26.0：块序按实现里的实际序列锁（新增 edit.resend / edit.sendFailed 之后）。
+  // 不再手抄一份「应该是什么」的常量 —— 直接从 EDIT_KEYS 推：它已经按实现顺序列好，
+  // 只需断言它整体紧接 slot.forkUnavailable 之后、且顺序逐项相等。
   for (const keys of [zhKeys, enKeys]) {
     const anchor = keys.indexOf('slot.forkUnavailable')
     assert.notEqual(anchor, -1, '缺 slot.forkUnavailable 锚点')
     assert.deepEqual(
       keys.slice(anchor + 1, anchor + 1 + EDIT_KEYS.length),
       EDIT_KEYS,
-      '新增 key 必须紧接 slot.forkUnavailable 之后成块插入且顺序不变',
+      '编辑 key 必须紧接 slot.forkUnavailable 之后成块插入且顺序不变',
     )
   }
 })
@@ -601,11 +609,12 @@ function loadPlugin(g) {
 
 /**
  * 构造实现接受的 deps（键名与 `sendEditAndRevert` 里 `deps.*` 的读取一一对应：
- * fetch / writeSessionDraft / readSessionDraft / markRowsShadowedFrom /
- * setDraft / persistDraft / emitChanged / openSessionById / **submitEdited**）。
+ * fetch / markRowsShadowedFrom / emitChanged / openSessionById / **prompt**
+ * （老宿主降级路径还会读 writeSessionDraft / readSessionDraft）。
  *
- * ⚠️ 用错键名会静默落回真实实现（尤其是 submitEditedText 的 setTimeout 轮询），
- * 表现为「测试结束后还有异步活动」——所以这里集中一处构造，别在用例里手写。
+ * ⚠️ 用错键名会静默落回真实实现（例如 prompt 落到 promptEditedText 后因为没有
+ * sessions 服务而走降级分支），结果是「看起来成功但其实没发送」——
+ * 所以这里集中一处构造，别在用例里手写。
  */
 function makeDeps(calls, opts) {
   const o = opts || {}
@@ -626,9 +635,11 @@ function makeDeps(calls, opts) {
     persistDraft: () => calls.push(['persistDraft']),
     emitChanged: () => calls.push(['emitChanged']),
     openSessionById: () => calls.push(['openSessionById']),
-    submitEdited: () => {
-      calls.push(['submitEdited'])
-      return true
+    // 0.26.0（官方发送面）：prompt(text, mode) 是唯一提交通道。
+    // 记录**全部实参**，测试据此断言 mode === 'queue' 与发送文本。
+    prompt: (t, mode) => {
+      calls.push(['prompt', t, mode])
+      return Promise.resolve(o.promptResult || { ok: true, accepted: true })
     },
   }
 }
@@ -649,7 +660,7 @@ test('8.1 真执行：revert 失败时零写盘（若 __test.sendEditAndRevert �
   })
 })
 
-test('8.2 真执行：revert 成功时顺序为 revert → writeSessionDraft → emitChanged → openSession → submit', () => {
+test('8.2 真执行：revert 成功时顺序为 revert → 标遮蔽 → emitChanged → openSession → 官方 prompt', () => {
   return withDom(g => {
     const { __test } = loadPlugin(g)
     const fnSend = __test && __test.sendEditAndRevert
@@ -659,89 +670,130 @@ test('8.2 真执行：revert 成功时顺序为 revert → writeSessionDraft →
     return Promise.resolve(fnSend({ sessionId: 'uuid', rawSessionId: 'session-uuid', seq: 12, text: '改后文本', deps })).then(out => {
       assert.equal(out && out.ok, true, 'revert 成功应返回 ok:true')
       assert.equal(out.stage, 'done', '成功阶段必须是 done')
-      assert.equal(out.submitted, true, '提交成功时 submitted 必须是 true')
+      assert.equal(out.submitted, true, '官方 prompt 被接受时 submitted 必须是 true')
+      assert.equal(out.mode, 'official', '成功路径必须是官方发送面（不是降级草稿）')
       const names = calls.map(c => c[0])
       const at = n => names.indexOf(n)
       assert.equal(names[0], 'fetch', '第一个副作用必须是 POST /revert')
       assert.match(calls[0][1], /\/api\/message-ops\/revert/, '第一个请求必须是 /revert')
-      // HTTP body 必须带裸 sessionId 与 seq（服务端只认这个形状）
       assert.ok(at('markRowsShadowedFrom') > 0, '成功后必须标遮蔽（防 409 护栏）')
-      assert.ok(at('writeSessionDraft') > at('markRowsShadowedFrom'), '标遮蔽在写草稿之前')
-      assert.ok(at('emitChanged') > at('writeSessionDraft'), 'emitChanged 在写盘之后')
+      assert.ok(at('emitChanged') > at('markRowsShadowedFrom'), 'emitChanged 在标遮蔽之后')
       assert.ok(at('openSessionById') > at('emitChanged'), 'openSession 在 emitChanged 之后')
-      assert.ok(at('submitEdited') > at('openSessionById'), '提交在重建视图之后')
-      const wrote = calls.find(c => c[0] === 'writeSessionDraft')
-      assert.equal(wrote[1], 'session-uuid', '草稿键必须用带前缀的 rawSessionId')
-      assert.equal(wrote[2], '改后文本', '写进草稿的必须是用户改后的文本')
+      assert.ok(at('prompt') > at('openSessionById'), '官方 prompt 必须在视图重建之后（否则遮蔽还没落地）')
+      // 负向锁：旧编排的两个阶段不得出现（写草稿会让文本残留 composer）
+      assert.equal(at('writeSessionDraft'), -1, '官方 prompt 路径**不得**再写草稿（会残留重复文本）')
+      assert.equal(at('setDraft'), -1, '官方 prompt 路径不得再驱动 composer 的 setDraft')
+      // prompt 必须是 queue 模式且只带一个 text part
+      const prompt = calls.find(c => c[0] === 'prompt')
+      assert.equal(prompt[2], 'queue', "prompt 必须用 'queue' 模式（追加一轮，不打断）")
+      assert.equal(prompt[1], '改后文本', 'prompt 发送的必须是用户改后的文本')
       return null
     })
   })
 })
 
-// ── 0.23.0 · 真执行 submitEditedText（不再 stub，堵住变异测试抓到的假绿灯）────
-test('9.1 真执行：submitEditedText 只提交一次，且先 setDraft 再 submit', () => {
+test('9.1 真执行：revert 失败时官方 prompt 零调用（零副作用）', () => {
   return withDom(g => {
     const { __test } = loadPlugin(g)
-    assert.equal(typeof __test.submitEditedText, 'function', '真实提交函数必须导出')
+    assert.equal(typeof __test.sendEditAndRevert, 'function', '编排层必须导出（否则真执行静默蒸发）')
     const calls = []
-    const ia = {
-      setDraft: t => calls.push(['setDraft', t]),
-      persistDraft: () => calls.push(['persistDraft']),
-      submit: () => calls.push(['submit']),
-    }
-    // 模拟视图已重挂：getInputActions 每次返回同一个（usable + remounted 成立）
-    const before = null
-    let current = ia
+    const deps = makeDeps(calls, { revertOk: false })
     return Promise.resolve(
-      __test.submitEditedText('改后文本', {
-        attempts: 3,
-        intervalMs: 0,
-        getInputActions: () => current,
-      }),
-    ).then(ok => {
-      assert.equal(ok, true, '可用时应提交成功')
-      const submits = calls.filter(c => c[0] === 'submit')
-      assert.equal(submits.length, 1, '只能提交一次（变异测试：加一次 submit 曾全绿）')
-      assert.equal(calls[0][0], 'setDraft', '必须先 setDraft')
-      assert.equal(calls[0][1], '改后文本', 'setDraft 必须传改后的文本')
-      assert.equal(calls[calls.length - 1][0], 'submit', '最后才 submit')
-      assert.equal(before, null, 'before 基准为 null（模拟重挂前无 inputActions）')
+      __test.sendEditAndRevert({ sessionId: 'uuid', rawSessionId: 'session-uuid', seq: 12, text: '改后文本', deps }),
+    ).then(out => {
+      assert.equal(out.ok, false, 'revert 失败必须返回 ok:false')
+      assert.equal(out.stage, 'revert', '失败阶段必须是 revert')
+      assert.equal(calls.filter(c => c[0] === 'prompt').length, 0, 'revert 失败时绝不许发送（会发出与回撤无关的消息）')
+      assert.deepEqual(
+        calls.map(c => c[0]).filter(n => n !== 'fetch'),
+        [],
+        'revert 失败时不得有任何后续副作用',
+      )
     })
   })
 })
 
-test('9.2 真执行：inputActions 一直不可用 → 有界超时返回 false，不假装成功', () => {
+test('9.2 真执行：prompt 抛错 → 返回 stage send / ok:false，不吞异常', () => {
   return withDom(g => {
     const { __test } = loadPlugin(g)
-    assert.equal(typeof __test.submitEditedText, 'function')
+    const calls = []
+    const deps = makeDeps(calls, { revertOk: true })
+    deps.prompt = () => {
+      calls.push(['prompt'])
+      throw new Error('prompt boom')
+    }
     return Promise.resolve(
-      __test.submitEditedText('x', {
-        attempts: 3,
-        intervalMs: 0,
-        getInputActions: () => null, // 始终不可用
-      }),
-    ).then(ok => {
-      assert.equal(ok, false, '不可用必须返回 false，不能 resolve(true)')
+      __test.sendEditAndRevert({ sessionId: 'uuid', rawSessionId: 'session-uuid', seq: 12, text: '改后文本', deps }),
+    ).then(out => {
+      // 回撤已经成功 → 不能报「回撤失败」，否则用户会被误导去重试回撤（必然 409）
+      assert.equal(out.ok, false, 'prompt 抛错必须返回 ok:false')
+      assert.equal(out.stage, 'send', "回撤成功后的发送失败必须单列 stage:'send'")
+      assert.equal(out.submitted, false, '不许把失败谎报成已提交')
+      assert.match(String(out.reason), /prompt boom/, '必须把原始错误带出来（不吞）')
+      assert.equal(calls.filter(c => c[0] === 'prompt').length, 1, 'prompt 只尝试一次，不做隐藏重试')
     })
   })
 })
 
-test('9.3 真执行：submit 抛错 → 返回 false，不吞异常', () => {
+test('9.3 真执行：官方发送面缺席 → 唯一降级（写草稿 + 回读），只有一个 manual 分支', () => {
   return withDom(g => {
     const { __test } = loadPlugin(g)
-    const ia = {
-      setDraft: () => {},
-      persistDraft: () => {},
-      submit: () => { throw new Error('submit boom') },
-    }
+    const calls = []
+    const deps = makeDeps(calls, { revertOk: true })
+    // 模拟老宿主：sessions 服务缺席
+    deps.prompt = () => Promise.resolve({ ok: false, unavailable: true, reason: 'sessions service unavailable' })
+    // 回读返回写入的值 → persisted 必须为 true
+    deps.readSessionDraft = () => '改后文本'
     return Promise.resolve(
-      __test.submitEditedText('x', {
-        attempts: 2,
-        intervalMs: 0,
-        getInputActions: () => ia,
+      __test.sendEditAndRevert({ sessionId: 'uuid', rawSessionId: 'session-uuid', seq: 12, text: '改后文本', deps }),
+    ).then(out => {
+      assert.equal(out.ok, true, '降级路径写盘成功仍算 ok（不能让用户以为整个操作失败）')
+      assert.equal(out.submitted, false, '降级路径没有真的发送，submitted 必须是 false')
+      assert.equal(out.mode, 'manual', '降级路径必须显式标记 mode=manual')
+      assert.equal(out.manual, true, '降级路径必须带 manual 标记供组件选文案')
+      assert.equal(out.persisted, true, '回读一致时 persisted 必须为 true')
+      const names = calls.map(c => c[0])
+      assert.equal(names.filter(n => n === 'writeSessionDraft').length, 1, '降级只写一次草稿（不复制第二套 composer）')
+      assert.equal(names.filter(n => n === 'setDraft').length, 0, '降级也不许驱动 composer 的活编辑器')
+    })
+  })
+})
+
+test('9.4 真执行：降级路径写盘后回读到不一致 → persisted=false（如实报失败）', () => {
+  return withDom(g => {
+    const { __test } = loadPlugin(g)
+    const deps = makeDeps([], { revertOk: true })
+    deps.prompt = () => Promise.resolve({ ok: false, unavailable: true, reason: 'no sessions' })
+    deps.readSessionDraft = () => '别的内容'
+    return Promise.resolve(
+      __test.sendEditAndRevert({ sessionId: 'uuid', rawSessionId: 'session-uuid', seq: 12, text: '改后文本', deps }),
+    ).then(out => {
+      assert.equal(out.mode, 'manual')
+      assert.equal(out.persisted, false, '回读不一致必须如实报 persisted=false（不许假装成功）')
+    })
+  })
+})
+
+test('8.3 真执行：reverted=true 时跳过回撤与视图重建，只发一次官方 prompt（重新发送）', () => {
+  return withDom(g => {
+    const { __test } = loadPlugin(g)
+    const calls = []
+    const deps = makeDeps(calls, { revertOk: true })
+    return Promise.resolve(
+      __test.sendEditAndRevert({
+        sessionId: 'uuid',
+        rawSessionId: 'session-uuid',
+        seq: 12,
+        text: '改后文本',
+        deps,
+        reverted: true,
       }),
-    ).then(ok => {
-      assert.equal(ok, false, '提交抛错必须返回 false')
+    ).then(out => {
+      assert.equal(out.ok, true, '重新发送必须成功')
+      assert.equal(out.stage, 'done')
+      assert.equal(calls.filter(c => c[0] === 'fetch').length, 0, '同一 seq 再回撤必然 409，重新发送不得再 POST /revert')
+      assert.equal(calls.filter(c => c[0] === 'openSessionById').length, 0, '重新发送不需要再重建视图')
+      assert.equal(calls.filter(c => c[0] === 'prompt').length, 1, '重新发送只发一次 prompt')
     })
   })
 })
@@ -761,7 +813,13 @@ test('10.2 真执行：两个会话各自登记，互不覆盖（旧实现会串
     const { __test } = loadPlugin(g)
     const mkIA = name => {
       const calls = []
-      return { name, calls, setDraft: v => calls.push([name, 'setDraft', v]), persistDraft: () => calls.push([name, 'persist']), submit: () => calls.push([name, 'submit']) }
+      return {
+        name,
+        calls,
+        setDraft: v => calls.push([name, 'setDraft', v]),
+        persistDraft: () => calls.push([name, 'persist']),
+        submit: () => calls.push([name, 'submit']),
+      }
     }
     const iaA = mkIA('A')
     const iaB = mkIA('B')

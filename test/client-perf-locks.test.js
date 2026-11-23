@@ -19,8 +19,10 @@ function fnBlock(text, needle) {
   let started = false
   for (let i = at; i < text.length; i++) {
     const ch = text[i]
-    if (ch === '{') { depth++; started = true }
-    else if (ch === '}') {
+    if (ch === '{') {
+      depth++
+      started = true
+    } else if (ch === '}') {
       depth--
       if (started && depth === 0) return text.slice(at, i + 1)
     }
@@ -34,7 +36,6 @@ function lastFnBlock(text, needle) {
   if (at < 0) return null
   return fnBlock(text.slice(at), needle)
 }
-
 
 // ═══════════════════════════════════════════════════════════════════════════
 // P2-1 · ensureAssign 三签名门控 + 藏行幂等跳写
@@ -51,29 +52,25 @@ test('P2-1：assignSeqs 有三签名门控（dataSig / domSig / anchorSig）', (
   assert.ok(/sigOf\(sid, dataSig, rows\.length, anchors\)/.test(body), '缺签名组装')
   assert.ok(/var anchorSigOf = \(?anchors\)? => \{/.test(src), '缺 anchorSig 生成器')
   const asBlock = fnBlock(src, 'var anchorSigOf')
-  assert.ok(asBlock && /getAttribute\('data-mops-seq'\)/.test(asBlock),
-    'anchorSig 必须包含打标状态（宿主重建块 / CHANGED 摘牌要能被发现）')
+  assert.ok(asBlock && /getAttribute\('data-mops-seq'\)/.test(asBlock), 'anchorSig 必须包含打标状态（宿主重建块 / CHANGED 摘牌要能被发现）')
   assert.ok(/if \(before !== assignSig\) \{/.test(body), '门控条件缺失 —— 会退回每次全量改写')
   assert.ok(/assignSeqs\(sid, cache, anchors\)/.test(body), 'assignSeqs 必须在门控内')
   // 会话 id 也必须进签名，否则切会话后签名可能撞车
-  assert.ok(/var sigOf = \(sid, dataSig, rowsLen, anchors\) =>\s*bareSessionId\(sid\) \+ '\|'/.test(src),
-    '签名里没带 sid')
+  assert.ok(/var sigOf = \(sid, dataSig, rowsLen, anchors\) =>\s*bareSessionId\(sid\) \+ '\|'/.test(src), '签名里没带 sid')
 })
 
 test('P2-1 红线：applySurfaceVisibility 保持无条件执行（在门控 if 之外）', () => {
   const ea = fnBlock(src, 'var ensureAssign =')
   assert.ok(ea, '找不到 ensureAssign')
   const body = ea
-  assert.ok(/}\s+applySurfaceVisibility\(rows, idx\)/.test(body),
-    '藏行必须无条件跑 —— 这是 0.9.6 修的核心，砍成条件执行 = 隐藏不更新')
+  assert.ok(/}\s+applySurfaceVisibility\(rows, idx\)/.test(body), '藏行必须无条件跑 —— 这是 0.9.6 修的核心，砍成条件执行 = 隐藏不更新')
   assert.ok(!/if\s*\([^\n]*\)\s*applySurfaceVisibility/.test(body), '不许包进任何 if')
 })
 
 test('P2-1：藏行改成幂等跳写（判据/时机不变，只省重复 DOM 写）', () => {
   // 目标态 ≠ 当前态才写
   assert.ok(/row\.getAttribute\('hidden'\) !== 'until-found'/.test(src), 'hidden 写入不是幂等的')
-  assert.ok(/if \(row\.hasAttribute\('hidden'\)\) row\.removeAttribute\('hidden'\)/.test(src),
-    'hidden 移除不是幂等的')
+  assert.ok(/if \(row\.hasAttribute\('hidden'\)\) row\.removeAttribute\('hidden'\)/.test(src), 'hidden 移除不是幂等的')
   // 判据本身不许动
   assert.ok(/shouldHide = idx\.shadowed\.has\(hit\.seq\)/.test(src), '藏行判据被改（必须是 shadowed）')
   assert.ok(/shouldHide = !idx\.visibleTurns\.has\(String\(hit\.turn\)\)/.test(src), '回合 chrome 判据被改')
@@ -91,18 +88,19 @@ test('P1-2：MO 回调先过滤，matches 与 querySelector 两者都试', () =>
   assert.ok(/n\.matches\(MO_SEL\)/.test(src), '新增节点自身可能就是目标')
   assert.ok(/n\.querySelector\(MO_SEL\)/.test(src), '新增子树可能是祖先容器')
   assert.ok(/catch\s*\{\s*scheduleScan\(\)\s*\}/.test(src), '过滤自身出错必须放行（宁可多扫一次）')
-  assert.ok(/MO_SEL = '\[data-chat-node-key\]/.test(src), '选择器必须覆盖宿主 chat 行')
-  assert.ok(/\[class\*="xzv4MW_actions"\]/.test(src), '选择器必须覆盖官方用户动作行')
+  assert.ok(/var MO_SEL =[\s\S]{0,220}data-chat-node-key/.test(src), '选择器必须覆盖宿主 chat 行')
+  // 0.26.0：宿主 hash 已抽成 HOST_CLS 单点常量（跨版本最脆的依赖只留一处定义）。
+  // 断言随之改为「**常量值**正确 + **被选择器消费**」，不再锁散落的字面量 ——
+  // 否则抽常量后这行仍会绿（常量定义行还在），锁强度会悄悄退化。
+  assert.match(src, /HOST_CLS = \{[\s\S]{0,200}actions: 'xzv4MW_(actions|leader)'/, 'HOST_CLS.actions 的值必须是宿主真实动作行 hash')
+  assert.match(src, /MO_SEL =[\s\S]{0,160}HOST_CLS\.actions/, 'MO_SEL 必须消费 HOST_CLS.actions（不是字面量）')
 })
 
 test('P1-2：防抖 trailing 200ms + maxWait（连续 mutation 不许无限推迟）', () => {
   assert.ok(/scanPendingSince >= 1000/.test(src), '缺 maxWait —— 流式输出时遮蔽行会长时间保持可见')
   // 格式无关：压掉空白后比对语义片段（prettier 会把单行箭头拆多行）
   const flatSrc = src.replace(/\s+/g, ' ')
-  assert.ok(
-    /setTimeout\(\(\) => \{ scan\._t = null;? scanPendingSince = 0;? scan\(\) \}, 200\)/.test(flatSrc),
-    'trailing 200ms 防抖被改',
-  )
+  assert.ok(/setTimeout\(\(\) => \{ scan\._t = null;? scanPendingSince = 0;? scan\(\) \}, 200\)/.test(flatSrc), 'trailing 200ms 防抖被改')
 })
 
 test('P1-2：attributeFilter 只盯宿主写入的 data-chat-node-key（不自触发）', () => {
@@ -113,25 +111,35 @@ test('P1-2：attributeFilter 只盯宿主写入的 data-chat-node-key（不自�
 // ═══════════════════════════════════════════════════════════════════════════
 // P0-2-client · 写操作后的读合并
 // ═══════════════════════════════════════════════════════════════════════════
-test('红线：150/700/1600 三连三处全保留（1600ms 兜底不能砍成 0）', () => {
-  assert.equal((src.match(/\[150, 700, 1600\]/g) || []).length, 3,
-    'restoreRow / runUserRevert / afterWrite 各一处，缺一处就退回「隐藏不更新」')
+test('0.25.0 手感：三连 [150,700,1600] 已删除，改为「写后立即一次 + 300ms 尾随防抖」', () => {
+  // 旧契约（0.9.7）要求三连三处全保留。0.25.0 起废弃：__refreshSurface 自身
+  // 就有防抖，三连实际只跑一发，却把落点钉在 1500ms 后 → 用户白等 1.6s 才见变灰。
+  // 新契约 = 三处都改成「立即调用一次」，由 __refreshSurface 的 300ms 尾随防抖收口。
+  // 只查**代码行**（剥注释）：历史注释里保留「曾排 [150, 700, 1600]」的档案说明是允许的。
+  const codeOnly = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  assert.equal((codeOnly.match(/\[150, 700, 1600\]/g) || []).length, 0, '三连字面量必须从代码里消失（注释里的历史档案可留）')
+  assert.doesNotMatch(src, /for \(const delay of \[/, '不许再用「按 delay 数组排 setTimeout」的写法')
+  const rs = lastFnBlock(src, '__refreshSurface =')
+  assert.ok(rs, '找不到 __refreshSurface')
+  assert.match(rs, /refreshDeadline = now \+ 300/, '尾随防抖窗口必须降到 300ms')
+  // 红线（不变）：兜底那一发不能砍成 0 —— 三处调用点必须仍在
+  const calls = (src.match(/__refreshSurface\(/g) || []).length
+  assert.ok(calls >= 3, `兜底刷新不得砍成 0（restoreRow/runUserRevert/afterWrite 各一处），实际 ${calls}`)
 })
 
-test('读合并：合并窗口 <1600ms，且兜底档强制走真网络', () => {
+test('读合并：兜底刷新强制作废窗口走真网络（与尾随窗口解耦）', () => {
   const m = /const MSG_COALESCE_MS = (\d+)/.exec(src)
   assert.ok(m, '缺合并窗口常量')
   const w = Number(m[1])
   assert.ok(w >= 300, `窗口 ${w}ms 太短，盖不住 dock + openSession 后的 scan`)
-  assert.ok(w < 1600, `窗口 ${w}ms ≥1600 会把兜底那一发吞掉`)
   const rs = lastFnBlock(src, '__refreshSurface =')
   assert.ok(rs, '找不到 __refreshSurface')
   assert.ok(/invalidateMessagesMemo\(\)/.test(rs), '兜底档必须先作废窗口再拉，否则吃的是旧响应')
-  assert.ok(/refreshDeadline/.test(rs), '三档必须并成一次（deadline 合并），不是各拉各的')
+  assert.ok(/refreshDeadline/.test(rs), '重复调用必须并成一次（deadline 合并），不是各拉各的')
 })
 
 test('红线：refillComposer / setDraft 必须发生在首次刷新之前', () => {
-  // 悬停回滚按钮：refill → emitChanged → 三连
+  // 悬停回滚按钮：refill → emitChanged → __refreshSurface（立即一次）
   // 0.23.0：改用 markRowsShadowedFrom 当锚点 —— 旧实现先 notifyDone 再回填且
   // 丢弃返回值（回填失败仍报成功），现已改为「先回填，按结果报成功/warn」。
   const s0 = src.indexOf('markRowsShadowedFrom(row.seq)')
@@ -143,11 +151,12 @@ test('红线：refillComposer / setDraft 必须发生在首次刷新之前', () 
   const done = block.indexOf("notifyDone(__t('done.revert'))")
   const warn = block.indexOf("notifyDone(__t('done.revertNoRefill'), 'warn')")
   const e = block.indexOf('emitChanged(')
-  const l = block.indexOf('for (const delay of [150, 700, 1600]')
+  // 0.25.0：三连退休，新形态是紧跟 emitChanged 的一次 __refreshSurface(sid)
+  const l = block.indexOf('__refreshSurface(sid)')
   assert.ok(r >= 0, 'runUserRevert 不回填 composer')
   assert.ok(done > r && warn > r, '必须先回填，再按结果报成功/warn（不能先报成功）')
   assert.ok(e > r, 'emitChanged（= 首次刷新）必须排在 refillComposer 之后')
-  assert.ok(l > e, '三连必须排在 emitChanged 之后')
+  assert.ok(l > e, '兜底刷新必须排在 emitChanged 之后')
 
   // /undo：refill → afterWrite（afterWrite 内部才是 emitChanged + 三连）
   const un = src.indexOf('refillComposer(rawSid, target.seq)')
@@ -161,13 +170,13 @@ test('红线：refillComposer / setDraft 必须发生在首次刷新之前', () 
 })
 
 test('读合并：所有 message 列表 GET 都走 fetchMessagesJson', () => {
-  const urls = src.split('\n').filter((l) => /api\/message-ops\/messages\?sessionId=/.test(l))
+  const urls = src.split('\n').filter(l => /api\/message-ops\/messages\?sessionId=/.test(l))
   assert.ok(urls.length > 0)
-  const stray = urls.filter((l) => /(^|[^a-zA-Z])fetch\(/.test(l))
+  const stray = urls.filter(l => /(^|[^a-zA-Z])fetch\(/.test(l))
   assert.deepEqual(stray, [], '还有绕过合并窗口的裸 fetch：\n' + stray.join('\n'))
   // 两种 sessionId 写法必须归一，否则 session-xxx / xxx 各占一个缓存槽 = 合并失效
   assert.ok(src.includes('[?&]sessionId=)session-'), 'fetchMessagesJson 没归一 session- 前缀')
-  const norm = (u) => String(u).replace(/([?&]sessionId=)session-/, '$1')
+  const norm = u => String(u).replace(/([?&]sessionId=)session-/, '$1')
   assert.equal(norm('/api/message-ops/messages?sessionId=session-abc'), '/api/message-ops/messages?sessionId=abc')
   assert.equal(norm('/api/message-ops/messages?sessionId=abc'), '/api/message-ops/messages?sessionId=abc')
 })
@@ -177,7 +186,7 @@ test('读合并：所有 message 列表 GET 都走 fetchMessagesJson', () => {
 // client.js 正文此前执行覆盖 = 0，这条是唯一真执行它的用例。
 // ═══════════════════════════════════════════════════════════════════════════
 /** 与 src/client.js 的 seqOfNodeKey 同构的最小替身：key 形如 `<len><kind><id>` */
-const fakeSeqOfNodeKey = (key) => {
+const fakeSeqOfNodeKey = key => {
   const m = /^(\d+):(.+)$/.exec(String(key || ''))
   if (!m) return null
   const kindLen = Number(m[1])
@@ -202,10 +211,20 @@ const makeRow = (key, hidden) => {
   return {
     attrs,
     writes: 0,
-    getAttribute(n) { return Object.prototype.hasOwnProperty.call(this.attrs, n) ? this.attrs[n] : null },
-    hasAttribute(n) { return Object.prototype.hasOwnProperty.call(this.attrs, n) },
-    setAttribute(n, v) { this.attrs[n] = v; this.writes++ },
-    removeAttribute(n) { delete this.attrs[n]; this.writes++ },
+    getAttribute(n) {
+      return Object.prototype.hasOwnProperty.call(this.attrs, n) ? this.attrs[n] : null
+    },
+    hasAttribute(n) {
+      return Object.prototype.hasOwnProperty.call(this.attrs, n)
+    },
+    setAttribute(n, v) {
+      this.attrs[n] = v
+      this.writes++
+    },
+    removeAttribute(n) {
+      delete this.attrs[n]
+      this.writes++
+    },
   }
 }
 const idxOf = (shadowedSeqs, visibleTurns) => ({
@@ -216,11 +235,11 @@ const idxOf = (shadowedSeqs, visibleTurns) => ({
 test('真执行：shadowed 行被藏、未遮蔽行保持可见（0.9.6 判据）', () => {
   const apply = loadApplySurfaceVisibility()
   const rows = [
-    makeRow('13:input-message8'),     // seq 8，未遮蔽
-    makeRow('13:input-message54'),    // seq 54，已遮蔽
-    makeRow('9:turn-tail3'),          // turn 3，有可见消息
-    makeRow('9:turn-tail4'),          // turn 4，全遮蔽
-    makeRow('garbage'),               // 查不到 → 必须保持可见
+    makeRow('13:input-message8'), // seq 8，未遮蔽
+    makeRow('13:input-message54'), // seq 54，已遮蔽
+    makeRow('9:turn-tail3'), // turn 3，有可见消息
+    makeRow('9:turn-tail4'), // turn 4，全遮蔽
+    makeRow('garbage'), // 查不到 → 必须保持可见
   ]
   const out = apply(rows, idxOf([54], [3]))
   assert.equal(out.hidden, 2, 'seq54 + turn4 应被藏')
@@ -241,11 +260,15 @@ test('真执行：幂等跳写 —— 已在目标态时零 DOM 写', () => {
     makeRow('9:turn-tail4', 'until-found'),
     makeRow('garbage'),
   ]
-  apply(rows, idx)                     // 第一次：把状态摆到位
+  apply(rows, idx) // 第一次：把状态摆到位
   const writesAfterFirst = rows.reduce((n, r) => n + r.writes, 0)
   assert.equal(writesAfterFirst, 0, '已在目标态 → 一次写都不该发生')
-  apply(rows, idx)                     // 第二次：仍然零写
-  assert.equal(rows.reduce((n, r) => n + r.writes, 0), 0, '重复扫描不该再碰属性')
+  apply(rows, idx) // 第二次：仍然零写
+  assert.equal(
+    rows.reduce((n, r) => n + r.writes, 0),
+    0,
+    '重复扫描不该再碰属性',
+  )
 })
 
 test('真执行：状态翻转时仍然会写（幂等不是「不写」）', () => {
@@ -276,17 +299,17 @@ test('真执行：接受已查好的行集合（省一次 querySelectorAll）', 
 // ═══════════════════════════════════════════════════════════════════════════
 // P4 · __seqIndexCache 挂到 dataSig
 // ═══════════════════════════════════════════════════════════════════════════
-test('P4：seq 索引随 dataSig 失效并广播，已挂载槽位会重解析', () => {
-  assert.ok(/SEQ_INDEX_EVENT/.test(src), '缺失效广播')
-  assert.ok(/syncSeqIndex\(/.test(src), '缺 dataSig 驱动的索引重建')
-  const fn = src.match(/var syncSeqIndex = \(sid, messages, idx\) => \{[\s\S]*?\n {6}\}/)
-  assert.ok(fn, '找不到 syncSeqIndex')
-  assert.ok(/idx\.total/.test(fn[0]) && /idx\.shadowed\.size/.test(fn[0]), '签名必须含数据规模')
-  assert.ok(/if \(sig === __seqDataSig\) return/.test(fn[0]), '签名没变就别重建')
-  assert.ok(/__seqIndexCache\.set\(key, index\)/.test(fn[0]), '必须真的写回索引')
-  // 槽位侧订阅
-  assert.ok(/window\.addEventListener\(SEQ_INDEX_EVENT, onIdx\)/.test(src), '槽位没订阅失效事件')
-  assert.ok(/\[messageId, sessionId, idxRev\]/.test(src), '解析 effect 没把失效代号放进依赖')
-  // miss 必须重试一次（否则 seq 恒 null → 按钮永不渲染）
-  assert.ok(/if \(retried\) return/.test(src), '缺一次性重试')
+// 0.25.0：双索引已收敛 —— 不得复活第二套
+// 背景：0.9.7 曾有两套 messageId→seq 索引：MsgSlotActions 自建（每会话一次拉取）
+// 与注入器内的 syncSeqIndex（dataSig 驱动 + SEQ_INDEX_EVENT 广播）。两套口径必须
+// 一致（同 id 取最早 seq），是典型的双实现分裂风险。0.23.0 起引用/回撤按钮全部
+// 离开该槽 → 第一套读者消失；0.25.0 把两套一起删除。
+test('P4 / 0.25：messageId→seq 索引已收敛到 rowsCache 单一来源，不得复活第二套', () => {
+  assert.doesNotMatch(src, /__seqIndexCache/, '不得复活 messageId→seq 缓存 Map')
+  assert.doesNotMatch(src, /__fullTextCache/, '不得复活 messageId→全文缓存 Map')
+  assert.doesNotMatch(src, /SEQ_INDEX_EVENT/, '双索引失效广播已随双索引删除')
+  assert.doesNotMatch(src, /var syncSeqIndex = /, 'dataSig 重建函数已删')
+  // 唯一权威来源必须是注入器自己的 rowsCache（含 fullText，refillComposer 依赖）
+  assert.match(src, /var rowsCache = \{ sid: null, rows: null, at: 0, running: false \}/, 'rowsCache 必须是唯一行缓存')
+  assert.match(src, /fullText: m\.fullText \?\? null/, '全文仍必须随行缓存带出')
 })

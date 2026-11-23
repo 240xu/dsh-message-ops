@@ -48,6 +48,18 @@ export function planRevert(surface, targetSeq) {
   if (startIdx === -1) throw new OpsError(`surface replace: start seq ${targetSeq} not found in surface`, 409)
   const shadowedSeqs = nodes.slice(startIdx)
   if (shadowedSeqs.length === 0) throw new OpsError('nothing to revert', 409)
+  // 0.26.0：节点 0 保护面（宿主 assertSystemHeadRewrite，见 systemHeadRejection 的
+  // 长注释）。live 路径拿到的是宿主**真实** surface，头节点即 system prompt，
+  // 多节点回滚它会被宿主拒绝整份日志 —— 规划层必须同判（磁盘路径已同判）。
+  const head = nodes[0]
+  const headEvent = head === targetSeq ? surfaceHeadEventOf(surface) : null
+  if (startIdx === 0 && headEvent && headEvent.type === 'system/message' && shadowedSeqs.length !== 1) {
+    throw new OpsError(
+      'surface replace: node 0 holds the system prompt and may be rewritten only by a system/message over exactly that node' +
+        `（目标 seq ${targetSeq} 是 surface 头节点，回滚它会把系统提示连同后面 ${shadowedSeqs.length - 1} 个节点一起遮蔽 —— 宿主会整份拒绝该日志）`,
+      409,
+    )
+  }
   return {
     startSeq: targetSeq,
     endSeq: shadowedSeqs[shadowedSeqs.length - 1],
@@ -55,10 +67,29 @@ export function planRevert(surface, targetSeq) {
   }
 }
 
+/**
+ * live surface 对象的头事件（宿主 `SurfaceManager` 只暴露 `nodes`，不带事件本体）。
+ *
+ * 无事件可查时按**保守**口径处理：live surface 的节点 0 在真实会话里恒为
+ * system prompt（语料 240/240 份如此），故把「头节点 + 多节点遮蔽」一律拒绝，
+ * 而不是放行后让宿主把整份日志拒掉（后者用户无法自救）。
+ */
+function surfaceHeadEventOf(surface) {
+  const events = surface && Array.isArray(surface.events) ? surface.events : null
+  if (events) {
+    const seq = surface.nodes[0]
+    return events.find(e => e && e.seq === seq) || { type: 'system/message' }
+  }
+  return { type: 'system/message', assumed: true }
+}
+
 /** planDelete：单条遮蔽，要求 seq 仍在当前 surface 上可见。 */
 export function planDelete(surface, seq) {
   const nodes = surface && Array.isArray(surface.nodes) ? surface.nodes : []
   if (!nodes.includes(seq)) throw new OpsError(`seq ${seq} not visible on current surface`, 409)
+  // 单节点遮蔽恒满足宿主的 node-0 豁免（system/message over exactly that node），
+  // 故 delete 不额外拒绝；但 marker 仍不得当目标（与磁盘路径同判，planDeleteFromEvents
+  // 侧有事件本体可判，这条在 live 路径由调用方给事件，见 opsCommit 的 isMarkerEvent 闸）。
   return { startSeq: seq, endSeq: seq, shadowedSeqs: [seq] }
 }
 
@@ -439,12 +470,35 @@ export function planRestore(events, restoreSeq, upToSeq, excludeSeqs) {
   // 0.8.0 按轮步进：upToSeq 给定则只重放到该 seq（含），后续仍保持遮蔽；
   // excludeSeqs = 已重放过（先前轮次 notice 的 restoredSourceSeqs 并集），
   // **必须排除，否则每轮都从区间头重放 → 消息副本刷屏**（0.8.0 实测 B1）。
-  const cap = Number.isSafeInteger(upToSeq) ? Math.min(upToSeq, endSeq) : endSeq
+  //
+  // 0.26.0（根因修正）：候选集必须是**该 marker 真正遮蔽的节点**，不是数值区间。
+  // 宿主 foldSurface 用节点索引 splice，数值区间会**连带把早先 marker 已遮蔽的
+  // 节点算进来** → 重放用户根本没回滚过的消息。实测 session-ab6f marker 1197：
+  // 区间 89..1191 里数值候选 151 条，宿主遮蔽集只有 `[89, 90, 1191]` —— 旧实现会把
+  // 149 条早已被遮蔽的历史消息当作"恢复对象"重放出去（复原的是别人回滚掉的内容）。
+  const shadowed = markerShadowedSeqs(events, ev)
+  // 数值区间仅用于「无法判定遮蔽集」的历史/损坏 marker（markerShadowedSeqs 返回 null）。
+  // 反向区间（start > end）在数值口径下**没有语义**（宿主是节点索引区间）——
+  // 猜 min..max 会重放用户根本没回滚过的消息，故此时一律不出候选（与
+  // `computeShadowed` 对无凭据反向 marker 的历史约定一致：视为未遮蔽任何东西）。
+  const numericOnly = shadowed == null && startSeq <= endSeq
+  const numericCap = Number.isSafeInteger(upToSeq) ? Math.min(upToSeq, Math.max(startSeq, endSeq)) : Math.max(startSeq, endSeq)
+  const fallbackSpan = numericOnly ? { lo: Math.min(startSeq, endSeq), hi: numericCap } : null
+  // shadowed == null 且反向区间 → 空集（不猜）。numericOnly 时此集不参与判定。
+  const shadowedSet = shadowed == null ? new Set() : new Set(shadowed.filter(q => Number.isSafeInteger(q)))
+  const stepCap = Number.isSafeInteger(upToSeq) ? upToSeq : null
   const excluded = Array.isArray(excludeSeqs) ? new Set(excludeSeqs.filter(q => Number.isSafeInteger(q))) : null
   const replayable = []
   let skipped = 0
   for (const e of events) {
-    if (!e || typeof e.seq !== 'number' || e.seq < startSeq || e.seq > cap) continue
+    if (!e || typeof e.seq !== 'number') continue
+    if (numericOnly) {
+      if (e.seq < fallbackSpan.lo || e.seq > fallbackSpan.hi) continue
+    } else {
+      if (!shadowedSet.has(e.seq)) continue
+      // 按轮步进：落在 upToSeq 之后的候选仍保持遮蔽（不计 skipped，它们不是"跳过"）
+      if (stepCap !== null && e.seq > stepCap) continue
+    }
     if (e.type === 'user/message' || e.type === 'assistant/message') {
       if (excluded && excluded.has(e.seq)) continue
       // 0.23.0（深挖 S-1）：重放必须取**全段**。宿主把长文本拆成多个 content
@@ -471,7 +525,9 @@ export function planRestore(events, restoreSeq, upToSeq, excludeSeqs) {
   // dock 会为这类标记常驻显示恢复按钮，409 死按钮 = 永远清不掉（实测 8 连 409）。
   // 改为返回空计划：applyRestore 仍追加说明 notice（含 restoresSeq）→ 标记停用、
   // dock 计数递减；语义如实：0 条重放 + 文案说明区间无 user/assistant 内容。
-  return { restoreSeq, startSeq, endSeq, upToSeq: Number.isSafeInteger(upToSeq) ? cap : endSeq, replayable, skipped }
+  const top = Math.max(startSeq, endSeq)
+  const effectiveUpTo = stepCap === null ? top : Math.min(stepCap, top)
+  return { restoreSeq, startSeq, endSeq, upToSeq: effectiveUpTo, replayable, skipped }
 }
 
 /**
@@ -536,6 +592,51 @@ export function applyRestore(session, plan, { flush } = {}) {
  *   - complete：是否已全部恢复（标记不再活跃）
  *   - legacy：旧通知（无 restoredSourceSeqs 字段）→ 视为整段已恢复
  */
+/**
+ * 「该 marker 的可重放候选集」单点口径（restoreProgress 直算版与索引版共用）。
+ *
+ * 0.26.0：候选取**宿主遮蔽集**（`markerShadowedSeqs`），不再取数值区间。
+ * 与 `planRestore` 的候选集同源，二者因此不会再出现「进度说还有 151 条待恢复、
+ * 实际只能恢复 2 条」的分裂。空文本消息仍然不算候选（重放不出内容）。
+ *
+ * 兜底：抹蔽集无法判定（历史损坏 marker）时退回数值区间，与旧行为一致。
+ *
+ * @param {Array} events 全量事件
+ * @param {object} marker 标记事件
+ * @param {{startSeq:number,endSeq:number}} range marker 的 replace 区间
+ * @returns {number[]} 候选 seq（升序）
+ */
+function restoreCandidates(events, marker, range, fold = null) {
+  const shadowed = markerShadowedSeqs(events, marker, fold)
+  const candidates = []
+  if (shadowed) {
+    const set = new Set(shadowed.filter(q => Number.isSafeInteger(q)))
+    for (const e of events) {
+      if (!e || typeof e.seq !== 'number' || !set.has(e.seq)) continue
+      if (e.type !== 'user/message' && e.type !== 'assistant/message') continue
+      if (!messageTextFull(e).trim()) continue
+      candidates.push(e.seq)
+    }
+    // 升序：宿主遮蔽集按**节点序**（compaction checkpoint 的反向区间会得到非升序
+    // 数组），而贴条按行展示与 step 步进都假定升序（旧实现天然升序）。
+    return candidates.sort((a, b) => a - b)
+  }
+  const lo = Math.min(range.startSeq, range.endSeq)
+  const hi = Math.max(range.startSeq, range.endSeq)
+  // 反向区间（start > end）且遮蔽集无法判定（无凭据、折叠也定位不到端点）→
+  // 与 `computeShadowed` 的历史约定一致：**视为未遮蔽任何东西**，不拿 min..max
+  // 去猜。数值区间对反向 marker 没有语义（宿主是节点索引区间），瞎猜会重放
+  // 用户根本没回滚过的消息。
+  if (range.startSeq > range.endSeq) return []
+  for (const e of events) {
+    if (!e || typeof e.seq !== 'number' || e.seq < lo || e.seq > hi) continue
+    if (e.type !== 'user/message' && e.type !== 'assistant/message') continue
+    if (!messageTextFull(e).trim()) continue
+    candidates.push(e.seq)
+  }
+  return candidates
+}
+
 export function restoreProgress(events, markerSeq) {
   const list = Array.isArray(events) ? events : []
   const marker = list.find(e => e && e.seq === markerSeq)
@@ -543,15 +644,7 @@ export function restoreProgress(events, markerSeq) {
   const range = readReplaceOp(marker)
   if (!range) return null
   const { startSeq, endSeq } = range
-  // 该区间内可重放的消息型事件
-  const candidates = []
-  for (const e of list) {
-    if (!e || typeof e.seq !== 'number' || e.seq < startSeq || e.seq > endSeq) continue
-    if (e.type !== 'user/message' && e.type !== 'assistant/message') continue
-    if (!(messageText(e) || '').trim()) continue
-    candidates.push(e.seq)
-  }
-  // 收集针对该标记的所有恢复 notice
+  const candidates = restoreCandidates(list, marker, range)
   const notices = list.filter(e => e && e.data && e.data.restoresSeq === markerSeq)
   const restored = new Set()
   let legacy = false
@@ -582,15 +675,31 @@ export function restoreProgress(events, markerSeq) {
   }
 }
 
+/**
+ * 恢复进度索引（`buildDerived` 每份日志建一次）。
+ *
+ * 0.26.0 新增 `candidateTexts`：索引版候选集必须与直算版**同源同判据**
+ * （遮蔽集 + `messageTextFull` 非空）。旧实现建索引时用 `messageText`（首段）
+ * 判非空、按数值区间选候选 —— 与 `planRestore` 三处口径分裂，实测 457 条
+ * 前向 marker 里 17 条候选集与宿主真值不符（16 条 compact-checkpoint、
+ * 1 条 system-prompt）。现在把「节点序遮蔽集」一并缓存进索引：`buildDerived`
+ * 每份日志只折叠一次 surface，标记越多越省。
+ */
 export function buildRestoreIndex(events) {
   const bySeq = new Map()
   const noticesByMarker = new Map()
   const candidates = []
+  const textBySeq = new Map()
   for (const e of events) {
     if (!e || typeof e.seq !== 'number') continue
     bySeq.set(e.seq, e)
     if (e.type === 'user/message' || e.type === 'assistant/message') {
-      if ((messageText(e) || '').trim()) candidates.push(e.seq)
+      // 0.26.0：判据与 planRestore 对齐 —— 首段为空但后段有内容的也算候选
+      // （实测 0 条「首段空而全文非空」，但口径必须一处，否则未来必分裂）。
+      if (messageTextFull(e).trim()) {
+        candidates.push(e.seq)
+        textBySeq.set(e.seq, messageTextFull(e))
+      }
     }
     const markerSeq = e.data && e.data.restoresSeq
     if (Number.isSafeInteger(markerSeq)) {
@@ -599,7 +708,8 @@ export function buildRestoreIndex(events) {
       else noticesByMarker.set(markerSeq, [e])
     }
   }
-  return { bySeq, noticesByMarker, candidates }
+  const fold = foldSurfaceNodes(events)
+  return { bySeq, noticesByMarker, candidates, textBySeq, fold }
 }
 
 export function restoreProgressFromIndex(index, markerSeq) {
@@ -608,9 +718,16 @@ export function restoreProgressFromIndex(index, markerSeq) {
   const range = readReplaceOp(marker)
   if (!range) return null
   const { startSeq, endSeq } = range
+  // 0.26.0：候选集走与 restoreProgress 完全相同的单点口径（遮蔽集，非数值区间）。
+  const shadowed = markerShadowedSeqs([], marker, index.fold)
   const candidates = []
-  for (const q of index.candidates) {
-    if (q >= startSeq && q <= endSeq) candidates.push(q)
+  if (shadowed) {
+    const set = new Set(shadowed.filter(q => Number.isSafeInteger(q)))
+    for (const q of index.candidates) if (set.has(q)) candidates.push(q)
+  } else {
+    const lo = Math.min(startSeq, endSeq)
+    const hi = Math.max(startSeq, endSeq)
+    for (const q of index.candidates) if (q >= lo && q <= hi) candidates.push(q)
   }
   const notices = index.noticesByMarker.get(markerSeq) || []
   const restored = new Set()
@@ -972,20 +1089,100 @@ export function isSurfaceMessageType(type) {
  * ⚠️ 与 `diskVisibleNodes` 的区别是关键的（0.8.2 实机事故）：
  * `diskVisibleNodes` 只收 4 种**消息**类型（UI 列表用），而 v4 的 surface 还包含
  * `tool/result`。surface replace 的 `sourceEventSeqs` 必须覆盖**被遮蔽的每一个
- * surface 节点**（`foldSurface`：`if (removed.some(s => !sources.includes(s))) throw
- * "replacement sourceEventSeqs omit a shadowed surface node"`）—— 用消息集合当溯源
- * 会漏掉区间内的 tool/result，**整份日志被加载端拒绝**。这正是历史上 14 个打不开的
- * 会话的真正成因（不是区间压缩编码问题）。
+ * surface 节点**（`foldSurface`：`sourceEventSeqs must include every shadowed
+ * surface node`）—— 用消息集合当溯源会漏掉区间内的 tool/result，**整份日志被
+ * 加载端拒绝**。这正是历史上 14 个打不开的会话的真正成因（不是区间压缩编码问题）。
+ *
+ * ── 0.26.0 根因修正 ────────────────────────────────────────────────────────
+ * 旧实现用 `computeShadowed` 的**数值区间**语义（`startSeq..endSeq` 里所有 seq
+ * 都算被遮蔽），宿主用的是**节点索引**语义（`nodes.indexOf(startSeq)` /
+ * `nodes.indexOf(endSeq)` 定位后 `splice`）。两者在「区间内还有别人先遮蔽掉的
+ * 节点」时**不等价**：数值语义会连带把早先标记已遮蔽的节点重复算进去，节点序
+ * 语义只消费当时仍在表上的节点。
+ *
+ * 实测（263 份可折叠语料，与安装的 `foldSurface` 逐份对拍）：
+ *   - 节点数组与本实现一致：**新 263/263、旧 216/263**（旧实现 47 份分歧）；
+ *   - replace 的 `shadowedSeqs`：本实现 263/263 完全一致（0 分歧）；
+ *   - 用宿主闸复验回滚目标（每份日志全部可见节点）：**旧实现 13787 个目标里
+ *     2495 个被宿主拒绝（18.1%：`start seq not found in surface` 2285、
+ *     `node 0 holds the system prompt` 195、`sourceEventSeqs missing shadowed`
+ *     15）；新实现 11323 个目标 0 拒绝**。
+ *
+ * 反向区间（`startSeq > endSeq`，语料 afcc0453 共 9 条 compact-checkpoint）在
+ * 宿主是**合法的节点序区间**（索引 start < 索引 end）；节点序实现天然支持，
+ * 数值实现只能退回「凭据」近似。故本实现统一走节点序，端点解析不了时才回落
+ * 到旧数值口径（损坏/伪造日志不因此炸掉整份读取）。
+ *
+ * @param {Array} events 全量事件
+ * @returns {{ nodes:number[], shadowedByMarker:Map<number,number[]>, bySeq:Map<number,object>, fallbacks:number }}
  */
-export function diskSurfaceNodes(events) {
-  const shadowed = computeShadowed(events)
+function foldSurfaceNodes(events) {
   const nodes = []
-  for (const e of events) {
+  const shadowedByMarker = new Map()
+  const bySeq = new Map()
+  let fallbacks = 0
+  const list = Array.isArray(events) ? events : []
+  for (const e of list) if (e && Number.isSafeInteger(e.seq)) bySeq.set(e.seq, e)
+  for (const e of list) {
     if (!e || !Number.isSafeInteger(e.seq)) continue
-    if (shadowed.has(e.seq)) continue
-    if (isSurfaceType(e.type)) nodes.push(e.seq)
+    if (!isSurfaceType(e.type)) continue
+    const range = readReplaceOp(e)
+    if (!range) {
+      nodes.push(e.seq)
+      continue
+    }
+    const startIdx = nodes.indexOf(range.startSeq)
+    const endIdx = nodes.indexOf(range.endSeq)
+    if (startIdx !== -1 && endIdx !== -1 && startIdx <= endIdx) {
+      const shadowed = nodes.slice(startIdx, endIdx + 1)
+      shadowedByMarker.set(e.seq, shadowed)
+      nodes.splice(startIdx, endIdx - startIdx + 1, e.seq)
+      continue
+    }
+    // 端点不在当前节点表上（历史损坏/伪造 marker）：退回旧数值口径，绝不 throw —
+    // 读取路径必须能打开日志，规划路径由下面的显式校验（409）负责拒绝。
+    fallbacks += 1
+    let kept
+    if (range.startSeq <= range.endSeq) {
+      kept = nodes.filter(q => q < range.startSeq || q > range.endSeq)
+    } else {
+      const src = Array.isArray(e.sourceEventSeqs) ? e.sourceEventSeqs : []
+      const removed = new Set(src.filter(q => Number.isSafeInteger(q)))
+      kept = nodes.filter(q => !removed.has(q))
+    }
+    kept.push(e.seq)
+    nodes.length = 0
+    nodes.push(...kept)
   }
-  return nodes
+  return { nodes, shadowedByMarker, bySeq, fallbacks }
+}
+
+/**
+ * 某个 marker「真正遮蔽了哪些 surface 节点」。
+ *
+ * 优先级：宿主节点序折叠结果 → `sourceEventSeqs` 凭据 → 旧数值区间。
+ * 实测 485 条 replace 中 452 条凭据与宿主遮蔽集**完全相等**、33 条为超集
+ * （多为同一 turn 内顺带列出的结构性 seq），**0 条缺失** —— 所以凭据是可靠的
+ * 次优来源；数值区间是最后兜底（历史 marker 无凭据时）。
+ *
+ * @returns {number[]|null} null = 完全无法判定（无区间也无凭据）
+ */
+function markerShadowedSeqs(events, marker, fold = null) {
+  if (!marker) return null
+  const state = fold || foldSurfaceNodes(events)
+  const known = state.shadowedByMarker.get(marker.seq)
+  if (known) return known
+  const src = Array.isArray(marker.sourceEventSeqs) ? expandSourceSeqs(marker.sourceEventSeqs) : null
+  if (src && src.length > 0) return src.filter(q => q < marker.seq)
+  const range = readReplaceOp(marker)
+  if (!range || range.startSeq > range.endSeq) return null
+  const out = []
+  for (let q = range.startSeq; q <= range.endSeq; q += 1) out.push(q)
+  return out
+}
+
+export function diskSurfaceNodes(events) {
+  return foldSurfaceNodes(events).nodes
 }
 
 function isSurfaceType(type) {
@@ -993,10 +1190,41 @@ function isSurfaceType(type) {
 }
 
 export function diskVisibleNodes(events) {
-  return diskSurfaceNodes(events).filter(seq => {
-    const e = events.find(x => x && x.seq === seq)
+  const state = foldSurfaceNodes(events)
+  return state.nodes.filter(seq => {
+    const e = state.bySeq.get(seq)
     return e && isSurfaceMessageType(e.type)
   })
+}
+
+/**
+ * 宿主保护面：surface 节点 0 承载 system prompt。
+ *
+ * `surface.js` `assertSystemHeadRewrite`（安装版 0.2.0-rc.2，385-394 行）：
+ * 当 `startIdx === 0` 且该节点是 `system/message` 时，replace **必须**本身是
+ * `system/message` 且只遮蔽那一个节点，否则整份日志被加载端拒绝：
+ *   `surface replace: node 0 holds the system prompt and may be rewritten only
+ *    by a system/message over exactly that node`
+ *
+ * 实测：243 份无 compaction 日志里 27 个「可见的头节点」回滚目标，旧规划器
+ * **全部放行**（把头节点之后全部遮蔽 = 多节点），宿主**全部拒绝**；在 6112 个
+ * 目标上以宿主闸复验，「节点序 + 本护栏」的判定与宿主 0 分歧。
+ *
+ * @param {Array} surfaceNodes 节点序 surface（已剔除遮蔽）
+ * @param {number} startIdx 目标在节点表上的索引
+ * @param {number} shadowedCount 本次将遮蔽的节点数
+ * @returns {string|null} 拒绝理由；null = 通过
+ */
+function systemHeadRejection(events, surfaceNodes, startIdx, shadowedCount) {
+  if (startIdx !== 0) return null
+  const headSeq = surfaceNodes[0]
+  const head = (events ?? []).find(e => e && e.seq === headSeq)
+  if (!head || head.type !== 'system/message') return null
+  if (shadowedCount === 1) return null
+  return (
+    `surface replace: node 0 holds the system prompt and may be rewritten only by a system/message over exactly that node` +
+    `（目标 seq ${headSeq} 是 surface 头节点，回滚它会把系统提示连同后面 ${shadowedCount - 1} 个节点一起遮蔽 —— 宿主会整份拒绝该日志）`
+  )
 }
 
 /** 磁盘版 planRevert：target 必须可见，遮蔽 target 之后（含）全部可见节点。 */
@@ -1006,20 +1234,49 @@ export function planRevertFromEvents(events, targetSeq) {
   if (isMarkerEvent(targetEvent)) {
     throw new OpsError(`seq ${targetSeq} is a revert/delete marker, not a message — restore it instead of reverting it`, 409)
   }
-  // 目标用「消息」集合（回滚对象是消息），溯源用「全部 surface」集合（0.8.2 修正）
-  const nodes = diskVisibleNodes(events)
+  // 一次折叠同时产出「全部 surface 节点」与「message 节点」（旧实现折叠两遍，
+  // 大日志上 planRevertFromEvents 实测 141.4 ms，其中一半是白重算）。
+  const state = foldSurfaceNodes(events)
+  const nodes = state.nodes.filter(seq => {
+    const e = state.bySeq.get(seq)
+    return e && isSurfaceMessageType(e.type)
+  })
   const startIdx = nodes.indexOf(targetSeq)
   if (startIdx === -1) throw new OpsError(`surface replace: start seq ${targetSeq} not found in surface`, 409)
-  const surface = diskSurfaceNodes(events)
-  const shadowedSeqs = surface.slice(surface.indexOf(targetSeq))
+  // 目标用「消息」集合（回滚对象是消息），溯源用「全部 surface」集合（0.8.2 修正）
+  const surfaceIdx = state.nodes.indexOf(targetSeq)
+  if (surfaceIdx === -1) throw new OpsError(`surface replace: start seq ${targetSeq} not found in surface`, 409)
+  const shadowedSeqs = state.nodes.slice(surfaceIdx)
   if (shadowedSeqs.length === 0) throw new OpsError('nothing to revert', 409)
+  const headReject = systemHeadRejection(events, state.nodes, surfaceIdx, shadowedSeqs.length)
+  if (headReject) throw new OpsError(headReject, 409)
   return { startSeq: targetSeq, endSeq: shadowedSeqs[shadowedSeqs.length - 1], shadowedSeqs }
 }
 
-/** 磁盘版 planDelete：单条可见遮蔽。 */
+/**
+ * 磁盘版 planDelete：单条可见遮蔽。
+ *
+ * 0.26.0 补齐两道旧实现缺失的护栏（与 `planRevertFromEvents` 对齐）：
+ *   1. **marker 不能当删除目标** —— 旧实现只在 revert 侧拦，delete 侧放行；
+ *      实测 session-645bd9 的 marker seq 21：`revert` → 409 DENY，`delete`
+ *      → **ALLOW**，落定即「遮蔽 marker 自己」的自噬空记录（语料 3424/3658/
+ *      3689/3721/3746/7252/7524/7525/7526/8954… 共 51 条空 content marker 就是这么来的）。
+ *   2. **节点 0 保护** —— delete 虽是单节点，但若目标就是头节点且头节点是
+ *      `system/message`，宿主要求 replace 事件本身必须是 `system/message`
+ *      （delete 写的就是 system/message，故单节点头删除**合法**）；这里仍显式
+ *      校验以免未来改成别的写法时静默失效。
+ */
 export function planDeleteFromEvents(events, seq) {
-  const surface = diskSurfaceNodes(events)
-  if (!diskVisibleNodes(events).includes(seq) || !surface.includes(seq)) {
+  const targetEvent = (events ?? []).find(e => e && e.seq === seq)
+  if (isMarkerEvent(targetEvent)) {
+    throw new OpsError(`seq ${seq} is a revert/delete marker, not a message — restore it instead of deleting it`, 409)
+  }
+  const state = foldSurfaceNodes(events)
+  const visible = state.nodes.filter(q => {
+    const e = state.bySeq.get(q)
+    return e && isSurfaceMessageType(e.type)
+  })
+  if (!visible.includes(seq) || !state.nodes.includes(seq)) {
     throw new OpsError(`seq ${seq} not visible on current surface`, 409)
   }
   // 单节点遮蔽：溯源就是它自己（0.8.2：也走完整 surface 判定，避免非 surface 节点）

@@ -37,6 +37,7 @@ import {
   OpsError,
   planRevert,
   planDelete,
+  isMarkerEvent,
   planRestore,
   applyRestore,
   applySurfaceReplace,
@@ -118,14 +119,26 @@ async function readFencedBody(req, res) {
   }
 }
 
-/** 从 sessions 注册表解析（两种 id 拼写都试）。 */
-let __resolveSource = null // 诊断：最近一次 resolveSession 的失败原因
-function resolveSession(ctx, sessionId) {
+/**
+ * 从 sessions 注册表解析（两种 id 拼写都试）。
+ *
+ * @param ctx - 宿主 ctx
+ * @param sessionId - 会话 id（`uuid` / `session-<uuid>` 两种拼写都试）
+ * @param diag - 可选的诊断出参：`{ why: string }`。传了才会记录**为什么**成/败
+ *   （只在需要把原因拼进错误信息的失败路径上传，成功路径零字符串开销）。
+ * @returns live SessionFace，或 `undefined`（未命中）
+ */
+function resolveSession(ctx, sessionId, diag) {
   // 宿主自己的取法是 `this.ctx.sessions.get(id)`（api-session-controller 同款）；
   // 实测 `ctx.get("sessions")` 在 inject 子 fiber 下解析到的注册表**查不到视图已
   // 加载的会话**（dock 已渲染但 get 双变体 miss —— agents.get 同 ctx 却命中），
   // 故属性优先、ctx.get 兜底，两处都试全变体。
   const candidates = []
+  // 诊断只写进调用方传进来的 diag 袋子（原先写进程级全局变量 → 0 读取方，
+  // 等于「排障线索被扔进黑洞」；现在由失败路径拼进 OpsError）。
+  const note = msg => {
+    if (diag) diag.why = msg
+  }
   try {
     if (ctx && ctx.sessions) candidates.push(['prop', ctx.sessions])
   } catch {
@@ -138,7 +151,7 @@ function resolveSession(ctx, sessionId) {
     /* absent */
   }
   if (candidates.length === 0) {
-    __resolveSource = 'no-sessions-service'
+    note('no-sessions-service')
     return undefined
   }
   const variants = sessionIdVariants(sessionId)
@@ -151,7 +164,7 @@ function resolveSession(ctx, sessionId) {
     for (const variant of variants) {
       const s = svc.get(variant)
       if (s !== undefined) {
-        __resolveSource = 'hit via ' + src + '.get ' + String(variant).slice(0, 24)
+        note('hit via ' + src + '.get ' + String(variant).slice(0, 24))
         return s
       }
     }
@@ -163,7 +176,7 @@ function resolveSession(ctx, sessionId) {
         if (Array.isArray(arr)) {
           const hit = arr.find(x => x && (variants.includes(x.id) || variants.includes(x.sessionId)))
           if (hit) {
-            __resolveSource = 'hit via ' + src + '.list() n=' + arr.length
+            note('hit via ' + src + '.list() n=' + arr.length)
             return hit
           }
           tried.push(
@@ -186,7 +199,7 @@ function resolveSession(ctx, sessionId) {
     }
     tried.push(src + ':miss')
   }
-  __resolveSource = tried.join(',') + ' tried=' + variants.length + ' first=' + String(variants[0]).slice(0, 30)
+  note(tried.join(',') + ' tried=' + variants.length + ' first=' + String(variants[0]).slice(0, 30))
   return undefined
 }
 
@@ -199,9 +212,13 @@ function resolveSession(ctx, sessionId) {
  * 会话 → 所有变更操作 404「not found in registry」。官方越界获取通道是
  * retain(target, {source}) → await ready → binding.session（ISessions 契约）；
  * 引用在 mutation 完成后 release（final reference 触发 teardown，须先 flush）。
+ *
+ * @param diag - 可选诊断出参 `{ why }`：记录「live 面为什么没拿到」。原先这份
+ *   信息写在进程级 `__resolveSource` 里且 **0 读取方**（审计 §1.6）—— 等于每次
+ *   失败都重新拼一遍字符串却扔进黑洞。现在只由失败路径收集，并真的拼进错误信息。
  */
-async function acquireSession(ctx, sessionId) {
-  const direct = resolveSession(ctx, sessionId)
+async function acquireSession(ctx, sessionId, diag) {
+  const direct = resolveSession(ctx, sessionId, diag)
   if (direct !== undefined) return { session: direct, release() {} }
   const owners = []
   // reflect 层：api-session-controller 把 ISessions（ClientSessions，带 retain）经
@@ -229,7 +246,7 @@ async function acquireSession(ctx, sessionId) {
       owners.length === 0
         ? 'no-owner (prop-absent && get-absent)'
         : owners.map(([src, o]) => src + ':no-retain(' + (o == null ? 'null' : typeof o) + ')').join(',')
-    __resolveSource = (__resolveSource || '') + ' | ISessions:' + why
+    if (diag) diag.why = (diag.why || '') + ' | ISessions:' + why
     return null
   }
   const isess = holders[0][1]
@@ -239,7 +256,7 @@ async function acquireSession(ctx, sessionId) {
     const binding = await ref.ready
     const face = binding && binding.session
     if (!face) {
-      __resolveSource = 'retain-ready-no-session-face'
+      if (diag) diag.why = 'retain-ready-no-session-face'
       try {
         ref.release()
       } catch {
@@ -247,7 +264,6 @@ async function acquireSession(ctx, sessionId) {
       }
       return null
     }
-    __resolveSource = 'acquired via ISessions.retain'
     return {
       session: face,
       release: () => {
@@ -259,7 +275,7 @@ async function acquireSession(ctx, sessionId) {
       },
     }
   } catch (e) {
-    __resolveSource = 'retain-failed: ' + String(e && e.message).slice(0, 80)
+    if (diag) diag.why = 'retain-failed: ' + String(e && e.message).slice(0, 80)
     if (ref) {
       try {
         ref.release()
@@ -433,6 +449,24 @@ function pickSessionDir(sessionId) {
   return dirs[0]
 }
 
+/**
+ * 把「live 面为什么没拿到」拼进 OpsError 消息（审计 §1.6 + §2.2）。
+ *
+ * 背景：0.5.6 排障期把原因拼进进程级 `__resolveSource`，但**全仓 0 个读取方** ——
+ * 于是 404/409 只剩 `not visible on current surface` / `session is running`，
+ * 排障者看不到「registry 是属性没读到、还是 get 双变体 miss、还是 retain 被拒」。
+ * 现在原因随 `diag` 一路带到失败点，只拼在**错误消息**里：
+ *   · 不改 status —— 路由层仍按 `err.status` 映射 HTTP，工具端仍按 message 渲染；
+ *   · 成功路径不产生任何字符串（diag 只在失败路径被读取）；
+ *   · 幂等 —— 同一条原因不会拼两遍（catch 里可能被重抛）。
+ */
+function withResolveDiag(err, diag) {
+  const why = diag && diag.why
+  if (!why || !(err instanceof OpsError)) return err
+  if (err.message.indexOf(why) >= 0) return err
+  return new OpsError(`${err.message} [resolve: ${why}]`, err.status)
+}
+
 // ---------------------------------------------------------------------------
 // 文件派生缓存（P0-1）：mtime+size 失效 · 在途去重 · LRU 16
 // ---------------------------------------------------------------------------
@@ -456,6 +490,17 @@ function pickSessionDir(sessionId) {
 //  - **绝不缓存 raw events**（实测 114MB/次的短命堆分配，388 会话不可控）。
 //    缓存的是**派生结果**：header / messages / shadowed / turnEndSeq /
 //    marker 进度 —— 量级 = 响应体（最大约 1.8MB）× 16，上限几十 MB。
+//    0.25.0 追加的「消息全文索引」（seq → messageTextFull，见 buildDerived）
+//    也属于派生结果：实测 9.1MB 会话派生常驻 2.68MB、索引 3633 行再加 0.37MB
+//    （只索引 listMessages 的行；若改索引全量 events 文本会 +3.39MB → 6.07MB，
+//    16 条 LRU 就是 54MB，不取）。
+//  - 0.25.0 起 **searchCache 已并入本缓存**（原先是同一 key 的第二张表）：
+//    opsSearch 的语料完全可由 messages + 同一份全文索引重建（实测 3633 行
+//    重建 2.0ms），因此删掉整层重复实现。收益是双份：
+//      · 第一次搜索不再**第二次全量读盘**（实测 809ms / 1 次读盘 → 4.8ms / 0 次）；
+//      · 常驻内存反而下降（旧 dump 出的 search 语料 3633 行常驻 +3.64MB/条 × 8 条，
+//        现在只有 0.37MB/条的全文索引 × 16 条）。
+//    /messages 与 /search 现在共享同一条 mtimeMs+size 失效路径。
 //
 // **刻意不进缓存、每请求重算**（放进缓存就是 0.9.6 那类事故）：
 //  - m.visible             ← 依赖 live.surface.nodes（live 会话的 surface 会变）。
@@ -468,6 +513,21 @@ function pickSessionDir(sessionId) {
 //    缓存对象本身永不被改写 —— 跨请求零串扰。
 const DERIVED_CACHE_MAX = 16
 const derivedCache = new Map() // logPath -> { mtimeMs, size, promise }
+
+/**
+ * derived 对象 → 消息全文索引（seq → messageTextFull）。
+ *
+ * ⚠️ 为什么是 WeakMap 而不是 derived 的字段、也不是第二张缓存表（0.25.0 取舍）：
+ *  - **不能**做成 derived 的字段：`Object.keys(derived)` 是既有测试契约
+ *    （test/derived-cache.test.js 断言它恰为 header/messages/shadowed/turnEndSeq），
+ *    且文本索引是内部细节，绝不该出现在任何 HTTP 响应里。
+ *  - **不能**再建一张按 logPath 的缓存表：两张表的 key 相同却各自 stat/失效，
+ *    多一个「一边新一边旧」的窗口，且 0.25.0 已经把旧的 searchCache 并进来了
+ *    （见上方缓存注释块）。
+ *  - WeakMap 的生命周期与 derived 对象**严格同步**：缓存条目持 promise → derived
+ *    对象；条目被 LRU 淘汰/失效后 derived 与索引一起可回收，没有额外驻留。
+ */
+const derivedTexts = new WeakMap() // derived -> Map<seq, string>
 
 /**
  * 真实计算：读日志 → 消息列表 → 遮蔽集 → marker 恢复进度 → turn 边界。
@@ -612,7 +672,31 @@ async function buildDerived(logPath) {
     if (!m || typeof m.seq !== 'number') continue
     m.turnStartSeq = enclosingTurnStart.get(m.seq) ?? null
   }
-  return { header, messages, shadowed, turnEndSeq }
+  // ── 0.25.0 · 供 /text 与 /search 复用的「同一份」消息全文索引 ──────────────
+  //
+  // 实测取舍（样本 = 9.1MB / 12890 事件 / 3633 消息，见上方缓存注释块）：
+  //  ① 索引**只覆盖 listMessages 的行**（user/assistant/system/developer +
+  //     tool/call），3633 条、常驻 0.37MB、构建 p50 2.1ms。listMessages 恰好就是
+  //     /text 的消费面（面板 pick / 铅笔编辑框都从这些行来），也恰好是
+  //     /search 语料的全部行（旧 buildSearchCorpus 也遍历同一批 rows）。
+  //     逐行取 messageTextFull，与旧 /text 的 `messageTextFull(ev)` 逐字一致
+  //     （tool/call 恒为 ''，与旧行为相同）。
+  //  ② **不索引非消息事件**（tool/result 最多 49930 字/条、1676 条共 1.5M 字符）：
+  //     「整个 events 全量文本」变体实测常驻 +3.39MB（2.68 → 6.07MB），16 条 LRU
+  //     就是 54MB 纯浪费；这些 seq 界面取不到（面板/编辑框只认消息行），
+  //     真被请求时走下面的「未命中按需读盘」分支。
+  //  ③ **不另建 search 语料表**：语料 = 本索引 + snippet 兜底，实测重建 2.0ms。
+  //     旧 searchCache（同 key 的第二张表、常驻 +3.64MB/条 × 8）因此整个删除。
+  const messageTexts = new Map() // seq -> 全文（仅 listMessages 行）
+  const rowSeqs = new Set()
+  for (const m of messages) if (m && typeof m.seq === 'number') rowSeqs.add(m.seq)
+  for (const e of events) {
+    if (!e || typeof e.seq !== 'number' || !rowSeqs.has(e.seq)) continue
+    messageTexts.set(e.seq, messageTextFull(e))
+  }
+  const derived = { header, messages, shadowed, turnEndSeq }
+  derivedTexts.set(derived, messageTexts)
+  return derived
 }
 
 /**
@@ -648,7 +732,16 @@ async function opsList(targetCtx, sessionId, opts = {}) {
   // key = logPath、失效看读前 stat 的 mtimeMs+size，见 loadDerived 注释。
   const { header, messages: baseMessages, shadowed, turnEndSeq } = await loadDerived(logPath)
   // 每请求**浅拷贝**一份再挂 per-request 字段：缓存对象永不被改写，
-  // 并发请求之间零串扰（浅拷 5038 个小对象约 1~2ms）。
+  // 并发请求之间零串扰（浅拷 3633 个小对象实测 0.56ms / 请求）。
+  //
+  // 0.25.0 评估结论：**保留浅拷，不做「只投影 compact 需要的字段」的特化**。
+  //   · 实测省下的量级 = 0.56ms（浅拷）→ 0.12ms（零浅拷 + 投影内联算），
+  //     即约 0.4ms；而响应里 `JSON.stringify` 本身 9.9ms、网络/渲染是几十 ms。
+  //   · 代价却是**两套行语义**：full 视图仍要浅拷（它返回整行 + visible/shadowed），
+  //     compact 视图若改成「零浅拷」就多一条「不得再改行」的隐式约束；任何未来
+  //     往 per-request 行上挂字段的改动都会静默只对 full 生效。这个风险 > 0.4ms。
+  //   · 可选的微优化（已评估、不采纳）：把 `{...m}` 换成 `Object.assign({}, m)` 或
+  //     预建模板 —— V8 上差异在噪声内（实测 0.5~0.6ms 区间抖动）。
   const messages = baseMessages.map(m => ({ ...m }))
   const live = resolveSession(targetCtx, sessionId)
   // R2 根治：磁盘派生可能还停在落盘批窗之前，用 live.log 补算 committed。
@@ -729,48 +822,31 @@ async function opsList(targetCtx, sessionId, opts = {}) {
 // ---------------------------------------------------------------------------
 // Per-session search (full text, beyond the 160-char snippet)
 // ---------------------------------------------------------------------------
-const SEARCH_CACHE_MAX = 8
-const searchCache = new Map() // logPath -> { mtimeMs, size, promise }
+// 0.25.0：**不再有第二张 searchCache**。旧实现自带 SEARCH_CACHE_MAX=8 的
+// logPath/mtimeMs/size 表，与 derivedCache key 完全相同却互不复用 —— 后果是
+// 「先 /messages 再 /search」必然为同一份文件**再读一遍盘**（9.1MB 会话实测
+// 540ms 纯重复成本），而两张表各自失效还多一个「一边新一边旧」的窗口。
+// 现在语料由 loadDerived 的派生结果重建（实测 3633 行 2.0ms），共享同一条
+// mtimeMs+size 失效路径与 LRU 16；常驻内存同时下降（旧的语料副本 +3.64MB/条，
+// 现在只有 0.37MB/条的 messageTexts）。
 
-/** Build the searchable corpus once per log revision (full text, lowercased lazily). */
-async function buildSearchCorpus(logPath) {
-  const { events } = await readSessionFileAsync(logPath)
-  const messages = listMessages(events)
-  const shadowed = computeShadowed(events)
-  const bySeq = new Map()
-  for (const e of events) if (e && typeof e.seq === 'number') bySeq.set(e.seq, e)
+/** derived 的 messages → 可搜索语料（文本优先取 messageTexts，缺失退回 snippet）。 */
+function searchCorpusOf(derived) {
+  const texts = derivedTexts.get(derived) || new Map()
+  const { messages, shadowed } = derived
   const corpus = []
   for (const m of messages) {
-    const ev = bySeq.get(m.seq)
-    const text = ev ? messageTextFull(ev) : ''
+    const text = texts.get(m.seq) || m.snippet || ''
     corpus.push({
       seq: m.seq,
       type: m.type,
       role: m.role,
       marker: m.marker === true,
       shadowed: shadowed.has(m.seq),
-      text: text || m.snippet || '',
+      text,
     })
   }
   return corpus
-}
-
-async function loadSearchCorpus(logPath) {
-  const st = await statFile(logPath)
-  const hit = searchCache.get(logPath)
-  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
-    searchCache.delete(logPath)
-    searchCache.set(logPath, hit)
-    return hit.promise
-  }
-  const entry = { mtimeMs: st.mtimeMs, size: st.size, promise: buildSearchCorpus(logPath) }
-  searchCache.delete(logPath)
-  searchCache.set(logPath, entry)
-  while (searchCache.size > SEARCH_CACHE_MAX) searchCache.delete(searchCache.keys().next().value)
-  entry.promise.catch(() => {
-    if (searchCache.get(logPath) === entry) searchCache.delete(logPath)
-  })
-  return entry.promise
 }
 
 function searchSnippet(text, query, radius = 45) {
@@ -793,7 +869,8 @@ async function opsSearch(targetCtx, sessionId, query, opts = {}) {
   }
   const limit = Number.isSafeInteger(opts && opts.limit) ? Math.max(1, Math.min(100, opts.limit)) : 50
   const { logPath } = pickSessionDir(sessionId)
-  const corpus = await loadSearchCorpus(logPath)
+  // 与 /messages 共用同一条缓存：命中时为 0 读盘、语料重建 2.0ms。
+  const corpus = searchCorpusOf(await loadDerived(logPath))
   const needle = q.toLowerCase()
   const results = []
   let total = 0
@@ -814,8 +891,41 @@ async function opsSearch(targetCtx, sessionId, query, opts = {}) {
   return { ok: true, query: q, role, limit, total, truncated: total > results.length, results }
 }
 
-/** 测试钩子（非公开 API）：直接驱动 list / search 与文件派生缓存。 */
-export const _internals = { opsList, opsSearch, loadDerived, loadSearchCorpus, derivedCache, searchCache }
+/**
+ * 单条消息全文（GET /api/message-ops/text 的唯一实现）。
+ *
+ * 0.25.0 修的就是这个绕路：旧路由每次 `readSessionFileAsync(logPath)` 全量重读
+ * 日志（9.1MB 会话实测 550~1100ms/次），而面板每选一条消息就打一次 —— 绕过
+ * 了 loadDerived 的 mtimeMs+size 缓存，等于把 /messages 刚付出的解压+解析
+ * 成本再付一遍。现在命中缓存的成本 = 一次 Map.get（实测 0 读盘、<0.1ms）。
+ *
+ * 未命中（不在 messages 行里 / 缓存被 LRU 挤出 / 文件已变化）：退回「按需
+ * 现读」，语义与旧实现完全一致（旧实现本来就是 ev 不存在 → 404）。
+ * @returns {Promise<string>} 全文（未索引的行返回 '')
+ * @throws {OpsError} 404 = 该 seq 在日志里不存在；400 = 参数非法
+ */
+async function opsText(sessionId, seq) {
+  if (!isSessionId(sessionId)) throw new OpsError('invalid sessionId', 400)
+  if (!Number.isSafeInteger(seq) || seq < 0) throw new OpsError('invalid seq', 400)
+  // seq 0 在日志头里是结构事件区（permission/preset 等，实测恒非消息），
+  // messageText 恒空串；引用按钮/编辑框不可能点它 —— 保持 404 而不是 200 {text:""}。
+  if (seq === 0) throw new OpsError('no quotable message at seq 0', 404)
+  const { logPath } = pickSessionDir(sessionId)
+  const derived = await loadDerived(logPath)
+  const texts = derivedTexts.get(derived)
+  if (texts && texts.has(seq)) return texts.get(seq)
+  // 冷分支：缓存里没有这条 seq。两种可能 ——
+  //   a) 它压根不是消息事件（tool/result 之类）：旧实现也会找到 event 并返回
+  //      messageTextFull 的结果（可能非空），所以这里同样按需读盘，**不改变** 404 语义；
+  //   b) 缓存条目刚被 LRU 淘汰/文件已变：读盘后就是最新真相。
+  const { events } = await readSessionFileAsync(logPath)
+  const ev = events.find(e => e && e.seq === seq)
+  if (!ev) throw new OpsError('seq not found', 404)
+  return messageTextFull(ev)
+}
+
+/** 测试钩子（非公开 API）：直接驱动 list / search / text 与文件派生缓存。 */
+export const _internals = { opsList, opsSearch, opsText, opsCommit, loadDerived, derivedTexts, derivedCache, searchCorpusOf }
 
 async function opsCommit(targetCtx, mode, sessionId, seq) {
   if (!isSessionId(sessionId)) throw new OpsError('invalid sessionId', 400)
@@ -829,7 +939,11 @@ async function opsCommit(targetCtx, mode, sessionId, seq) {
   // 带 reason:"message-ops"，UI 与审计可识别，不与真实模型轮次混淆。
   let win = planNoticeWindow(events)
   const notice = mode === 'delete' ? `[消息删除] 已遮蔽 seq ${seq}` : null // revert 文案含 shadowed 数量，规划后拼
-  const acq = await acquireSession(targetCtx, sessionId)
+  // 审计 §1.6 + §2.2：live 面拿不到时会退回磁盘路径 —— 那是**正常**的 lazy-view 形态，
+  // 但「为什么拿不到」以前被扔进没人读的全局变量。现在只在**真的失败**时把它
+  // 拼进 OpsError（成功路径零字符串开销、也不改变任何控制流）。
+  const diag = {}
+  const acq = await acquireSession(targetCtx, sessionId, diag)
   if (acq !== null && acq.session !== undefined) {
     try {
       const session = acq.session
@@ -838,6 +952,20 @@ async function opsCommit(targetCtx, mode, sessionId, seq) {
       const turnStep = { turn: win.turn, step: win.step }
       // 0.5.4（P0）：v4 准入要求 system/message 带正 turn/step——缺字段时持久层
       // encodeEventBatch 的 SessionFormatError 未捕获会**打死整个 dsh 进程**。
+      // 0.26.0（core-d 审计发现的最后一个自噬入口）：
+      // live 路径的 `planDelete/planRevert` 只拿得到 `session.surface.nodes`（没有事件
+      // 本体），因此判不出「目标是不是一条 marker」。磁盘路径的
+      // planDeleteFromEvents/planRevertFromEvents 早已有这道闸，live 路径原先漏了 →
+      // 把 marker 自己当删除目标会写出一条 content 为空的新 replace（自噬 marker）。
+      // 语料实测 40 条空 content 的 system/message replace（3424/3658/3689/3721/
+      // 3746/7252/7524/7525/7526/8954…）全是这么来的。
+      // 这里用 liveEvents（事件本体）补一次同判；判不了（无 liveEvents）就交给
+      // planDelete/planRevert 自己的节点校验（保持原行为，不引入新的拒绝面）。
+      if (liveEvents) {
+        const target = liveEvents.find(e => e && e.seq === seq)
+        if (target && isMarkerEvent(target))
+          throw new OpsError(`seq ${seq} is a revert/delete marker and cannot be a ${mode} target (would create a self-eating marker)`, 409)
+      }
       const plan = mode === 'delete' ? planDelete(session.surface, seq) : planRevert(session.surface, seq)
       const text = mode === 'delete' ? notice : `[消息回滚] 已回滚到 seq ${seq}（含）之后的 ${plan.shadowedSeqs.length} 个节点`
       // 0.8.2：会话 store 命中时走引擎路径 —— 同样要先开合成 turn 窗口，
@@ -889,14 +1017,21 @@ async function opsCommit(targetCtx, mode, sessionId, seq) {
       } catch (err) {
         // 只补闭合**尚未发生**的窗口；已闭合过就绝不再写第二遍。
         closeWindow()
-        throw err
+        throw withResolveDiag(err, diag)
       }
     } finally {
       acq.release()
     }
   }
   // store-miss（lazy-view 只读盘会话）→ 磁盘路径：镜像引擎字段直接追加 zstd 帧
-  const plan = mode === 'delete' ? planDeleteFromEvents(events, seq) : planRevertFromEvents(events, seq)
+  // 审计 §2.2：这条路径的失败（`start seq N not visible on current surface` 等）
+  // 现在带上 diag —— 它正是「live 面也没拿到 + 磁盘面也拒」的最终现场。
+  let plan
+  try {
+    plan = mode === 'delete' ? planDeleteFromEvents(events, seq) : planRevertFromEvents(events, seq)
+  } catch (err) {
+    throw withResolveDiag(err, diag)
+  }
   const text = mode === 'delete' ? notice : `[消息回滚] 已回滚到 seq ${seq}（含）之后的 ${plan.shadowedSeqs.length} 个节点`
   // 0.8.2：磁盘路径同样把 marker 包进合成 turn（裸 zstd 写、零校验，写错就是整份日志报废）
   const baseTime = Date.now()
@@ -957,8 +1092,10 @@ async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq, discard) {
     }
     return { win: window, plan: restorePlan }
   }
+  // 与 opsCommit 同一诊断口径（审计 §1.6）：restore 也走两条面，失败要把原因带上。
+  const diag = {}
   let { win, plan } = buildPlan(events)
-  const acq = await acquireSession(targetCtx, sessionId)
+  const acq = await acquireSession(targetCtx, sessionId, diag)
   if (acq !== null && acq.session !== undefined) {
     // 0.10.8 孤儿护栏（与 opsCommit 同型）：planRestore/进度校验本就在 preamble
     // 之前完成；applyRestore 里的引擎 append 若抛（如 replay 坐标错开），
@@ -991,7 +1128,7 @@ async function opsRestore(targetCtx, sessionId, restoreSeq, upToSeq, discard) {
           /* postamble 被引擎拒：维持原错误上抛 */
         }
       }
-      throw err
+      throw withResolveDiag(err, diag)
     } finally {
       acq.release()
     }
@@ -1258,7 +1395,8 @@ export function apply(ctx) {
     )
 
     // --- GET /api/message-ops/text：单条消息全文（0.5.2 引用按钮按需取） ----------
-    // assistant 消息的 fullText 不在 messages 列表里（载荷控制），quote 点击时单取。
+    // assistant 消息的 fullText 不在 messages 列表里（载荷控制），quote/铅笔点击时单取。
+    // 0.25.0：改走 opsText —— 复用 loadDerived 的派生缓存，不再每次全量重读日志。
     targetCtx.effect(
       () =>
         host.register({
@@ -1271,19 +1409,7 @@ export function apply(ctx) {
               const url = new URL(req.url, 'http://localhost')
               const sessionId = url.searchParams.get('sessionId') || ''
               const seq = Number.parseInt(url.searchParams.get('seq') || '', 10)
-              if (!isSessionId(sessionId)) throw new OpsError('invalid sessionId', 400)
-              if (!Number.isSafeInteger(seq) || seq < 0) throw new OpsError('invalid seq', 400)
-              // seq 0 在日志头里是结构事件区（permission/preset 等，实测恒非消息），
-              // messageText 恒空串；引用按钮不可能引用它，直接 404 而不是 200 {text:""}。
-              if (seq === 0) throw new OpsError('no quotable message at seq 0', 404)
-              const { logPath } = pickSessionDir(sessionId)
-              const { events } = await readSessionFileAsync(logPath)
-              const ev = events.find(e => e && e.seq === seq)
-              if (!ev) throw new OpsError('seq not found', 404)
-              // 0.10.8：宿主会把长文本拆成多段 content（seq 6830 实测 321+7954+20），
-              // 只回首段 = 摘要拦腰截断。messageTextFull 与 messageText 同一条
-              // 「合格 text 段」口径，聚合改为全量拼接。
-              return sendJson(res, 200, { ok: true, seq, text: messageTextFull(ev) })
+              return sendJson(res, 200, { ok: true, seq, text: await opsText(sessionId, seq) })
             } catch (err) {
               return sendJson(res, err instanceof OpsError ? err.status : 500, {
                 ok: false,

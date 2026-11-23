@@ -37,13 +37,16 @@ test('branchIconMarkup 生成的标记必须带 stroke 且 fill:none', () => {
   assert.doesNotMatch(body, /fill="currentColor"/, '描边几何不能用 fill 上色')
 })
 
-test('BranchIcon 组件与 branchIconMarkup 共用 BRANCH_PATH（禁止分叉常量）', () => {
+test('branchIconMarkup 是分叉几何的唯一入口（BranchIcon 组件已删，0.25.0）', () => {
+  // 0.18.0 面板按钮改用 list-pen 后 React 版 BranchIcon 0 处渲染；
+  // 0.25.0 删除组件，只留侧栏菜单用的 innerHTML 工厂 branchIconMarkup。
   assert.match(src, /const BRANCH_PATH\s*=\s*'M5 2\.5/, 'BRANCH_PATH 必须存在且为原始 path')
+  assert.match(src, /const BRANCH_STROKE = 1\.4/, 'BRANCH_STROKE 必须存在（描边几何不能用 fill）')
   assert.doesNotMatch(src, /BRANCH_PATHS/, '旧的分叉常量 BRANCH_PATHS 必须彻底移除')
-  const comp = block('function BranchIcon()')
-  assert.match(comp, /d: BRANCH_PATH/, 'React 组件也要引用同一常量')
+  assert.doesNotMatch(src, /function BranchIcon\(/, 'React 组件 BranchIcon 必须已删（0 处渲染）')
   const markup = block('function branchIconMarkup')
-  assert.ok(markup.includes('BRANCH_PATH'), 'markup 生成器也要引用同一常量')
+  assert.ok(markup.includes('BRANCH_PATH'), 'markup 生成器必须引用唯一常量')
+  assert.ok(markup.includes('BRANCH_STROKE'), 'markup 生成器必须引用唯一描边常量')
 })
 
 test('不得留下 d="undefined" 的隐患：所有拼接 path 的变量都必须已定义', () => {

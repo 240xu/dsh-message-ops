@@ -58,10 +58,10 @@ test('R4：afterWrite 必须传带 session- 前缀的 id 给 openSession', () =>
   const m = src.match(/var afterWrite = \([\s\S]*?\n    \}/)
   assert.ok(m, '找不到 afterWrite')
   assert.ok(
-    /openSession\(rawSid\)/.test(m[0]),
-    'openSession 收到裸 uuid 会抛 `sessions.retain: unknown session`，外层 catch {} 静默 → 视图重建从未生效',
+    /safeOpenSession\(rawSid,/.test(m[0]),
+    'openSession 收到裸 uuid 会抛 `sessions.retain: unknown session` —— 必须传 rawSid，且失败要走 safeOpenSession 的 warn（0.26.0 起不许静默吞）',
   )
-  assert.ok(!/openSession\(bare\)|openSession\(bareSessionId/.test(m[0]), '不得传裸 id')
+  assert.ok(!/safeOpenSession\(bare|openSession\(bare|openSession\(bareSessionId/.test(m[0]), '不得传裸 id')
 })
 
 test('R2：所有 revert 入口都接了 refillComposer', () => {

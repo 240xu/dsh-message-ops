@@ -84,5 +84,7 @@ test('面板分叉不再使用「含该条」的旧边界（atSeq: picked.seq）
 
 test('分叉文案说明「原文已回到输入框」而不是复制到该条为止', () => {
   assert.match(src, /'panel\.branchHint': '[^']*放回新会话输入框'/, '中文 hint 必须写清 before 语义')
-  assert.match(src, /'slot\.forkHint': '[^']*放回新会话输入框'/, '按钮 tooltip 必须写清 before 语义')
+  // 0.25.0：行内分叉（含 slot.forkHint）已删 —— before 语义只由面板 branchHint 承载。
+  assert.doesNotMatch(src, /'slot\.forkHint'/, 'slot.forkHint 应随行内分叉删除')
+  assert.match(src, /'panel\.branchHint': '[^']*放回新会话输入框'/, 'before 语义（原文回新会话输入框）必须仍在面板文案里')
 })

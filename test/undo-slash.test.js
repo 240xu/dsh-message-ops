@@ -18,6 +18,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import { blockAt } from './_source.js'
 
 const bare = (id) => String(id || '').replace(/^session-/, '')
 const pickLastVisible = (rows) => {
@@ -82,7 +83,10 @@ test('[当前判据对照] client.js 藏行判据 = idx.shadowed，本文件 sho
   const src = fs.readFileSync(new URL('../src/client.js', import.meta.url), 'utf8')
   assert.ok(/shouldHide = idx\.shadowed\.has\(hit\.seq\)/.test(src),
     '消息/工具类判据必须是 idx.shadowed（0.9.6）')
-  assert.ok(!/\bfences\b/.test(src.match(/var applySurfaceVisibility = [\s\S]*?\n {6}\};/)?.[0] ?? ''),
+  // 0.25.0（审计 F-8 修）：原写法用 /var applySurfaceVisibility = [\s\S]*?\n {6}\};/ 取函数块，
+  // 但实现是**无分号**的 `}` 结尾，该正则恒不匹配 → `?? ''` 让断言对空串恒真（假绿灯）。
+  // 改成与 test/_source.js 同款的**大括号配平**抽取，再断言真实函数体内无 fences。
+  assert.ok(!/\bfences\b/.test(blockAt(src, 'var applySurfaceVisibility = ') || ''),
     'applySurfaceVisibility 内不得出现 fences（0.9.4 判据已废弃）')
   assert.ok(/r\.seq != null && r\.visible/.test(src),
     'lastRevertable 仍须用 visible 挑「可回滚目标」（与藏行判据是两套语义）')

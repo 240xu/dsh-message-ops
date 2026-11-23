@@ -110,8 +110,10 @@ test('P0-2：afterWrite 只能收带 session- 前缀的 rawSid', () => {
   assert.ok(/const sid = bareSessionId\(rawSid\)/.test(redo[0]), 'POST /restore 仍要裸 uuid')
   // afterWrite 本体的契约（与 composer-refill R4 互补）
   const aw = src.match(/var afterWrite = \([\s\S]*?\n    \}/)
-  assert.ok(aw && /openSession\(rawSid\)/.test(aw[0]))
-  assert.ok(!/openSession\(bare\)|openSession\(bareSessionId/.test(aw[0]))
+  // 0.26.0：afterWrite 里 6 处 `openSession` 吞错统一收敛到 safeOpenSession
+  // （失败必须 warn，不许静默 —— 审计 §2.3）。契约语义不变：**必须传 rawSid（带前缀）**。
+  assert.ok(aw && /safeOpenSession\(rawSid,/.test(aw[0]), 'afterWrite 必须经 safeOpenSession 且传 rawSid（带 session- 前缀）')
+  assert.ok(!/safeOpenSession\(bare|openSession\(bare|openSession\(bareSessionId/.test(aw[0]), '不得传裸 id')
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -147,7 +149,7 @@ test('P0-4：undo/redo 等 10 个 key 两侧都有，且各写各的语言', () 
     'redo.label',
     'redo.desc',
     'slot.revertUnmatched',
-    'dock.shadowedN',
+    'dock.title',
   ]
   const cjk = /[㐀-鿿]/
   for (const k of must) {

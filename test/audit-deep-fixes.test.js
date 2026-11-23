@@ -15,38 +15,15 @@ import { listMessages, messageText, messageTextFull } from '../src/session-file.
 
 const src = readFileSync(new URL('../src/client.js', import.meta.url), 'utf8')
 
-// ── 1 · clipQuote 真执行：抽出函数体跑 grapheme 边界用例 ──────────────────────
-function loadClipQuote() {
-  const at = src.indexOf('const clipQuote = ')
-  assert.ok(at > 0, '找不到 clipQuote')
-  // 连同前置的 graphemes / quoteSegmenter 一起抽
-  const start = src.indexOf('let quoteSegmenter = null', Math.max(0, at - 800))
-  let depth = 0
-  let started = false
-  let end = at
-  for (let i = at; i < src.length; i++) {
-    if (src[i] === '{') { depth++; started = true }
-    else if (src[i] === '}') { depth--; if (started && depth === 0) { end = i + 1; break } }
-  }
-  const body = src.slice(start >= 0 && start < at ? start : at, end)
-  return new Function('QUOTE_MAX_CHARS', body.replace('const clipQuote = ', 'return ') + '\nreturn clipQuote')(600)
-}
-
-test('1 · clipQuote 不拆散 grapheme cluster（真执行）', () => {
-  const clip = loadClipQuote()
-  const family = '👨‍👩‍👧‍👦' // 7 code points, 1 grapheme
-  const out = clip('a'.repeat(599) + family)
-  assert.ok(out.includes(family), '家庭 emoji 必须完整保留，不能被切成 👨‍…')
-  assert.ok(!/👨‍…$/.test(out), '不许留下悬空 ZWJ')
-  assert.ok(out.endsWith(family) || out.endsWith('…'), '尾部要么完整 grapheme 要么省略号')
-})
-
-test('1 · clipQuote 超长纯文本仍按上限截断（真执行）', () => {
-  const clip = loadClipQuote()
-  assert.equal(clip('a'.repeat(600)).length, 600, '恰好 600 不加省略号')
-  const long = clip('a'.repeat(700))
-  assert.ok(long.length <= 601, '超长必须截断')
-  assert.ok(long.endsWith('…'), '截断要带省略号')
+// ── 1 · 0.25.0：clipQuote 已随引用机械删除（真执行锁 → 防复活锁）─────────────
+// 0.22.0 这条锁保护「按 grapheme 切、不拆散家庭 emoji」。0.23.0 起 AI 动作槽
+// return null，0.25.0 把整条引用链路（clipQuote / graphemes / QUOTE_MAX_CHARS）删除 ——
+// 截断现在完全是宿主划词引用的事。真执行没有对象了，改成结构断言防复活。
+test('1 · 0.25.0：clipQuote 已删除，不得复活（引用让位宿主 D-4）', () => {
+  assert.doesNotMatch(src, /const clipQuote = /, 'clipQuote 必须已删')
+  assert.doesNotMatch(src, /const graphemes = raw =>/, 'graphemes 必须已删')
+  assert.doesNotMatch(src, /QUOTE_MAX_CHARS/, '引用长度上限常量必须已删')
+  assert.doesNotMatch(src, /new Intl\.Segmenter\(/, '引用用分段器必须已删')
 })
 
 // ── 2 · fullText 与 /text 同口径（真执行）────────────────────────────────────

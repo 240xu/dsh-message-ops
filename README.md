@@ -1402,3 +1402,131 @@ Lead 逐条复核后落地 3 个修复。汇总见 `design-demos/audit-round-sum
 测试 364（360 pass / 4 skip），新增 4 条跨会话隔离真执行测试（旧实现下会挂）。
 `prettier --check` 全绿，i18n zh/en 115/115 序列一致。
 真机 Chromium：`revert=9 / edit=9 / fork=0`、官方 branch=3、无隐藏。
+
+### 0.26.0 · 第二轮清理与「官方基准」重做（-1050 / +1340 行）
+
+用户诉求：**「继续优化，看看还有多少死代码，还有劣质代码」「最好能够官方化，按照官方基准」**
++ 铅笔的两个具体投诉（「运行时根本无法点击」「UI 上还要复现一遍回车并重发」）。
+5 个专项并行 + Lead 收口，全部改动都以**真执行测试**与**真实 Chromium** 为准。
+
+#### 1. 死代码清理（第二轮）
+
+| 删除项 | 行数/数量 | 依据（先 grep 确认消费方为 0） |
+|---|---|---|
+| AI 消息动作区引用机械（`IconQuote`/`clipQuote`/`graphemes`/`ownerOf`/`selectionInMessage`/`runQuote`/`fullText` effect） | ~300 行 | 0.23.0 起该槽 `return null`，唯一渲染点早已不存在（D-4 让位宿主 `dsh-message-quotes`） |
+| `__seqIndexCache` / `__fullTextCache` / `SEQ_INDEX_EVENT` / `syncSeqIndex` 双索引 | ~90 行 | 唯一读者随引用机械一起删；`refillComposer` 用的是 `rowsCache.rows[*].fullText`，不是这份缓存 |
+| `__inputActions` 全局兜底变量（0.24.0 改 Map 后遗留） | 3 处 | 读取方 0，留着只会让后来者以为还有「最后一次已知」的退路 |
+| `BranchIcon` React 组件 | 22 行 | 0 渲染；`branchIconMarkup()`（侧栏菜单用）保留为分叉几何唯一入口 |
+| 行内分叉 6 组 i18n key（`slot.fork*` / `fork.*` / `toast.openNew`） | zh+en 12 条 | D-5 已让位官方分支；**`slot.forkUnavailable` 保留**（面板 branch 仍在用） |
+| 零消费 key `done.delete` / `action.reload` / `dock.shadowedN` / `edit.done` / `dialog.runningWarn` | zh+en 10 条 | 逐个 grep 计数 = 2（只有 zh/en 定义本身） |
+| `session-file.js` 的 `newSessionId()` 导出 | 5 行 | src/test 全仓 0 引用 |
+
+面板的 `panel.all/user/assistant/tool` 是**活 key** —— 走 `t('panel.' + key)` 动态拼接
+（key 来自代码里写死的 `['all','user','assistant','tool']`），扫描脚本会误报，已记录。
+
+#### 2. 铅笔编辑重做（用户投诉的两条）
+
+**改前**：`shell.overlay` 里的**全屏遮罩 + 居中 560px 模态**，把 composer 的输入框、
+发送按钮、快捷键整套又演了一遍；提交靠 `writeSessionDraft` 写草稿 +
+`8 × 120ms` 轮询等宿主重挂后 `inputActions.submit()`。
+
+**改后**：
+- **无遮罩、贴着那条消息**的 `z-index:60` 浮层。定位用**官方** `useAnchoredPosition`
+  （`margin:12` / `gap:8` 与官方 `Menu` 同值），点外关闭用**官方** `useDismissOnOutsidePointer`。
+  官方 hook 只 clamp **不翻转**，故本层补 `editSeatOf`（纯函数、可真执行）：
+  锚点下方不足 260px 就上翻。宽度跟随消息块（280~560）。
+- 尾巴砍掉：关闭 ×、独立快捷键行、两行长提示 → 一条 `[提示][取消][撤销并发送]`。
+  `edit.replaceHint` 里 D-3 要求的「不是删除 / 原文仍在本地文件」**一字未删**。
+- **发送改走官方面**：`sessions.using(raw, {source:'messageEdit'}, ref => ref.binding.session.prompt([...], 'queue'))`
+  —— `using` 自带 `finally release()`，`prompt` 失败按 `error.code/message` 上抛。
+  成功路径**不再写草稿、不再 setDraft、不再 submit**（那正是「发完输入框还留着同一段字」的根因）。
+- 新增 `stage:'send'`：回撤成功但发送被拒时**不谎报「回撤失败」**（否则会引导用户重试回撤 → 必然 409）。
+  配 `reverted` 短路，同 seq 重试只重发。
+
+**运行态可点性（如实定级）**：用户投诉「运行时铅笔根本无法点击」。实测 138 个采样点
++ 运行中**原生鼠标点击**：0.25 现状**本来就可达**（`disabled=false`、命中铅笔本身、
+编辑框能开），注入从未中断；唯一的空窗是新消息块**拿到 seq 之前**（实测 169ms）。
+「0.24 及更早不可点」**未确证**（缺当时版本号与 DOM 快照）。改动：把「有 seq 就绝不禁用」
+写成红线；`opacity .5 → .82`（不再读成禁用）；运行态信号进 `aria-label`/`data-mops-running`；
+**只有发送按钮**在运行中 disabled 并给出原因。
+
+真实浏览器证据（1100×900）：`gap=8px` / `panelW=560` / 水平重叠 / `z-index:60` /
+无 `mopsErScrim` / Esc 关闭后 `data-chat-node-key` 31→61 不变 / 点外面关闭。
+网络抓包一次完整链路：`POST /api/message-ops/revert {seq}` → `/messages` 刷新 →
+**`POST /api/session/prompt`**（`mode:"queue"`、`content:[{type:"text"}]`），
+**全程无 `inputActions.submit`**，composer 收尾为空。
+
+#### 3. 响应手感（删绕路，不堆补丁）
+
+| 项 | 改前 | 改后 | 实测 |
+|---|---|---|---|
+| 回滚后界面变灰 | 三处各排 `[150,700,1600]` 三连，防抖 1500ms ⇒ 落点钉在 1.6s | 三处改为写后**立即**一次，防抖 **300ms** 尾随 | 真执行：180ms 0 请求 / 400ms 恰 1 请求 ⇒ **~1.6s → ~0.3s** |
+| `runUserRevert` 取数 | `ensureAssign` 后又 `fetchRows` | `.then(cache => cache \|\| fetchRows(sid))` | 命中缓存时 `fetchRows` = 0 次（冷缓存仍补 1 次，保 P0 语义） |
+| `scroll` 触发的 `scan` | 每个 scroll 事件跑 3 次全文档 `querySelectorAll` | rAF 合并（无 rAF 退回 16ms 宏任务） | 同步连发 6 事件 → `scan` 计 1 次 |
+| 面板选一条看详情 | 每条直连 `/text`，无缓存无防抖 | `loadPanelText`：Map 缓存 + 150ms 尾随 + 单飞；`emitChanged` 清表；**失败不缓存** | 回看同条 0 请求；快速划 6 条 6→1 请求 |
+
+#### 4. 服务端绕路（真读盘次数实测）
+
+| 项 | 改前 | 改后 |
+|---|---|---|
+| `/text`（面板/铅笔取全文） | **每次全量重读日志**：547.8ms / 1 次读盘 | 复用 `loadDerived` 的全文索引：**7.5ms / 0 读盘** |
+| `opsSearch` 的语料 | 第二张 `searchCache`（同 key 却各自 stat/失效）⇒「先 /messages 再 /search」必**再读一遍盘** | 并入 `derivedCache`，语料重建 2.0ms：**661.6ms → 3.9ms** |
+| `/messages` 全量浅拷 | — | **评估后不改**（省 0.4ms vs `JSON.stringify` 9.9ms；且会让 compact/full 两套行语义分裂） |
+
+索引取舍按实测定：只索引 `listMessages` 的 3633 行（**+0.37MB**），
+弃「全量 events 文本」变体（+3.39MB × 16 条 LRU = 54MB）。索引挂在
+`WeakMap<derived, Map>` 而非 `derived` 字段（否则破 `Object.keys(derived)` 契约并泄进响应体）。
+
+#### 5. 规划层语义修正（可能的数据损坏风险）
+
+`planRestore` / `restoreProgress` / `buildRestoreIndex` 的候选集从**数值区间**改为
+**该 marker 真正遮蔽的节点集**。实测 session-ab6f marker 1197：数值区间 `89..1191`
+里数值候选 151 条，而宿主遮蔽集只有 `[89, 90, 1191]` —— 旧实现会把 **149 条早已被
+其它 marker 遮蔽的历史消息**当作恢复对象重放出去（恢复的是别人回滚掉的内容）。
+同时修 `planRevert` 的 **node-0 保护面**：头节点是 system prompt 时多节点回滚会被
+宿主整份拒收（实测 243 份日志里 27 个可见头节点回滚目标，旧规划器全部放行 → 全部被拒）。
+
+#### 6. 测试真实性（假绿灯清零）
+
+| 修的假绿灯 | 原状 | 现状 |
+|---|---|---|
+| `test/undo-slash.test.js` 的 fences 断言 | 正则 `\n {6}\};` 恒不匹配 → `?? ''` 对空串**恒真** | 改用 `blockAt` 大括号配平抽取，真判函数体 |
+| i18n 值语义锁 | 只 `doesNotMatch` 反向词；`edit.send → Cancel now` 仍能过 | 正向语义 + 反向词**独立求值**（原来 `else if` 让 weak 短路 banned）；用**伪造字典**自证判据 |
+| `submitEditedText` 双发消息 | 组件调用被 stub，真实函数从未跑过 | 改为官方 `prompt(..., 'queue')` 真执行：**恰一次**、revert 失败零调用 |
+
+新增测试文件 6 个：`dead-code-cleanup`(13) / `perf-handfeel`(17) / `server-text-cache`(10) /
+`contract-hardening`(12) / `ops-core-hardening`(18) / `edit-overlay-anchored`(16)。
+变异验证：6 个动作手感变异 + 5 个服务端变异 + 3 个契约变异 **全部被新测试杀死**。
+
+#### 7. 代码风格与官方化
+
+- `package.json` 的 `dsh.client` 补 `external: ["@deepseek-ai/dsh-client-ui-primitives"]`
+  —— 官方 `client-modules` 的 `orderByModuleGraph` 对 static-table 名字**静默跳过不报错**，
+  这是宿主 shell 的 platform seed，与 `@linxin666/*` 系列插件同一写法。
+- 编辑框定位/关闭/发送全部改走**官方 primitives / 官方 sessions 面**，不再手搓。
+- prettier（`~/.dsh/tmp-mops/pf.json`：2 空格、无分号、单引号、140 列、trailingComma all）：
+  `src/*.js` **全绿**。（`test/` 目录仍有 31 个历史文件不合格式 —— 那是 0.13.0 之前
+  就存在的存量，本轮未动，避免把数十个无关文件混进 diff。）
+
+#### 8. 第二轮死代码审计（audit-f，只读）与其 top-5 落地
+
+用户追加要求「继续优化，看看还有多少死代码，还有劣质代码」。`audit-f` 出只读清单
+（`design-demos/deadcode-lvl2.md`，626 行，gitignored），定级 **P1 × 8 / P2 × 14 /
+P0 × 0（限审计维度）**，预计可减 140~175 行。落地 top-5（另由 Lead 补 5 条真执行锁
+`test/audit-lv2.test.js`）：
+
+| # | 项 | 改前 → 改后 |
+|---|---|---|
+| 1 | `__resolveSource` 纯写不读（1 声明 + 9 赋值，0 读取） | 删进程级变量；原因改随 `diag` 出参进 `withResolveDiag` → **拼进 OpsError 消息**（不改 status、幂等、成功路径零字符串） |
+| 2 | 三套「读响应体 + 校验 + 转文案」写法 | 抽 `readOpsJson` / `errText` / `opsError` 单点 → 写操作 500 **不再只报 `HTTP 500`**，能报出服务端 error 文案 |
+| 3 | 6 处 `openSession` 静默吞错 | 统一 `safeOpenSession(id, where)`，失败**无条件 `console.warn` 带调用点**（原先 5 处 `catch {}` 全吞，`afterWrite` 那处还只在 `__MOPS_DEBUG` 下才 warn） |
+| 4 | `hit.all` / `dupByMessageId` 生产 0 读者（「双索引」第二轮残留） | 删字段 + 同步 `seqOfNodeKey` doc；`test/surface-visibility.test.js` 原来锁的是**手抄副本**（假绿灯），改成真执行面 |
+| 5 | 宿主 CSS module hash 散落 8 处（跨版本最脆依赖） | 抽 `HOST_CLS` 单点常量 + `ensureActionsHost()`；**红线**：`assert.match(src, /xzv4MW_actions/)` 类形状锁同步改成「常量值正确 + 被消费」，否则抽常量后仍绿 → 锁强度悄悄退化 |
+
+第 5 条的红线是本轮实际发生的事：抽 `HOST_CLS` 后立刻有 3 条测试变红（形状锁没跟着改），
+Lead 当场按「锁常量值 + 锁消费点」重写，并补变异验证（把 hash 字面量塞回消费点 → 测试必须红）。
+
+**最终状态**：`npm test` **465 tests / 461 pass / 4 skip / 0 fail**（0.24.0 时是 364）；
+`prettier --check src/*.js` 全绿；i18n zh/en **102/102** 序列一致且 en 无中文；
+真实 Chromium 全链路验证通过（编辑框 gap=8px 贴着消息、无遮罩、Esc 零副作用、
+运行中铅笔可点而发送按钮禁用、官方 `session/prompt` 恰一次）。

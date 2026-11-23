@@ -282,11 +282,6 @@ export function findSessionDirs(sessionId) {
   return found
 }
 
-/** 新建会话 id（与宿主同款 session-<uuid> 拼写）。 */
-export function newSessionId() {
-  return `session-${crypto.randomUUID()}`
-}
-
 /** 从事件流提取消息级列表（user/assistant/system message + tool/call 摘要）。 */
 /**
  * turn 号 → 该 turn 首/末事件 seq 的映射。
