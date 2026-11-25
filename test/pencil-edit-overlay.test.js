@@ -312,7 +312,12 @@ test('5.1 预填文本来自 /text 全文接口', () => {
 test('5.2 只有 ok===true 且 text 是字符串才算 ready；失败禁用发送并可重试', () => {
   const overlay = mustFn(['EditResendOverlay'])
   const o = flat(overlay)
-  assert.match(o, /data\.ok|ok === true|ok !== true/, '必须校验 ok 字段')
+  // 0.26.0：`ok` 校验收单点到 `readOpsJson`（它把 HTTP 状态与 `data.ok` 一起判，
+  // 见客户端顶部注释），因此这里锁**消费**而不是原先的 `data.ok` 字面量
+  // （否则抽单点后这条断言会假红、逼人把重复实现塞回去）。
+  assert.match(o, /readOpsJson/, '必须走 readOpsJson 单点（ok 校验收在那一处）')
+  assert.match(o, /\bif \(!r\.ok\)/, '必须真的按返回的 ok 判失败（不许只看 HTTP 状态）')
+  assert.match(o, /opsError\(/, '失败文案必须走 opsError 单点（带服务端 error，不是裸 HTTP xxx）')
   assert.match(o, /typeof [\w.]*text\s*!==?\s*'string'/, '必须校验 text 是字符串（空串/undefined 不算）')
   assert.match(o, /edit\.loadFail/, '取全文失败要有 edit.loadFail')
   assert.match(o, /edit\.retry/, '取全文失败要有 edit.retry（可重试）')

@@ -214,7 +214,7 @@ function resolveSession(ctx, sessionId, diag) {
  * 引用在 mutation 完成后 release（final reference 触发 teardown，须先 flush）。
  *
  * @param diag - 可选诊断出参 `{ why }`：记录「live 面为什么没拿到」。原先这份
- *   信息写在进程级 `__resolveSource` 里且 **0 读取方**（审计 §1.6）—— 等于每次
+ *   信息写在一个进程级诊断变量里，且**全仓 0 个读取方**（审计 §1.6）—— 等于每次
  *   失败都重新拼一遍字符串却扔进黑洞。现在只由失败路径收集，并真的拼进错误信息。
  */
 async function acquireSession(ctx, sessionId, diag) {
@@ -452,7 +452,7 @@ function pickSessionDir(sessionId) {
 /**
  * 把「live 面为什么没拿到」拼进 OpsError 消息（审计 §1.6 + §2.2）。
  *
- * 背景：0.5.6 排障期把原因拼进进程级 `__resolveSource`，但**全仓 0 个读取方** ——
+ * 背景：0.5.6 排障期把原因拼进一个进程级诊断变量，但**全仓 0 个读取方** ——
  * 于是 404/409 只剩 `not visible on current surface` / `session is running`，
  * 排障者看不到「registry 是属性没读到、还是 get 双变体 miss、还是 retain 被拒」。
  * 现在原因随 `diag` 一路带到失败点，只拼在**错误消息**里：

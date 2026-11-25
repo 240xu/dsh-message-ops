@@ -514,5 +514,3 @@ export async function purgeTrash(ctx, trashId) {
   fs.rmSync(root, { recursive: true, force: true })
   return { ok: true, trashId }
 }
-
-export const _internals = { findAllSessionDirs, readMetadata, stripMetadata, restoreMetadata }

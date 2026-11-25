@@ -1313,11 +1313,12 @@ window.__ModuleLoader__.load({
               headers: { 'content-type': 'application/json' },
               body: JSON.stringify({ sessionId: target.sessionId, seq: picked.seq }),
             })
-            const data = await res.json().catch(() => null)
+            const r = await readOpsJson(res)
             if (sessionRef.current !== actionSid) return
-            if (!res.ok || !data || data.ok !== true) {
-              if (res.status === 409) setTarget(prev => (prev ? { ...prev, running: true } : prev))
-              throw new Error((data && data.error) || 'HTTP ' + res.status)
+            if (!r.ok) {
+              // 409 → 面板立刻切「运行中」（组件语义，留在调用点）
+              if (r.status === 409) setTarget(prev => (prev ? { ...prev, running: true } : prev))
+              throw opsError(r.status, r.data)
             }
             if (mode === 'revert') {
               setMessages(prev => prev.map(m => (m.seq >= picked.seq ? { ...m, shadowed: true, visible: false } : m)))
@@ -1346,7 +1347,7 @@ window.__ModuleLoader__.load({
             }, 650)
           } catch (reason) {
             if (sessionRef.current !== actionSid) return
-            setError(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)))
+            setError(errText(reason, t('errorPrefix')))
           } finally {
             setBusy('')
           }
@@ -1368,11 +1369,11 @@ window.__ModuleLoader__.load({
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ sessionId: target.sessionId, confirmTitle: confirmTitle }),
           })
-          const data = await res.json().catch(() => null)
+          const r = await readOpsJson(res)
           if (sessionRef.current !== actionSid) return
-          if (!res.ok || !data || data.ok !== true) {
-            if (res.status === 409) setTarget(prev => (prev ? { ...prev, running: true } : prev))
-            throw new Error((data && data.error) || 'HTTP ' + res.status)
+          if (!r.ok) {
+            if (r.status === 409) setTarget(prev => (prev ? { ...prev, running: true } : prev))
+            throw opsError(r.status, r.data)
           }
           setConfirmDelete(false)
           setDone(t('panel.deleted'))
@@ -1387,7 +1388,7 @@ window.__ModuleLoader__.load({
           }, 700)
         } catch (reason) {
           if (sessionRef.current !== actionSid) return
-          setDeleteError(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)))
+          setDeleteError(errText(reason, t('errorPrefix')))
         } finally {
           setBusy('')
         }
@@ -1405,8 +1406,8 @@ window.__ModuleLoader__.load({
               headers: { 'content-type': 'application/json' },
               body: JSON.stringify({ trashId }),
             })
-            const data = await res.json().catch(() => null)
-            if (!res.ok || !data || data.ok !== true) throw new Error((data && data.error) || 'HTTP ' + res.status)
+            const r = await readOpsJson(res)
+            if (!r.ok) throw opsError(r.status, r.data)
             setTrash(prev => prev.filter(x => x.trashId !== trashId))
             setDone(t('panel.restored'))
             notifyDone(t('panel.restored'))
@@ -1419,7 +1420,7 @@ window.__ModuleLoader__.load({
               }
             }, 700)
           } catch (reason) {
-            setError(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)))
+            setError(errText(reason, t('errorPrefix')))
           } finally {
             setBusy('')
           }
@@ -1443,14 +1444,14 @@ window.__ModuleLoader__.load({
               headers: { 'content-type': 'application/json' },
               body: JSON.stringify({ trashId }),
             })
-            const data = await res.json().catch(() => null)
-            if (!res.ok || !data || data.ok !== true) throw new Error((data && data.error) || 'HTTP ' + res.status)
+            const r = await readOpsJson(res)
+            if (!r.ok) throw opsError(r.status, r.data)
             setTrash(prev => prev.filter(x => x.trashId !== trashId))
             setPurgeId(null)
             setDone(t('panel.purged'))
             notifyDone(t('panel.purged'))
           } catch (reason) {
-            setError(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)))
+            setError(errText(reason, t('errorPrefix')))
           } finally {
             setBusy('')
           }
@@ -2204,6 +2205,9 @@ window.__ModuleLoader__.load({
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ sessionId, seq }),
           })
+          // ⚠️ 本函数是**可被单独抽取执行**的编排层（contract-hardening 用 new Function
+          // 抽它来断言时序），因此不许依赖模块级 helper —— 这里保留内联读法；
+          // 语义与 readOpsJson 一致：解析失败 = {}，绝不当成「服务端说了什么」。
           data = await res.json().catch(() => null)
         } catch (e) {
           return { ok: false, stage: 'revert', reason: e && e.message ? e.message : String(e) }
@@ -2469,23 +2473,18 @@ window.__ModuleLoader__.load({
         setTextState('loading')
         setLoadError(null)
         fetch('/api/message-ops/text?sessionId=' + encodeURIComponent(sid) + '&seq=' + encodeURIComponent(target.seq))
-          .then(res =>
-            res
-              .json()
-              .catch(() => null)
-              .then(data => ({ res, data })),
-          )
-          .then(({ res, data }) => {
+          .then(readOpsJson)
+          .then(r => {
             if (req !== reqRef.current) return
-            if (!res.ok || !data || data.ok !== true) throw new Error((data && data.error) || 'HTTP ' + res.status)
-            if (typeof data.text !== 'string' || data.text === '') throw new Error(t('slot.editNoText'))
+            if (!r.ok) throw opsError(r.status, r.data)
+            if (typeof r.data.text !== 'string' || r.data.text === '') throw new Error(t('slot.editNoText'))
             // ⚠️ 只认 /text 的全文：绝不拿 160 字 snippet 冒充原文
-            setDraft(data.text)
+            setDraft(r.data.text)
             setTextState('ready')
           })
           .catch(reason => {
             if (req !== reqRef.current) return
-            setLoadError(t('edit.loadFail') + (reason && reason.message ? reason.message : String(reason)))
+            setLoadError(errText(reason, t('edit.loadFail')))
             setTextState('error')
           })
       }, [target, t])
@@ -3146,13 +3145,9 @@ window.__ModuleLoader__.load({
             }),
           )
           .then(async res => {
-            let data = {}
-            try {
-              data = await res.json()
-            } catch {
-              /* keep {} */
-            }
-            if (!res.ok || !data.ok) throw new Error(data.error || 'HTTP ' + res.status)
+            const r = await readOpsJson(res)
+            if (!r.ok) throw opsError(r.status, r.data)
+            const data = r.data
             notifyDone(
               t('done.restore', {
                 n: String(data.restoredCount != null ? data.restoredCount : '?'),
@@ -3174,7 +3169,7 @@ window.__ModuleLoader__.load({
             if (fresh && fresh.ok) setMarkers(activeMarkers(fresh.messages || []))
           })
           .catch(reason => {
-            notifyDone(t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
+            notifyDone(errText(reason, t('errorPrefix')), 'error')
           })
           .finally(() => setRestoring(null))
       }
@@ -3714,13 +3709,8 @@ window.__ModuleLoader__.load({
                 }),
               )
               .then(async res => {
-                let data = {}
-                try {
-                  data = await res.json()
-                } catch {
-                  /* keep {} */
-                }
-                if (!res.ok || !data.ok) throw new Error(data.error || 'HTTP ' + res.status)
+                const r = await readOpsJson(res)
+                if (!r.ok) throw opsError(r.status, r.data)
                 // 0.23.0（深挖）：先回填再报成功，回填失败要让用户知道。
                 // 旧实现先 notifyDone(done.revert) 再 refillComposer 且丢弃返回值 →
                 // 用户看到「已回滚」却拿到空输入框（0.14.0 踩过的同一类静默失败）。
@@ -3740,7 +3730,7 @@ window.__ModuleLoader__.load({
                 if (__refreshSurface) __refreshSurface(sid)
               })
               .catch(reason => {
-                notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
+                notifyDone(errText(reason, __t('errorPrefix')), 'error')
               })
               .finally(() => {
                 btn.disabled = false
@@ -3772,7 +3762,13 @@ window.__ModuleLoader__.load({
        * 现在只有这一处会建行：先到先得，后来的复用同一个 host。
        */
       var ensureActionsHost = block => {
+        // ① 宿主动作行（可见性跟随 hover 显隐，首选）
         let host = block.querySelector('[class*="' + HOST_CLS.actions + '"]')
+        if (host) return { host: host, created: false }
+        // ② **我们上一轮建的兜底行**：必须一起查，否则第二个工厂查不到就再建一行
+        //    （原实现正是这样：`ensureBtn` 建了一行、`ensureEditBtn` 又建一行 →
+        //     同一条消息两排插件按钮，0.16.0「撑裂行高」事故的同一形态）。
+        host = block.querySelector('[class*="mopsUserActionsRow"]')
         if (host) return { host: host, created: false }
         host = document.createElement('div')
         host.className = 'mopsUserActionsRow'
@@ -3848,7 +3844,7 @@ window.__ModuleLoader__.load({
             )
           })
           .catch(reason => {
-            notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error')
+            notifyDone(errText(reason, __t('errorPrefix')), 'error')
           })
           .finally(() => {
             // 0.26.0：收尾交给 syncEnabled 而不是无条件 disabled=false ——
@@ -4418,15 +4414,15 @@ window.__ModuleLoader__.load({
         body: JSON.stringify({ sessionId: sid, seq: target.seq }),
       })
         .then(async res => {
-          const data = await res.json().catch(() => ({}))
-          if (!res.ok || !data.ok) throw new Error(data.error || 'HTTP ' + res.status)
+          const r = await readOpsJson(res)
+          if (!r.ok) throw opsError(r.status, r.data)
           // 0.11.3：立刻把本行标成已遮蔽，否则 afterWrite 的异步刷新窗里
           // 再点一次 /undo 仍会选中同一个 seq → 409。
           markRowsShadowedFrom(target.seq)
           refillComposer(rawSid, target.seq) // 先回填，再重建视图（与对话框一致）
           afterWrite(rawSid, __t('undo.done.undo'))
         })
-        .catch(reason => notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error'))
+        .catch(reason => notifyDone(errText(reason, __t('errorPrefix')), 'error'))
       return true
     }
 
@@ -4455,14 +4451,14 @@ window.__ModuleLoader__.load({
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ sessionId: sid, seq: mk.seq }),
           }).then(async res => {
-            const data = await res.json().catch(() => ({}))
-            if (!res.ok || !data.ok) throw new Error(data.error || 'HTTP ' + res.status)
+            const r = await readOpsJson(res)
+            if (!r.ok) throw opsError(r.status, r.data)
             // afterWrite 契约：rawSid 必须带 session- 前缀（传裸 uuid 会抛
             // `sessions.retain: unknown session` 并被外层 catch 静默吞掉）
             afterWrite(rawSid, __t('undo.done.redo'))
           })
         })
-        .catch(reason => notifyDone(__t('errorPrefix') + (reason && reason.message ? reason.message : String(reason)), 'error'))
+        .catch(reason => notifyDone(errText(reason, __t('errorPrefix')), 'error'))
       return true
     }
 
